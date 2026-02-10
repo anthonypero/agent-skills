@@ -1,6 +1,6 @@
 ---
 name: git-ops
-description: Handles git repository operations including authentication verification, branch management, remote configuration, and commit workflows. Use when user asks to push code, verify authentication, manage branches, configure git settings, check repo ownership, or perform repository operations.
+description: "Git operations agent. Use when user asks to commit, push, pull, merge, rebase, manage branches, configure remotes, verify authentication, check repo ownership, or perform any git/GitHub operation."
 tools: Bash, Read, Grep, Glob
 model: haiku
 color: blue
