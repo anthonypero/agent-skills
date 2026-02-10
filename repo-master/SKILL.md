@@ -1,6 +1,9 @@
 ---
-name: git-ops
+name: repo-master
 description: "Use when the user asks to commit, push, pull, merge, branch, tag, stash, rebase, or perform any git or GitHub operation including creating pull requests, checking status, viewing logs, or managing remotes."
+context: fork
+agent: repo-master
+model: haiku
 ---
 # Git Operations
 
@@ -8,7 +11,7 @@ This skill provides guidance on managing the Git repository and environment for 
 
 ## Agent Delegation
 
-**PRIOR TO TAKING ANY OTHER ACTION, IMMEDIATELY search for a `git-ops` agent** in your environment, and if it exists, delegate all git operation tasks to this agent rather than performing them directly. The agent is configured with the appropriate model and tools for these tasks.
+**PRIOR TO TAKING ANY OTHER ACTION, IMMEDIATELY search for a `repo-master` agent** in your environment, and if it exists, delegate all git operation tasks to this agent rather than performing them directly. The agent is configured with the appropriate model and tools for these tasks.
 
 ## Topic Index
 
