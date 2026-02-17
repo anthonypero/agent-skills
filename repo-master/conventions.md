@@ -1,12 +1,16 @@
-# Commit Messages
+# Conventions
 
-Follow standard conventional commits or the user's preferred simple style:
+## Commit Messages
 
-- `feat: ...`
-- `fix: ...`
-- `docs: ...`
-- `chore: ...`
+Use conventional commit prefixes:
+
+- `feat:` — new feature
+- `fix:` — bug fix
+- `docs:` — documentation only
+- `chore:` — maintenance / tooling
+
+Follow the user's preferred style if it differs from the above.
 
 ## Trailers
 
-Do NOT append a `Co-Authored-By` line or any other AI attribution trailer to commit messages. Keep commits clean with only the message itself.
+Never append `Co-Authored-By` or any other AI attribution trailer. Commit messages contain only the message itself.

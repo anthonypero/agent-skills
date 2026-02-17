@@ -1,25 +1,31 @@
 # Standard Operations
 
+Prefer the `gh` CLI for all GitHub operations. Fall back to raw `git` only when `gh` does not support the operation.
+
+## Creating a Repository
+
+New repositories **must be private by default**. Only create a public repo if the user explicitly requests it.
+
+```bash
+gh repo create <name> --private
+```
+
 ## Cloning a Repository
 
-Since `gh` authentication is now the source of truth, prefer using `gh repo clone` if authenticated.
-
 ```bash
-gh repo clone owner/repo
+gh repo clone <owner>/<repo>
 ```
 
-If you must use `git clone` manually, ensure you are cloning the fork that matches your intended identity.
+## Managing Remotes
 
-## Changing Remote URL
-
-If you need to fix a remote to point to your fork:
+Verify the current remote:
 
 ```bash
-git remote set-url origin git@github.com:YourUsername/repo.git
+git remote get-url origin
 ```
 
-## Checking Connection
+Update if it points to the wrong fork or uses the wrong protocol:
 
 ```bash
-gh auth status
+git remote set-url origin git@github.com:<owner>/<repo>.git
 ```

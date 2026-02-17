@@ -7,15 +7,16 @@ model: haiku
 ---
 # Git Operations
 
-This skill provides guidance on managing the Git repository and environment for the `agents` project.
+**PRIOR TO TAKING ANY OTHER ACTION, IMMEDIATELY search for a `repo-master` agent** in your environment, and if it exists, delegate all git operation tasks to this agent rather than performing them directly.
 
-## Agent Delegation
+## Routing
 
-**PRIOR TO TAKING ANY OTHER ACTION, IMMEDIATELY search for a `repo-master` agent** in your environment, and if it exists, delegate all git operation tasks to this agent rather than performing them directly. The agent is configured with the appropriate model and tools for these tasks.
+Consult the reference file that matches the task:
 
-## Topic Index
+| When you need to...                          | Read                                    |
+|----------------------------------------------|-----------------------------------------|
+| Verify identity or repo ownership            | [authentication.md](authentication.md)  |
+| Run a git/gh command (clone, push, remote…)  | [operations.md](operations.md)          |
+| Write a commit message                       | [conventions.md](conventions.md)        |
 
-- **[Authentication & Identity](authentication.md)**: Logic for verifying repo ownership matches the authenticated user.
-- **[Standard Operations](operations.md)**: Common git tasks like cloning and changing remotes.
-- **[Conventions](conventions.md)**: Commit message standards and best practices.
-
+**Before any operation that writes to a remote** (push, PR create, repo create), complete the identity verification in [authentication.md](authentication.md) first.

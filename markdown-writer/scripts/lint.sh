@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define paths
-SKILL_DIR="$HOME/Projects/skills/markdown-writer"
+SKILL_DIR="$HOME/Projects/custom-skills/skills/markdown-writer"
 CONFIG_SRC="$SKILL_DIR/assets/.markdownlint.json"
 CONFIG_DEST=".markdownlint.json"
 FILE_PATH="$1"
