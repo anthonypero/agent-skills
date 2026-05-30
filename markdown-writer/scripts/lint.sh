@@ -14,16 +14,21 @@ if [ -z "$PROJECT_ROOT" ]; then
     exit 1
 fi
 
-# 1. Check for tool installation in project root
-LOCAL_BIN="$PROJECT_ROOT/node_modules/.bin/markdownlint-cli2"
-
-if [ ! -f "$LOCAL_BIN" ]; then
+# 1. Ensure tooling is installed in the project root
+if [ ! -f "$PROJECT_ROOT/node_modules/.bin/markdownlint-cli2" ]; then
     echo "Installing markdownlint-cli2 in $PROJECT_ROOT..."
     (cd "$PROJECT_ROOT" && npm install markdownlint-cli2 --save-dev --silent)
 fi
 
-# 2. Check for configuration file
-# We check CWD first.
+if [ ! -f "$PROJECT_ROOT/node_modules/.bin/prettier" ]; then
+    echo "Installing prettier in $PROJECT_ROOT..."
+    (cd "$PROJECT_ROOT" && npm install prettier --save-dev --silent)
+fi
+
+MARKDOWNLINT="$PROJECT_ROOT/node_modules/.bin/markdownlint-cli2"
+PRETTIER="$PROJECT_ROOT/node_modules/.bin/prettier"
+
+# 2. Check for a markdownlint config (CWD first); seed the default if absent
 if [ ! -f "$CONFIG_DEST" ]; then
     echo "Initializing .markdownlint.json..."
     if [ -f "$CONFIG_SRC" ]; then
@@ -33,5 +38,11 @@ if [ ! -f "$CONFIG_DEST" ]; then
     fi
 fi
 
-# 3. Run linter
-"$LOCAL_BIN" --fix "$FILE_PATH"
+# 3. Auto-format first, then lint.
+#    Prettier handles what markdownlint --fix cannot (notably table column
+#    alignment / MD060); markdownlint --fix then catches the remaining rules.
+echo "Formatting with Prettier..."
+"$PRETTIER" --write "$FILE_PATH"
+
+echo "Linting with markdownlint-cli2..."
+"$MARKDOWNLINT" --fix "$FILE_PATH"
