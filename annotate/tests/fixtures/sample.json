@@ -1,0 +1,13 @@
+{
+  "name": "annotate",
+  "version": "0.1.0",
+  "user": {
+    "name": "Ada",
+    "roles": ["admin", "dev"]
+  },
+  "items": [
+    { "id": 1, "label": "first" },
+    { "id": 2, "label": "second" }
+  ],
+  "enabled": true
+}

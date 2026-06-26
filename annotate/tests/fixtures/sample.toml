@@ -1,0 +1,15 @@
+name = "annotate"
+version = "0.1.0"
+enabled = true
+
+[user]
+name = "Ada"
+roles = ["admin", "dev"]
+
+[[items]]
+id = 1
+label = "first"
+
+[[items]]
+id = 2
+label = "second"
