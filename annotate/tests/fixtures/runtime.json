@@ -1,0 +1,13 @@
+{
+  "port": 7878,
+  "paths": {
+    "data": "~/.annotate",
+    "extension": "~/.annotate/extension",
+    "profile": "~/.annotate/chrome-profile"
+  },
+  "browser": {
+    "path": "/Users/example/.annotate/chrome-for-testing/chrome",
+    "kind": "cft"
+  },
+  "cftBuildId": "131.0.6778.85"
+}
