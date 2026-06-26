@@ -28,86 +28,17 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawn, execSync } = require('node:child_process');
 
-const PKG_ROOT = path.join(__dirname, '..', '..');
+// Shared CfT + CDP machinery (factored into cdp-harness.js so the T6b image-gate.js EXTENDS
+// the same harness — see that file's header).
+const { PKG_ROOT, sleep, waitFor, findCft, launchCft, connectPage } = require('./cdp-harness.js');
 const { start } = require(path.join(PKG_ROOT, 'server', 'server.js'));
 const { create } = require(path.join(PKG_ROOT, 'server', 'create.js'));
 const P = require(path.join(PKG_ROOT, 'server', 'protocol.js'));
 
-const EXT_DIR = path.join(PKG_ROOT, 'extension');
 const FIXTURE = path.join(PKG_ROOT, 'tests', 'fixtures', 'sample.md');
 const SERVER_PORT = 7991;
 const DEBUG_PORT = 9344;
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function waitFor(label, fn, { timeout = 30000, interval = 200 } = {}) {
-  const deadline = Date.now() + timeout;
-  let last;
-  for (;;) {
-    try {
-      last = await fn();
-      if (last) return last;
-    } catch (e) {
-      last = e;
-    }
-    if (Date.now() >= deadline) throw new Error(`timeout waiting for ${label} (last: ${JSON.stringify(last)})`);
-    await sleep(interval);
-  }
-}
-
-function findCft() {
-  if (process.env.ANNOTATE_CFT && fs.existsSync(process.env.ANNOTATE_CFT)) return process.env.ANNOTATE_CFT;
-  const cache = path.join(PKG_ROOT, '.spike', 'cache');
-  const out = execSync(`find "${cache}" -type f -name 'Google Chrome for Testing' 2>/dev/null | head -1`)
-    .toString()
-    .trim();
-  if (!out) throw new Error(`no Chrome for Testing under ${cache} — run @puppeteer/browsers install chrome@stable`);
-  return out;
-}
-
-// ---- minimal CDP client over the built-in WebSocket --------------------------
-function cdpConnect(wsUrl) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsUrl);
-    const pending = new Map();
-    let nextId = 1;
-    const send = (method, params) =>
-      new Promise((res, rej) => {
-        const id = nextId++;
-        pending.set(id, { res, rej });
-        ws.send(JSON.stringify({ id, method, params: params || {} }));
-      });
-    const evaluate = async (expression) => {
-      const r = await send('Runtime.evaluate', {
-        expression,
-        awaitPromise: true,
-        returnByValue: true,
-      });
-      if (r.exceptionDetails) {
-        throw new Error('eval exception: ' + JSON.stringify(r.exceptionDetails.exception || r.exceptionDetails));
-      }
-      return r.result.value;
-    };
-    ws.addEventListener('open', () => resolve({ ws, send, evaluate, close: () => ws.close() }));
-    ws.addEventListener('error', () => reject(new Error('CDP websocket error: ' + wsUrl)));
-    ws.addEventListener('message', (ev) => {
-      let msg;
-      try {
-        msg = JSON.parse(ev.data);
-      } catch (e) {
-        return;
-      }
-      if (msg.id && pending.has(msg.id)) {
-        const { res, rej } = pending.get(msg.id);
-        pending.delete(msg.id);
-        if (msg.error) rej(new Error(JSON.stringify(msg.error)));
-        else res(msg.result);
-      }
-    });
-  });
-}
 
 async function main() {
   const checks = [];
@@ -133,30 +64,10 @@ async function main() {
     console.log(`server ${srv.url}  round ${round.guid}\nurl ${url}\ncft ${cft}\n`);
 
     // 2. launch CfT + the unpacked extension + remote debugging at the served URL
-    const args = [
-      `--user-data-dir=${profileDir}`,
-      `--load-extension=${EXT_DIR}`,
-      `--disable-extensions-except=${EXT_DIR}`,
-      `--remote-debugging-port=${DEBUG_PORT}`,
-      '--remote-allow-origins=*',
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--no-service-autorun',
-      '--disable-background-networking',
-    ];
-    if (process.env.ANNOTATE_HEADLESS) args.push('--headless=new');
-    args.push(url);
-    child = spawn(cft, args, { stdio: 'ignore' });
+    child = launchCft({ cft, profileDir, debugPort: DEBUG_PORT, url });
 
     // 3. find the page target + connect CDP
-    const target = await waitFor('CfT page target', async () => {
-      const res = await fetch(`http://127.0.0.1:${DEBUG_PORT}/json/list`);
-      const list = await res.json();
-      return list.find((t) => t.type === 'page' && t.url && t.url.indexOf(`/${round.session}/${round.artifact}`) >= 0);
-    });
-    cdp = await cdpConnect(target.webSocketDebuggerUrl);
-    await cdp.send('Page.enable');
-    await cdp.send('Runtime.enable');
+    cdp = await connectPage(DEBUG_PORT, `/${round.session}/${round.artifact}`);
 
     // 4. wait for the content script to initialize (it stamps documentElement)
     await waitFor('content script ready', async () => {

@@ -42,6 +42,9 @@
 
   const doc = document;
   const fetchImpl = typeof fetch !== 'undefined' ? fetch : null;
+  // MV3 content scripts may call a SUBSET of the chrome.* APIs (runtime messaging +
+  // storage). Guarded so this file is inert on a non-extension page / under Node.
+  const chromeApi = typeof chrome !== 'undefined' ? chrome : null;
 
   let ctx = null;
   let feedbackSink = null;
@@ -50,6 +53,10 @@
   let revertTarget = null; // the §5.5 revertTarget; null until the version UI (T6b) sets it
   let submitted = false;
   let lastHeadInfo = null;
+  let imageDetach = null; // image-adapter teardown (image views only)
+  let pollTimer = null; // the auto-advance poll interval (stopped on accept, §6.4)
+  let deferredHead = null; // a new head awaiting in-progress work to clear (preserve-unsent)
+  let screenshotToggle = true; // gated screenshot on/off (chrome.storage.local, default on)
 
   // ---------------------------------------------------------------------------
   // small DOM helpers
@@ -81,7 +88,10 @@
     if (s) s.textContent = msg;
   }
 
-  function chrome() {
+  // NOTE: named chromeBar (NOT chrome) on purpose — a local `chrome()` would hoist and
+  // SHADOW the global `chrome` extension API across this whole module, silently breaking
+  // chromeApi.runtime (screenshot capture) and chromeApi.storage (toggle persistence).
+  function chromeBar() {
     return doc.getElementById('annotate-chrome');
   }
 
@@ -133,6 +143,14 @@
       el('div', { class: 'annotate-actions' }, [
         // Reserved slot for the deferred revert/version dropdown (PRD §6 — seam only in v1).
         el('div', { class: 'annotate-version-slot', title: 'version history (coming soon)', text: 'v ▾' }),
+        // Screenshot capture toggle (§6.4): persistent, default-on, inert on non-visual views.
+        el('button', {
+          class: 'annotate-btn annotate-shot-toggle',
+          type: 'button',
+          title: 'Attach a viewport screenshot on send (visual views only)',
+          onclick: onToggleShot,
+          text: 'Shot: on',
+        }),
         el('button', { class: 'annotate-btn annotate-copy', type: 'button', onclick: onCopy, text: 'Copy' }),
         el('button', { class: 'annotate-btn annotate-expand', type: 'button', onclick: onExpand, text: 'Expand' }),
         el('button', {
@@ -181,6 +199,77 @@
   }
 
   // ---------------------------------------------------------------------------
+  // gated viewport screenshot (§6.4) — content.js -> background.js captureVisibleTab
+  // ---------------------------------------------------------------------------
+
+  // Reflect the toggle state onto the button + a DOM-readable attr (the gate reads it),
+  // and note for the current view whether a capture would actually fire (gating is view-
+  // dependent, so the toggle is shown "inert" on a non-visual view).
+  function reflectShotToggle() {
+    const btn = doc.querySelector('.annotate-shot-toggle');
+    const bar = chromeBar();
+    const view = detectView();
+    const willCapture = A.config.shouldCaptureScreenshot(view.kind, screenshotToggle);
+    if (btn) {
+      btn.textContent = 'Shot: ' + (screenshotToggle ? 'on' : 'off');
+      btn.classList.toggle('annotate-shot-inert', A.config.VISUAL_VIEWS && !A.config.VISUAL_VIEWS.has(view.kind));
+    }
+    if (bar) {
+      bar.setAttribute('data-screenshot', screenshotToggle ? 'on' : 'off');
+      bar.setAttribute('data-screenshot-active', willCapture ? '1' : '0');
+    }
+  }
+
+  function loadShotToggle() {
+    if (!chromeApi || !chromeApi.storage || !chromeApi.storage.local) {
+      reflectShotToggle();
+      return;
+    }
+    try {
+      chromeApi.storage.local.get({ screenshotEnabled: true }, function (items) {
+        if (!(chromeApi.runtime && chromeApi.runtime.lastError) && items) {
+          screenshotToggle = items.screenshotEnabled !== false;
+        }
+        reflectShotToggle();
+      });
+    } catch (e) {
+      reflectShotToggle();
+    }
+  }
+
+  function onToggleShot() {
+    screenshotToggle = !screenshotToggle;
+    if (chromeApi && chromeApi.storage && chromeApi.storage.local) {
+      try {
+        chromeApi.storage.local.set({ screenshotEnabled: screenshotToggle });
+      } catch (e) {
+        /* best-effort persistence */
+      }
+    }
+    reflectShotToggle();
+    setStatus('Screenshot capture ' + (screenshotToggle ? 'on' : 'off'));
+  }
+
+  // Resolve the base64 viewport PNG to attach to the submit bundle, or null when gated off
+  // (non-visual view OR toggle off) or capture is unavailable. Never throws — a failed
+  // capture degrades to no-screenshot, the anchors still submit.
+  async function captureScreenshot() {
+    const view = detectView();
+    if (!A.config.shouldCaptureScreenshot(view.kind, screenshotToggle)) return null;
+    if (!chromeApi || !chromeApi.runtime || !chromeApi.runtime.sendMessage) return null;
+    return new Promise(function (resolve) {
+      try {
+        chromeApi.runtime.sendMessage({ type: 'annotate-capture' }, function (resp) {
+          if (chromeApi.runtime.lastError || !resp || !resp.ok) return resolve(null);
+          resolve(resp.screenshot || null);
+        });
+      } catch (e) {
+        resolve(null);
+      }
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // composer (click/selection -> comment/edit on one anchor)
   // ---------------------------------------------------------------------------
 
@@ -221,6 +310,8 @@
     if (anchor.line != null) card.setAttribute('data-anchor-line', String(anchor.line));
     if (anchor.keyPath != null) card.setAttribute('data-anchor-keypath', anchor.keyPath);
     if (anchor.cell != null) card.setAttribute('data-anchor-cell', anchor.cell);
+    if (anchor.point != null) card.setAttribute('data-anchor-point', JSON.stringify(anchor.point));
+    if (anchor.box != null) card.setAttribute('data-anchor-box', JSON.stringify(anchor.box));
 
     function renderMode() {
       card.setAttribute('data-mode', bubble.type);
@@ -290,6 +381,10 @@
   function addDraft(item) {
     drafts.push(item);
     renderCard(item);
+    // A committed spatial anchor leaves a visible marker over the image (§6.4 image adapter).
+    if (item.anchor && item.anchor.kind === 'spatial' && A.image && A.image.placeMarker) {
+      A.image.placeMarker(doc, item.anchor, root);
+    }
     updateSendCount();
     setStatus(drafts.length + ' annotation' + (drafts.length === 1 ? '' : 's') + ' staged — Send when ready');
   }
@@ -305,6 +400,8 @@
     if (a.line != null) card.setAttribute('data-anchor-line', String(a.line));
     if (a.keyPath != null) card.setAttribute('data-anchor-keypath', a.keyPath);
     if (a.cell != null) card.setAttribute('data-anchor-cell', a.cell);
+    if (a.point != null) card.setAttribute('data-anchor-point', JSON.stringify(a.point));
+    if (a.box != null) card.setAttribute('data-anchor-box', JSON.stringify(a.box));
     card.appendChild(el('div', { class: 'annotate-card-head' }, [
       el('span', { class: 'annotate-card-type', text: item.type }),
       el('span', { class: 'annotate-card-anchor', text: anchorLabel(a) }),
@@ -381,6 +478,18 @@
   function wireInteractions() {
     doc.addEventListener('click', onClick, true);
     doc.addEventListener('mouseup', onMouseUp, false);
+    // Image view (§6.4 leverage order DOM -> code -> image): the dom/code adapters return
+    // null on an image (no source position), so route click/drag here -> §5.2 spatial
+    // anchors. The document-level onClick stays inert on the image (anchorFor -> null).
+    const view = detectView();
+    if (view.kind === 'image' && A.image) {
+      imageDetach = A.image.attach(doc, {
+        root: root,
+        onAnchor: function (anchor, imgEl) {
+          openComposer({ anchor: anchor, element: imgEl, selectedText: '' });
+        },
+      });
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -388,13 +497,16 @@
   // ---------------------------------------------------------------------------
 
   async function send() {
-    const bar = chrome();
+    const bar = chromeBar();
     if (!drafts.length) {
       setStatus('Nothing to send — add an annotation first');
       if (bar) bar.setAttribute('data-last-submit', 'empty');
       return { error: 'empty' };
     }
     setStatus('Sending…');
+    // Gated viewport screenshot (§6.4): captured on a visual view when the toggle is on,
+    // null on a non-visual (source/code/structured) view or when the toggle is off.
+    const screenshot = await captureScreenshot();
     let result;
     try {
       result = await A.submit.submitFeedback({
@@ -405,7 +517,7 @@
           head: ctx.head,
           token: ctx.token,
           revertTarget: revertTarget,
-          screenshot: null, // gated OFF for source/text/code views (§6.4); visual-view capture is T6b
+          screenshot: screenshot, // base64 PNG or null (§5.5); server decodes to <guid>-screenshot.png
         },
         sink: feedbackSink,
       });
@@ -438,7 +550,7 @@
   }
 
   async function accept() {
-    const bar = chrome();
+    const bar = chromeBar();
     setStatus('Accepting…');
     let resp;
     try {
@@ -451,7 +563,9 @@
     if (resp.status === 'accepted') {
       setStatus('Accepted — version finalized');
       if (bar) bar.setAttribute('data-last-accept', 'accepted');
-      doc.body.classList.add('annotate-accepted');
+      // accepted is terminal for this round: mark it and STOP the auto-advance poll now
+      // (deterministic — don't wait for the next /head poll to observe the flip). §6.3/§6.4.
+      reflectStatus('accepted');
     } else if (resp.httpStatus === 409 || resp.error === 'stale-head') {
       setStatus('Cannot accept — the round advanced since you looked');
       if (bar) bar.setAttribute('data-last-accept', 'stale');
@@ -463,8 +577,10 @@
   }
 
   // ---------------------------------------------------------------------------
-  // head auto-advance poll (§6.4) — reloads on a head GUID change, guarding in-progress
-  // work; reflects an in-place pending->submitted/accepted status flip without a reload.
+  // head auto-advance poll (§6.4) — every 1s: load a NEW head, but WARN + PRESERVE any
+  // in-progress (unsent) annotations rather than silently dropping them; reflect an
+  // in-place pending->submitted/accepted status flip without a reload; STOP polling once
+  // the head is accepted (terminal, §6.3).
   // ---------------------------------------------------------------------------
 
   async function pollHead() {
@@ -477,35 +593,96 @@
     if (!info) return;
     lastHeadInfo = info;
     if (info.head && info.head !== ctx.head) {
-      await maybeAdvance(info.head);
+      maybeAdvance(info.head, info.status);
     } else if (info.status && info.status !== 'pending') {
       reflectStatus(info.status);
     }
   }
 
   function reflectStatus(status) {
-    const bar = chrome();
+    const bar = chromeBar();
     if (bar) bar.setAttribute('data-round-status', status);
+    if (status === 'accepted') {
+      doc.body.classList.add('annotate-accepted');
+      stopPolling(); // accepted is terminal for this round — stop the poll (§6.3/§6.4)
+    }
   }
 
-  async function maybeAdvance(newHead) {
-    // Don't silently discard in-progress work (§6.4): warn and hold.
-    if (pending || drafts.length) {
-      setStatus('A new round is available — send or discard your annotations to advance');
-      const bar = chrome();
-      if (bar) bar.setAttribute('data-pending-advance', newHead || '1');
+  function hasUnsentWork() {
+    // Already-submitted work is no longer "unsent" (the round is closed; it cannot be
+    // re-submitted) — so post-submit the tab auto-advances freely. Only an open composer
+    // or un-submitted drafts block the advance (§6.4 preserve-UNSENT, not preserve-sent).
+    if (submitted) return false;
+    return !!(pending || drafts.length);
+  }
+
+  // A new head appeared. If there is unsent in-progress work, DO NOT reload (that would
+  // drop it, §6.4) — surface a persistent warning + a "Discard & view new round" control
+  // and remember the target; otherwise load the new round.
+  function maybeAdvance(newHead, newStatus) {
+    if (hasUnsentWork()) {
+      deferredHead = newHead;
+      warnPendingAdvance(newHead);
       return;
     }
-    // Terminal accepted head: stop here, show the accepted state (§6.3).
-    if (lastHeadInfo && lastHeadInfo.status === 'accepted' && newHead === ctx.head) {
-      reflectStatus('accepted');
-      return;
+    // An accepted new head: load it so the human sees the terminal/accepted state, then the
+    // next poll reflects `accepted` and stops polling.
+    deferredHead = null;
+    root.location.reload();
+    void newStatus;
+  }
+
+  // Render (once) the preserve-unsent warning banner with an explicit discard-and-advance
+  // escape hatch. Idempotent — repeated polls just refresh the target.
+  function warnPendingAdvance(newHead) {
+    const bar = chromeBar();
+    if (bar) bar.setAttribute('data-pending-advance', newHead || '1');
+    setStatus('A newer round is ready — your unsent annotations are preserved. Send them, or discard to advance.');
+    let banner = doc.querySelector('.annotate-advance-warn');
+    if (!banner) {
+      banner = el('div', { class: 'annotate-ui annotate-advance-warn' }, [
+        el('span', {
+          class: 'annotate-advance-msg',
+          text: 'A newer round is ready. Your unsent annotations are kept here.',
+        }),
+        el('button', {
+          class: 'annotate-btn annotate-advance-discard',
+          type: 'button',
+          text: 'Discard & view new round',
+          onclick: function () {
+            discardAndAdvance();
+          },
+        }),
+      ]);
+      doc.body.appendChild(banner);
     }
+  }
+
+  function clearPendingAdvance() {
+    const banner = doc.querySelector('.annotate-advance-warn');
+    if (banner) banner.remove();
+    const bar = chromeBar();
+    if (bar) bar.removeAttribute('data-pending-advance');
+  }
+
+  // Explicit human action: drop the in-progress work and load the deferred new head.
+  function discardAndAdvance() {
+    drafts.length = 0;
+    closeComposer();
+    clearPendingAdvance();
+    deferredHead = null;
     root.location.reload();
   }
 
   function startPolling() {
-    root.setInterval(pollHead, 1000);
+    pollTimer = root.setInterval(pollHead, 1000);
+  }
+
+  function stopPolling() {
+    if (pollTimer != null) {
+      root.clearInterval(pollTimer);
+      pollTimer = null;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -531,6 +708,7 @@
     feedbackSink = A.config.makeFeedbackSink(ctx, fetchImpl);
     A.config.sendHeartbeat(ctx, fetchImpl); // §6.6 load probe (POST /loaded)
     buildChrome();
+    loadShotToggle(); // reflect the persisted toggle + stamp data-screenshot[-active] for THIS view
     wireInteractions();
     startPolling();
     doc.documentElement.setAttribute('data-annotate-ready', '1');

@@ -23,6 +23,23 @@
   // template a non-default port in; served pages never use this (they use location.origin).
   const DEFAULT_ORIGIN = 'http://127.0.0.1:7878';
 
+  // Screenshot gating (§6.4): capture is "gated by what is DISPLAYED, not a per-format
+  // allowlist". A viewport screenshot adds the VISUAL leg only where the snapshot does not
+  // already capture the visual presentation — a rendered visual view (an image, a
+  // Markdown-rendered-to-HTML doc, a live frontend). Source-coordinate views (code, the
+  // structured/CSV data renders) ARE their own faithful record, so they never capture.
+  // (Per the T6b task contract the image view captures; §6.4's prose additionally excludes
+  // images — flagged as a SPEC-GAP in the build log. The task/exit-gate wins here.)
+  const VISUAL_VIEWS = new Set(['image', 'markdown', 'frontend']);
+
+  // shouldCaptureScreenshot(viewKind, toggleOn) -> boolean. The persistent toggle
+  // (chrome.storage.local, default ON) gates ON TOP of the view check; a non-visual view
+  // never captures regardless of the toggle (the toggle is "inert on non-visual views").
+  function shouldCaptureScreenshot(viewKind, toggleOn) {
+    if (!VISUAL_VIEWS.has(viewKind)) return false;
+    return toggleOn !== false; // default-on: only an explicit false suppresses it
+  }
+
   function pickFetch(fetchImpl) {
     if (fetchImpl) return fetchImpl;
     if (typeof fetch !== 'undefined') return fetch;
@@ -166,6 +183,8 @@
   const api = {
     CONFIG_ID,
     DEFAULT_ORIGIN,
+    VISUAL_VIEWS,
+    shouldCaptureScreenshot,
     readPageConfig,
     resolveContext,
     discoverLiveContext,
