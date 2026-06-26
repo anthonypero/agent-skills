@@ -1,0 +1,136 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "feedback.schema.json",
+  "title": "Annotate feedback anchor object",
+  "description": "One entry per annotation in a round's feedback array, and the validator for the POST /feedback anchors[] bundle (tech-requirements §5.2, §5.5). type is comment|edit; anchor matches exactly one kind (and within `source` exactly one sub-field); fields are conditionally required on type.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "type", "anchor"],
+  "properties": {
+    "id": {
+      "description": "Stable within the round; assigned by the extension (a1, a2, ...) and persisted verbatim by the server.",
+      "type": "string"
+    },
+    "type": {
+      "description": "The comment/edit toggle state. comment = intent; edit = literal replacement.",
+      "enum": ["comment", "edit"]
+    },
+    "anchor": {
+      "description": "The region the annotation is bound to. Exactly one of three kinds.",
+      "$ref": "#/definitions/anchor"
+    },
+    "comment": {
+      "description": "Required when type=comment. The intent.",
+      "type": "string"
+    },
+    "original": {
+      "description": "Required when type=edit. The highlighted original span.",
+      "type": "string"
+    },
+    "replacement": {
+      "description": "Required when type=edit. The literal replacement the agent applies.",
+      "type": "string"
+    },
+    "elementContext": {
+      "description": "Optional per-element harvest for live pages (outerHTML + computed styles). Omitted when the agent owns the source.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outerHTML"],
+      "properties": {
+        "outerHTML": { "type": "string" },
+        "computedStyles": { "type": "object" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "comment" } }, "required": ["type"] },
+      "then": { "required": ["comment"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "edit" } }, "required": ["type"] },
+      "then": { "required": ["original", "replacement"] }
+    }
+  ],
+  "definitions": {
+    "anchor": {
+      "type": "object",
+      "oneOf": [
+        { "$ref": "#/definitions/sourceAnchor" },
+        { "$ref": "#/definitions/textAnchor" },
+        { "$ref": "#/definitions/spatialAnchor" }
+      ]
+    },
+    "sourceAnchor": {
+      "description": "kind=source: code & Markdown (line), JSON/YAML/TOML (keyPath), CSV/tabular (cell), notebooks (cellIndex, reserved), sub-line (charRange, reserved). Exactly one sub-field present.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "source" },
+        "line": { "type": "integer" },
+        "keyPath": { "type": "string" },
+        "cell": { "type": "string" },
+        "cellIndex": { "type": "integer" },
+        "charRange": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "minItems": 2,
+          "maxItems": 2
+        }
+      },
+      "oneOf": [
+        { "required": ["line"] },
+        { "required": ["keyPath"] },
+        { "required": ["cell"] },
+        { "required": ["cellIndex"] },
+        { "required": ["charRange"] }
+      ]
+    },
+    "textAnchor": {
+      "description": "kind=text: quote + context, the always-available fallback where positions are lost (PDF, fuzzy docx).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "quote"],
+      "properties": {
+        "kind": { "const": "text" },
+        "quote": { "type": "string" },
+        "context": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "before": { "type": "string" },
+            "after": { "type": "string" }
+          }
+        }
+      }
+    },
+    "spatialAnchor": {
+      "description": "kind=spatial: images, SVG, video/audio. Normalized 0-1 coordinates. Exactly one of point/box/timestamp (timestamp reserved).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "const": "spatial" },
+        "point": {
+          "type": "array",
+          "items": { "type": "number", "minimum": 0, "maximum": 1 },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "box": {
+          "type": "array",
+          "items": { "type": "number", "minimum": 0, "maximum": 1 },
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "timestamp": { "type": "number", "minimum": 0 }
+      },
+      "oneOf": [
+        { "required": ["point"] },
+        { "required": ["box"] },
+        { "required": ["timestamp"] }
+      ]
+    }
+  }
+}

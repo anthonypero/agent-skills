@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "round.schema.json",
+  "title": "Annotate round descriptor",
+  "description": "The single persistent structured entity: <guid>-round.json (tech-requirements §5.1). Created once by the launch script as a `pending` stub; mutated only by the server thereafter. Exactly four fields and no more (§5.1).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source", "snapshot", "status", "feedback"],
+  "properties": {
+    "source": {
+      "description": "Absolute path to the real project file the agent edits (the destination pointer), or null for an unowned live page (§5.1, §5.3).",
+      "type": ["string", "null"]
+    },
+    "snapshot": {
+      "description": "The <guid> whose snapshot this round's feedback is anchored against; null means \"this round's own snapshot\" (resolve as snapshot ?? own_guid). Set to a prior <guid> by the server on revert (§5.4).",
+      "type": ["string", "null"]
+    },
+    "status": {
+      "description": "Lifecycle. pending at creation -> submitted on send -> accepted; also directly pending -> accepted on accept-on-first-look (§5.1).",
+      "enum": ["pending", "submitted", "accepted"]
+    },
+    "feedback": {
+      "description": "All anchor objects from the human's submit, spliced in by the server. Empty at creation.",
+      "type": "array",
+      "items": { "$ref": "feedback.schema.json" }
+    }
+  }
+}

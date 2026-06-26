@@ -1,0 +1,6 @@
+{
+  "id": "a3",
+  "type": "comment",
+  "anchor": { "kind": "spatial", "box": [0.1, 0.2, 0.3, 0.4] },
+  "comment": "tighten this crop"
+}

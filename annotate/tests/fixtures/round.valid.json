@@ -1,0 +1,13 @@
+{
+  "source": "/home/anthony/project/plan.md",
+  "snapshot": "20260626T101500000-a1b2c3d4",
+  "status": "submitted",
+  "feedback": [
+    {
+      "id": "a1",
+      "type": "comment",
+      "anchor": { "kind": "source", "line": 47 },
+      "comment": "this guard clause is unreachable"
+    }
+  ]
+}

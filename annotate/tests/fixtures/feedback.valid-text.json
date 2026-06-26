@@ -1,0 +1,10 @@
+{
+  "id": "a4",
+  "type": "comment",
+  "anchor": {
+    "kind": "text",
+    "quote": "lorem ipsum",
+    "context": { "before": "the ", "after": " dolor" }
+  },
+  "comment": "rephrase this sentence"
+}

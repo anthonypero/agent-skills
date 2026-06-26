@@ -1,0 +1,6 @@
+{
+  "id": "a7",
+  "type": "edit",
+  "anchor": { "kind": "source", "line": 12 },
+  "original": "const x = 1;"
+}

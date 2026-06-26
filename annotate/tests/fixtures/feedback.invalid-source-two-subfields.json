@@ -1,0 +1,6 @@
+{
+  "id": "a6",
+  "type": "comment",
+  "anchor": { "kind": "source", "line": 47, "keyPath": "server.port" },
+  "comment": "source anchor illegally carries two sub-fields (line + keyPath)"
+}

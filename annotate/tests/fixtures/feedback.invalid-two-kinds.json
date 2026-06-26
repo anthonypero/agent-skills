@@ -1,0 +1,6 @@
+{
+  "id": "a5",
+  "type": "comment",
+  "anchor": { "kind": "source", "line": 47, "point": [0.5, 0.5] },
+  "comment": "anchor illegally mixes a source coordinate and a spatial point"
+}

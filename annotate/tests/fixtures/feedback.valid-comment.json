@@ -1,0 +1,6 @@
+{
+  "id": "a1",
+  "type": "comment",
+  "anchor": { "kind": "source", "line": 47 },
+  "comment": "this guard clause is unreachable"
+}

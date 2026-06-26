@@ -1,0 +1,12 @@
+# Node dependencies
+node_modules/
+
+# Environment spike (throwaway; never committed — incl. its large cache/ + chrome-profile/)
+.spike/
+
+# Logs
+npm-debug.log*
+*.log
+
+# OS / editor cruft
+.DS_Store

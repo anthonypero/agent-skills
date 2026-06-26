@@ -1,0 +1,24 @@
+{
+  "name": "annotate",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Contextual-review skill for command-line agents on the Agent Skills open standard: anchor comments/edits to regions of an arbitrary artifact in the browser, then serialize the anchors back to the agent over a filesystem feedback loop.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "annotate": "bin/annotate"
+  },
+  "scripts": {
+    "test": "node --test \"tests/**/*.test.js\""
+  },
+  "dependencies": {
+    "@puppeteer/browsers": "^2.0.0",
+    "highlight.js": "^11.0.0",
+    "markdown-it": "^14.0.0"
+  },
+  "devDependencies": {
+    "ajv": "^8.0.0"
+  }
+}
