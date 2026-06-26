@@ -1,0 +1,286 @@
+#!/bin/sh
+# annotate — POSIX `sh` launch entrypoint (tech-requirements §6.1).
+#
+# The fat, harness-facing blocking subprocess. Owns mode + timeout; snapshots the
+# artifact + writes the one round stub (via the Node helper, §2.2/§3), starts the
+# lazy-singleton server (§6.1 step 6), opens the provisioned browser (§6.1 step 7),
+# then blocks/polls and prints the return bundle {source,snapshot,feedback} on STDOUT
+# (§6.1 step 8). Every diagnostic goes to STDERR so STDOUT carries ONLY the bundle.
+#
+# Usage:
+#   annotate <artifact-path|url> [--wait|--no-wait] [--timeout <dur>] \
+#            [--as-code|--as-frontend] [--session <id>] [--no-open]
+#   annotate poll <session>/<artifact> [--timeout <dur>]
+#
+# <dur> is seconds, or <N>s / <N>m / <N>h (default 5m).
+#
+# Test/automation seams:
+#   ANNOTATE_RUNTIME   path to runtime.json   (default: $HOME/.annotate/runtime.json)
+#   ANNOTATE_OPEN_CMD  command run INSTEAD of the real browser; receives the URL as its
+#                      last arg (lets a headless gate observe the URL + render mode)
+#   --no-open          skip the browser-open step entirely
+#   ANNOTATE_NODE      node binary (default: node)
+
+usage() {
+  cat >&2 <<'USAGE'
+usage:
+  annotate <artifact-path|url> [--wait|--no-wait] [--timeout <dur>] \
+           [--as-code|--as-frontend] [--session <id>] [--no-open]
+  annotate poll <session>/<artifact> [--timeout <dur>]
+USAGE
+}
+
+# --- locate the package root (resolve $0 through symlinks) -------------------
+target=$0
+while [ -L "$target" ]; do
+  link=$(readlink -- "$target" 2>/dev/null) || break
+  case "$link" in
+    /*) target=$link ;;
+    *) target=$(dirname -- "$target")/$link ;;
+  esac
+done
+BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$target")" && pwd) || exit 1
+PKG_ROOT=$(CDPATH= cd -- "$BIN_DIR/.." && pwd) || exit 1
+LAUNCH_JS="$PKG_ROOT/server/launch.js"
+SERVER_JS="$PKG_ROOT/server/server.js"
+
+NODE=${ANNOTATE_NODE:-node}
+RUNTIME=${ANNOTATE_RUNTIME:-$HOME/.annotate/runtime.json}
+
+# --- defaults ---------------------------------------------------------------
+SUBCMD=""
+MODE="wait"          # block by default (§6.1)
+TIMEOUT="5m"         # default 5 minutes (§6.1)
+RENDER=""            # render-as-code | render-as-frontend (URL ?render=, §6.1 step 3)
+SESSION=""
+NO_OPEN=0
+INTERVAL=1
+POSI=""
+
+# poll is a leading subcommand, not a flag
+if [ "${1:-}" = "poll" ]; then
+  SUBCMD=poll
+  shift
+fi
+
+# --- parse args -------------------------------------------------------------
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --wait) MODE=wait ;;
+    --no-wait) MODE=nowait ;;
+    --timeout) shift; TIMEOUT=${1:-} ;;
+    --timeout=*) TIMEOUT=${1#*=} ;;
+    --as-code) RENDER=render-as-code ;;
+    --as-frontend) RENDER=render-as-frontend ;;
+    --session) shift; SESSION=${1:-} ;;
+    --session=*) SESSION=${1#*=} ;;
+    --runtime) shift; RUNTIME=${1:-} ;;
+    --runtime=*) RUNTIME=${1#*=} ;;
+    --interval) shift; INTERVAL=${1:-} ;;
+    --interval=*) INTERVAL=${1#*=} ;;
+    --no-open) NO_OPEN=1 ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    -*) echo "annotate: unknown option: $1" >&2; usage; exit 64 ;;
+    *) if [ -z "$POSI" ]; then POSI=$1; else echo "annotate: unexpected argument: $1" >&2; exit 64; fi ;;
+  esac
+  shift
+done
+# trailing positionals after `--`
+while [ "$#" -gt 0 ]; do
+  if [ -z "$POSI" ]; then POSI=$1; else echo "annotate: unexpected argument: $1" >&2; exit 64; fi
+  shift
+done
+
+if [ -z "$POSI" ]; then
+  echo "annotate: missing artifact path/url${SUBCMD:+ or <session>/<artifact>}" >&2
+  usage
+  exit 64
+fi
+
+# --- duration -> seconds ----------------------------------------------------
+parse_seconds() {
+  v=$1
+  case "$v" in
+    *h) n=${v%h}; printf '%s' "$((n * 3600))" ;;
+    *m) n=${v%m}; printf '%s' "$((n * 60))" ;;
+    *s) n=${v%s}; printf '%s' "$((n))" ;;
+    *) printf '%s' "$((v))" ;;
+  esac
+}
+TIMEOUT_SECS=$(parse_seconds "$TIMEOUT" 2>/dev/null) || TIMEOUT_SECS=300
+[ -n "$TIMEOUT_SECS" ] || TIMEOUT_SECS=300
+
+# --- read runtime config (port, dataDir, browser, profile, extension) -------
+read_config() {
+  cfg=$("$NODE" "$LAUNCH_JS" config --runtime "$RUNTIME") || {
+    echo "annotate: failed to read runtime config ($RUNTIME)" >&2
+    exit 1
+  }
+  # fixed order: port, dataDir, extension, profile, browserPath, browserKind, "."(sentinel)
+  {
+    IFS= read -r CFG_PORT
+    IFS= read -r CFG_DATADIR
+    IFS= read -r CFG_EXT
+    IFS= read -r CFG_PROFILE
+    IFS= read -r CFG_BROWSER_PATH
+    IFS= read -r CFG_BROWSER_KIND
+    IFS= read -r _cfg_sentinel
+  } <<EOF
+$cfg
+EOF
+}
+
+# --- lazy-singleton server (§6.1 step 6) ------------------------------------
+ensure_server() {
+  "$NODE" "$LAUNCH_JS" serverup --port "$CFG_PORT"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "annotate: server already running on port $CFG_PORT (reusing)" >&2
+    return 0
+  elif [ "$rc" -ne 4 ]; then
+    echo "annotate: port $CFG_PORT is held by a non-annotate process; aborting" >&2
+    exit 69
+  fi
+
+  mkdir -p "$CFG_DATADIR" 2>/dev/null || true
+  LOG="$CFG_DATADIR/server.log"
+  nohup "$NODE" "$SERVER_JS" "$RUNTIME" >>"$LOG" 2>&1 </dev/null &
+  SERVER_PID=$!
+  echo "$SERVER_PID" >"$CFG_DATADIR/server.pid" 2>/dev/null || true
+
+  i=0
+  while [ "$i" -lt 50 ]; do          # ~10s readiness budget
+    if "$NODE" "$LAUNCH_JS" serverup --port "$CFG_PORT"; then
+      echo "annotate: started server (pid $SERVER_PID) on port $CFG_PORT" >&2
+      return 0
+    fi
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+      echo "annotate: server failed to start; see $LOG" >&2
+      exit 70
+    fi
+    i=$((i + 1))
+    sleep 0.2
+  done
+  echo "annotate: server did not become ready; see $LOG" >&2
+  exit 70
+}
+
+# --- browser open (§6.1 step 7) — injectable for headless gates -------------
+open_browser() {
+  url=$1
+  # Assemble + surface the real CfT/Chromium invocation (S0) regardless, so T7 can
+  # verify it even when the actual launch is stubbed.
+  real_cmd="\"$CFG_BROWSER_PATH\" --user-data-dir=\"$CFG_PROFILE\" --load-extension=\"$CFG_EXT\" --disable-extensions-except=\"$CFG_EXT\" --no-first-run --no-default-browser-check \"$url\""
+  echo "annotate: browser invocation: $real_cmd" >&2
+
+  if [ "$NO_OPEN" -eq 1 ]; then
+    echo "annotate: --no-open set; skipping browser launch" >&2
+    return 0
+  fi
+  if [ -n "${ANNOTATE_OPEN_CMD:-}" ]; then
+    # shellcheck disable=SC2086  # intentional word-split of the injected command
+    $ANNOTATE_OPEN_CMD "$url" >/dev/null 2>&1 &
+    echo "annotate: opened via ANNOTATE_OPEN_CMD" >&2
+    return 0
+  fi
+  if [ -z "$CFG_BROWSER_PATH" ] || [ ! -e "$CFG_BROWSER_PATH" ]; then
+    echo "annotate: no usable browser in runtime.json; open $url manually" >&2
+    return 0
+  fi
+  "$CFG_BROWSER_PATH" --user-data-dir="$CFG_PROFILE" --load-extension="$CFG_EXT" \
+    --disable-extensions-except="$CFG_EXT" --no-first-run --no-default-browser-check "$url" \
+    >/dev/null 2>&1 &
+  echo "annotate: opened browser (pid $!)" >&2
+}
+
+# ===========================================================================
+# poll — block on the CURRENT head, mint NOTHING (§6.1 deferred-poll)
+# ===========================================================================
+if [ "$SUBCMD" = poll ]; then
+  case "$POSI" in
+    */*) ;;
+    *) echo "annotate poll: expected <session>/<artifact>" >&2; exit 64 ;;
+  esac
+  PS=${POSI%%/*}
+  PA=${POSI#*/}
+  [ -n "$PS" ] && [ -n "$PA" ] || { echo "annotate poll: expected <session>/<artifact>" >&2; exit 64; }
+
+  read_config
+  ensure_server
+  "$NODE" "$LAUNCH_JS" wait --data-dir "$CFG_DATADIR" --session "$PS" --artifact "$PA" \
+    --timeout "$TIMEOUT_SECS" --interval "$INTERVAL"
+  rc=$?
+  if [ "$rc" -eq 124 ]; then
+    echo "annotate: review still open; re-run to collect feedback" >&2
+    exit 3
+  fi
+  exit "$rc"
+fi
+
+# ===========================================================================
+# launch — create a round, open it, block (--wait) or fire-and-forget (--no-wait)
+# ===========================================================================
+case "$POSI" in
+  http://*|https://*) IS_URL=1; SRC_FLAG="--url" ;;
+  *) IS_URL=0; SRC_FLAG="--source" ;;
+esac
+
+read_config
+
+# Artifact-missing -> exit non-zero BEFORE any folder creation (§6.1 error case).
+if [ "$IS_URL" -eq 0 ] && [ ! -f "$POSI" ]; then
+  echo "annotate: artifact not found: $POSI" >&2
+  exit 66
+fi
+
+# The ONE creation write: snapshot byte-copy + 4-field pending stub (§2.2, §5.1).
+if [ -n "$SESSION" ]; then
+  created=$("$NODE" "$LAUNCH_JS" create --data-dir "$CFG_DATADIR" "$SRC_FLAG" "$POSI" --session "$SESSION")
+else
+  created=$("$NODE" "$LAUNCH_JS" create --data-dir "$CFG_DATADIR" "$SRC_FLAG" "$POSI")
+fi
+[ $? -eq 0 ] || { echo "annotate: failed to create round" >&2; exit 1; }
+{
+  IFS= read -r A_SESSION
+  IFS= read -r A_ARTIFACT
+  IFS= read -r A_GUID
+  IFS= read -r A_ROUNDFILE
+  IFS= read -r A_ROUNDDIR
+  IFS= read -r A_SNAPSHOT
+  IFS= read -r A_SOURCE
+  IFS= read -r A_TOKEN
+  IFS= read -r A_DATADIR
+  IFS= read -r _a_sentinel
+} <<EOF
+$created
+EOF
+
+ensure_server
+
+# Build the open URL. For a file artifact the server serves /<session>/<artifact>
+# (render mode rides in ?render= — the descriptor has no render field, §6.1 step 3).
+# For a live page the browser opens the live URL directly (the extension resolves the
+# round via the launch-registered URL map, §6.4).
+if [ "$IS_URL" -eq 1 ]; then
+  OPEN_URL=$POSI
+else
+  OPEN_URL="http://127.0.0.1:$CFG_PORT/$A_SESSION/$A_ARTIFACT"
+  [ -n "$RENDER" ] && OPEN_URL="$OPEN_URL?render=$RENDER"
+fi
+open_browser "$OPEN_URL"
+
+if [ "$MODE" = nowait ]; then
+  echo "annotate: opened $OPEN_URL (no-wait) — collect later with: annotate poll $A_SESSION/$A_ARTIFACT" >&2
+  exit 0
+fi
+
+# --wait: block until the submit lands on OUR round, print {source,snapshot,feedback}.
+"$NODE" "$LAUNCH_JS" wait --data-dir "$CFG_DATADIR" --session "$A_SESSION" --artifact "$A_ARTIFACT" \
+  --guid "$A_GUID" --timeout "$TIMEOUT_SECS" --interval "$INTERVAL"
+rc=$?
+if [ "$rc" -eq 124 ]; then
+  echo "annotate: review still open; re-run to collect feedback" >&2
+  exit 3
+fi
+exit "$rc"
