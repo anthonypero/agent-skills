@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Annotate",
+  "version": "0.1.0",
+  "description": "Anchor comments and edits to regions of a rendered artifact and submit them to the local annotate server (Agent Skills contextual-review skill).",
+  "minimum_chrome_version": "110",
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://127.0.0.1/*", "http://localhost/*"],
+      "js": [
+        "config.js",
+        "adapters/dom.js",
+        "adapters/code.js",
+        "bubble.js",
+        "submit.js",
+        "content.js"
+      ],
+      "css": ["ui.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

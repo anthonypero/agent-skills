@@ -172,6 +172,30 @@ function wrapDocument(inner) {
   );
 }
 
+// Config injection (§6.4 "server discovery / config acquisition" — the T6a integration
+// crux). The content script runs in an MV3 ISOLATED world (shares the DOM, not the page's
+// JS globals), so config is delivered as a DOM-readable JSON <script> the content script
+// reads via document.getElementById('annotate-config').textContent.
+//
+// SECURITY (preserves §6.3): the per-session token is embedded ONLY in pages served from
+// the loopback origin for that session. A cross-origin attacker (evil.com) cannot READ the
+// body of a cross-origin GET to our loopback server (same-origin policy makes the response
+// opaque — no CORS headers are sent), so the token is exposed only to same-origin loopback
+// clients (the extension), which are exactly the trusted ones. The Origin/Host/token checks
+// on the mutation routes are UNCHANGED — this only delivers the token §5.5 already says is
+// "carried in the URL or an X-Annotate-Token header" to its legitimate same-origin holder.
+function configScript(cfg) {
+  // Escape `<` so the JSON can never break out of the <script> element.
+  const json = JSON.stringify(cfg).replace(/</g, '\\u003c');
+  return `<script type="application/json" id="annotate-config">${json}</script>`;
+}
+
+function injectIntoDoc(html, tag) {
+  if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${tag}</body>`);
+  if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${tag}</head>`);
+  return html + tag;
+}
+
 function renderHeadPage(dataDir, session, artifact, query) {
   const aDir = P.artifactDir(dataDir, session, artifact);
   const head = P.resolveHead(aDir);
@@ -180,13 +204,19 @@ function renderHeadPage(dataDir, session, artifact, query) {
   const rDir = path.join(aDir, head);
   const snapPath = P.findSnapshot(rDir, head);
 
+  // The content-script config (§6.4): session/artifact/head + the per-session token the
+  // extension carries on its mutation POSTs (§5.5). Read server-side; injected DOM-readable.
+  const token = P.readToken(P.sessionDir(dataDir, session)) || '';
+  const cfgTag = configScript({ session, artifact, head, token });
+
   // Live page (no byte-copy snapshot, §5.3): serve a minimal attach placeholder.
   if (!snapPath) {
     return {
       code: 200,
       html: wrapDocument(
         `<div class="annotate-live" data-session="${session}" data-artifact="${artifact}" data-head="${head}">` +
-          '<p>annotate: live-page round (no snapshot file). The extension attaches in place.</p></div>'
+          '<p>annotate: live-page round (no snapshot file). The extension attaches in place.</p></div>' +
+          cfgTag
       ),
     };
   }
@@ -201,7 +231,8 @@ function renderHeadPage(dataDir, session, artifact, query) {
       code: 200,
       html: wrapDocument(
         `<div class="annotate-render annotate-image"><img src="${src}" alt="annotate snapshot" ` +
-          `data-head="${head}" style="max-width:100%;height:auto"></div>`
+          `data-head="${head}" style="max-width:100%;height:auto"></div>` +
+          cfgTag
       ),
     };
   }
@@ -212,9 +243,13 @@ function renderHeadPage(dataDir, session, artifact, query) {
   const renderMode = query.get('render') || undefined;
   const { html } = render(snapPath, renderMode);
   if (renderMode === 'render-as-frontend') {
-    return { code: 200, html }; // pass-through: a full HTML doc the browser executes
+    // pass-through: a full HTML doc the browser executes; weave config into the doc.
+    return { code: 200, html: injectIntoDoc(html, cfgTag) };
   }
-  return { code: 200, html: wrapDocument(`<div class="annotate-target" data-head="${head}">${html}</div>`) };
+  return {
+    code: 200,
+    html: wrapDocument(`<div class="annotate-target" data-head="${head}">${html}</div>${cfgTag}`),
+  };
 }
 
 // ---------------------------------------------------------------------------
