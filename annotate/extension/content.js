@@ -127,6 +127,18 @@
   const ICON_CARET_DOWN =
     '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
     '<path fill="currentColor" d="M320 393.4L331.3 382.1L523.3 190.1L500.7 167.4L320 348L139.3 167.4L116.7 190.1L308.7 382.1L320 393.4z"/></svg>';
+  // §L semantic chrome-action icons (Sharp Light, fill=currentColor so the active FILL just
+  // recolors the glyph): a check for Accept (green), a paper-plane for Send (orange) and a
+  // trash can for the new Clear (red). Authored on the same 640 grid as the icons above.
+  const ICON_CHECK =
+    '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
+    '<path fill="currentColor" d="M494 176L256 420L144 306L122 328L256 458L517 197L494 176z"/></svg>';
+  const ICON_PAPER_PLANE =
+    '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
+    '<path fill="currentColor" d="M544 96L96 304L288 352L336 544L544 96z"/></svg>';
+  const ICON_TRASH =
+    '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
+    '<path fill="currentColor" d="M268 160L268 128L372 128L372 160L356 160L356 144L284 144L284 160L268 160zM120 162L520 162L520 192L120 192L120 162zM170 212L196 540L444 540L470 212L170 212z"/></svg>';
 
   // ---------------------------------------------------------------------------
   // small DOM helpers
@@ -165,6 +177,16 @@
   function setStatus(msg) {
     const s = doc.querySelector('.annotate-status');
     if (s) s.textContent = msg;
+  }
+
+  // §L hover labels: every chrome button surfaces its name as a styled tooltip on hover
+  // (the CSS `.annotate-btn[data-label]:hover::after` reads data-label). Set data-label AND
+  // aria-label together so the visible tooltip and the accessible name stay in sync. We do
+  // NOT set `title` on these (a native tooltip would double up with the styled one).
+  function setBtnLabel(btn, text) {
+    if (!btn) return;
+    btn.setAttribute('data-label', text);
+    btn.setAttribute('aria-label', text);
   }
 
   // NOTE: named chromeBar (NOT chrome) on purpose — a local `chrome()` would hoist and
@@ -368,19 +390,27 @@
     // ALL THREE presets (compact -> wide -> full -> compact) and shows the icon for the current
     // state (compress / expand / arrows-left-right-to-line). Inert (full-bleed) on
     // code/image/wide-table.
+    // §L: the width control is a non-semantic interactive button — its hover-outline + active
+    // FILL use the unified blue accent. Where the width feature applies (markdown) it is a
+    // PERSISTENTLY-engaged control (§2: "its active mode reads as a FILL; KEEP that selected-
+    // state indication") so it carries .annotate-active (blue fill) and the icon shows WHICH
+    // preset; on non-prose views it is inert (full-bleed), greyed and not filled.
     const widthBtn = el('button', {
-      class: 'annotate-btn annotate-width annotate-icon-btn' + (widthApplies ? '' : ' annotate-btn-inert'),
+      class: 'annotate-btn annotate-width annotate-icon-btn' +
+        (widthApplies ? ' annotate-active' : ' annotate-btn-inert'),
       type: 'button',
-      title: widthApplies ? widthTitle() : 'Reading width (full-bleed for this view)',
+      'data-label': widthApplies ? widthTitle() : 'Reading width (full-bleed for this view)',
+      'aria-label': widthApplies ? widthTitle() : 'Reading width (full-bleed for this view)',
       onclick: onCycleWidth,
     }, [svgIcon(WIDTH_ICONS[widthPreset])]);
 
-    // §F #4: screenshot toggle = the CAMERA ICON ONLY (no "Screenshot" word); brighter blue
-    // when active (reflectShotToggle).
+    // §F #4 + §L: screenshot toggle = the CAMERA ICON ONLY (no "Screenshot" word); the active
+    // (on) state is the unified-blue FILL (reflectShotToggle), with a hover label.
     const shotBtn = el('button', {
       class: 'annotate-btn annotate-shot-toggle annotate-icon-btn',
       type: 'button',
-      title: 'Attach a viewport screenshot on send (visual views only)',
+      'data-label': 'Attach a viewport screenshot on send (visual views only)',
+      'aria-label': 'Attach a viewport screenshot on send (visual views only)',
       onclick: onToggleShot,
     }, [svgIcon(ICON_CAMERA)]);
 
@@ -391,29 +421,47 @@
     const sidebarBtn = el('button', {
       class: 'annotate-btn annotate-sidebar-toggle annotate-icon-btn',
       type: 'button',
-      title: 'Toggle the comment sidebar',
+      'data-label': 'Toggle the comment sidebar',
+      'aria-label': 'Toggle the comment sidebar',
       'aria-pressed': 'false',
       onclick: function () { toggleSidebar(); },
     }, [svgIcon(ICON_COMMENT)]);
 
+    // §L: the NEW Clear control — RED trash icon, ICON-ONLY, shown only while UNSENT drafts are
+    // staged (reflectActionEmphasis toggles .annotate-clear-hidden). Clears every staged draft
+    // after a native confirm (same mechanism as the §G Accept guard). Starts hidden.
+    const clearBtn = el('button', {
+      class: 'annotate-btn annotate-clear annotate-icon-btn annotate-clear-hidden',
+      type: 'button',
+      'data-label': 'Clear staged comments',
+      'aria-label': 'Clear staged comments',
+      onclick: function () { clearDrafts(); },
+    }, [svgIcon(ICON_TRASH)]);
+
+    // §L: Accept + Send are now ICON + hover-label (green check / orange paper-plane) like the
+    // rest of the chrome; reflectActionEmphasis drives their semantic lit/muted state. The
+    // class names + click handlers + result attributes are UNCHANGED (gate contract).
     const actions = [
       // Reserved slot for the deferred revert/version dropdown (PRD §6 — seam only in v1).
       el('div', { class: 'annotate-version-slot', title: 'version history (coming soon)', text: 'v ▾' }),
       sidebarBtn,
       widthBtn,
       shotBtn,
+      clearBtn,
       el('button', {
-        class: 'annotate-btn annotate-send',
+        class: 'annotate-btn annotate-send annotate-icon-btn',
         type: 'button',
+        'data-label': 'Send feedback (0)',
+        'aria-label': 'Send feedback (0)',
         onclick: function () { send(); },
-        text: 'Send feedback (0)',
-      }),
+      }, [svgIcon(ICON_PAPER_PLANE)]),
       el('button', {
-        class: 'annotate-btn annotate-primary annotate-accept',
+        class: 'annotate-btn annotate-accept annotate-icon-btn',
         type: 'button',
+        'data-label': 'Accept',
+        'aria-label': 'Accept',
         onclick: function () { accept(); },
-        text: 'Accept',
-      }),
+      }, [svgIcon(ICON_CHECK)]),
     ].filter(Boolean);
 
     const bar = el('div', { id: 'annotate-chrome', class: 'annotate-ui annotate-chrome' }, [
@@ -451,32 +499,73 @@
     reflectActionEmphasis(); // §G.1: initial Accept/Send emphasis (Accept primary while empty)
   }
 
+  // The send count now lives in the Send button's hover label (it is icon-only, §L) — never
+  // textContent (that would wipe the inline SVG, the same trap noted for the camera toggle).
+  // reflectActionEmphasis() writes the label + drives the semantic lit/muted scheme.
   function updateSendCount() {
-    const b = doc.querySelector('.annotate-send');
-    if (b) b.textContent = 'Send feedback (' + drafts.length + ')';
     reflectActionEmphasis();
   }
 
-  // §G.1: Accept is the PRIMARY action ONLY when nothing unsent is staged. While there are
-  // unsent staged comments, Send becomes primary and Accept is de-emphasized (+ accept()
-  // requires an explicit confirm) so a stray click can't finalize the round with 0 feedback.
-  // Keyed off UNSENT drafts (`!submitted`): once sent, the drafts are no longer at risk and
-  // Accept returns to primary — so a normal Send -> Accept flow is unaffected.
+  // §G.1 + §L semantic emphasis. Exactly ONE of Accept / Send is "lit" (carries its semantic
+  // FILL) at a time; the other is muted. Keyed off UNSENT drafts (`!submitted && drafts>0`):
+  //   - nothing unsent  -> Accept is GREEN-lit (primary, approve-as-is); Send is muted.
+  //   - unsent staged    -> Send is ORANGE-lit (primary, submit them); Accept is muted AND
+  //                         confirm-guarded (accept() still prompts) so a stray click can't
+  //                         finalize the round with 0 feedback; the RED Clear button appears.
+  // Once sent, the drafts are no longer at risk -> Accept returns to green-lit (a normal
+  // Send -> Accept flow never traps). This supersedes the old blue-primary + dashed-guard look.
   function reflectActionEmphasis() {
     const acc = doc.querySelector('.annotate-accept');
     const snd = doc.querySelector('.annotate-send');
-    const guard = !submitted && drafts.length > 0;
+    const clr = doc.querySelector('.annotate-clear');
+    const n = drafts.length;
+    const guard = !submitted && n > 0;
     if (acc) {
-      acc.classList.toggle('annotate-primary', !guard);
-      acc.classList.toggle('annotate-accept-guarded', guard);
-      acc.setAttribute(
-        'title',
-        guard
-          ? 'Accept approves as-is and discards your ' + drafts.length + ' unsent comment(s) — use Send to submit them'
-          : 'Accept this round as-is'
-      );
+      acc.classList.toggle('annotate-lit-accept', !guard); // green fill when primary
+      acc.classList.toggle('annotate-accept-guarded', guard); // muted + confirm-guarded
+      setBtnLabel(acc, guard
+        ? 'Accept — discards ' + n + ' unsent comment' + (n === 1 ? '' : 's')
+        : 'Accept this round as-is');
     }
-    if (snd) snd.classList.toggle('annotate-primary', guard);
+    if (snd) {
+      snd.classList.toggle('annotate-lit-send', guard); // orange fill when primary
+      snd.classList.toggle('annotate-muted', !guard);
+      setBtnLabel(snd, 'Send feedback (' + n + ')');
+    }
+    if (clr) {
+      clr.classList.toggle('annotate-clear-hidden', !guard); // visible only with unsent drafts
+      setBtnLabel(clr, 'Clear ' + n + ' staged comment' + (n === 1 ? '' : 's'));
+    }
+  }
+
+  // §L Clear: drop ALL staged (unsent) drafts after a native confirm (the SAME mechanism the
+  // §G Accept guard uses, for consistency). Removes each draft's on-canvas pin + sidebar row
+  // (+ any spatial image marker), tears down a transient composer/lock, then re-renders the
+  // count/emphasis + sidebar-empty state. Nothing here is gate-driven (the gates never click
+  // Clear), so the confirm() is gate-safe.
+  function clearDrafts() {
+    const n = drafts.length;
+    if (!n) return;
+    const noun = 'staged comment' + (n === 1 ? '' : 's');
+    const confirmFn = typeof root.confirm === 'function' ? root.confirm.bind(root) : null;
+    if (confirmFn && !confirmFn('Clear ' + n + ' ' + noun + "? This can't be undone.")) {
+      setStatus(n + ' ' + noun + ' kept.');
+      return;
+    }
+    drafts.length = 0;
+    comments.forEach(function (entry) {
+      if (entry.pin && entry.pin.parentNode) entry.pin.remove();
+      if (entry.listItem && entry.listItem.parentNode) entry.listItem.remove();
+    });
+    comments.length = 0;
+    // Spatial anchors also leave a persistent region marker over the image (§B addDraft).
+    const markers = doc.querySelectorAll('.annotate-marker');
+    for (let i = 0; i < markers.length; i++) markers[i].remove();
+    closeComposer();
+    clearLock();
+    updateSidebarEmpty();
+    updateSendCount();
+    setStatus('Cleared ' + n + ' ' + noun + '.');
   }
 
   // §F: "Copy" is GONE — native browser selection (⌘C / right-click → Copy) works now that
@@ -499,7 +588,7 @@
     if (!btn) return;
     const wrap = btn.querySelector('.annotate-icon-wrap');
     if (wrap) wrap.innerHTML = WIDTH_ICONS[widthPreset];
-    if (detectView().kind === 'markdown') btn.setAttribute('title', widthTitle());
+    if (detectView().kind === 'markdown') setBtnLabel(btn, widthTitle()); // §L hover label
   }
 
   function applyWidth() {
@@ -572,11 +661,13 @@
     const view = detectView();
     const willCapture = A.config.shouldCaptureScreenshot(view.kind, screenshotToggle);
     if (btn) {
-      // #4: camera icon stays; "active" = brighter blue. Toggle classes, never textContent
-      // (that would wipe the inline SVG).
+      // #4 + §L: camera icon stays; "on" = the unified-blue FILL (.annotate-active). Toggle
+      // classes, never textContent (that would wipe the inline SVG). The hover label reflects
+      // the on/off state.
       btn.classList.toggle('annotate-active', !!screenshotToggle);
       btn.classList.toggle('annotate-shot-inert', A.config.VISUAL_VIEWS && !A.config.VISUAL_VIEWS.has(view.kind));
       btn.setAttribute('aria-pressed', screenshotToggle ? 'true' : 'false');
+      setBtnLabel(btn, 'Screenshot on send: ' + (screenshotToggle ? 'on' : 'off'));
     }
     if (bar) {
       bar.setAttribute('data-screenshot', screenshotToggle ? 'on' : 'off');

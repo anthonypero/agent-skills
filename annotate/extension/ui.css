@@ -15,6 +15,17 @@
   --annotate-muted: #5a6472;
   --annotate-accent: #2f6fed;
   --annotate-accent-active: #1750cc; /* "brighter blue when active" (#4) */
+  /* §L: ONE unified interactive blue for non-semantic buttons — the SAME blue for the hover
+     OUTLINE and the active FILL (drops the old two-blue outline/lighter-outline scheme). A
+     touch darker than --annotate-accent (the Accept blue) so a fill reads as deliberate. */
+  --annotate-accent-strong: #2560d6;
+  /* §L semantic (utility) action colors + a slightly-darker hover/pressed shade each. */
+  --annotate-ok: #1f9d57; /* Accept (approve) green */
+  --annotate-ok-strong: #18834a;
+  --annotate-warn: #e07c1a; /* Send (primary when drafts staged) orange */
+  --annotate-warn-strong: #c86a12;
+  --annotate-danger: #d64242; /* Clear (destructive) red */
+  --annotate-danger-strong: #bb3232;
   --annotate-accent-fg: #ffffff;
   --annotate-line: #d2d7e0;
   --annotate-card: #ffffff;
@@ -32,6 +43,13 @@
     --annotate-muted: #9aa3b2;
     --annotate-accent: #4c8dff;
     --annotate-accent-active: #8ab6ff; /* lighter == brighter in dark (#4) */
+    --annotate-accent-strong: #3d7df0; /* §L unified interactive blue (dark) */
+    --annotate-ok: #2ec27e; /* §L Accept green (matches the accepted-border green) */
+    --annotate-ok-strong: #27a86c;
+    --annotate-warn: #f0a64a; /* §L Send orange */
+    --annotate-warn-strong: #e0913a;
+    --annotate-danger: #ef6a6a; /* §L Clear red */
+    --annotate-danger-strong: #e05656;
     --annotate-accent-fg: #ffffff;
     --annotate-line: #2a2f3a;
     --annotate-card: #232733;
@@ -154,14 +172,16 @@ body.annotate-themed {
   cursor: pointer;
   line-height: 1;
 }
+/* §1: OUTLINE on hover (the unified blue), for every interactive button. */
 .annotate-btn:hover {
-  border-color: var(--annotate-accent);
+  border-color: var(--annotate-accent-strong);
 }
 .annotate-btn-label {
   font-size: 13px;
   line-height: 1;
 }
-/* §F icon-only chrome buttons (camera / width / sidebar-bubble): square-ish, no text label. */
+/* §F icon-only chrome buttons (camera / width / sidebar-bubble / accept / send / clear):
+   square-ish, no text label — the name surfaces via the §L hover tooltip. */
 .annotate-icon-btn {
   padding: 6px 9px;
   gap: 0;
@@ -174,16 +194,105 @@ body.annotate-themed {
   border-color: var(--annotate-line);
 }
 .annotate-primary {
-  background: var(--annotate-accent);
+  background: var(--annotate-accent-strong);
   color: var(--annotate-accent-fg);
-  border-color: var(--annotate-accent);
+  border-color: var(--annotate-accent-strong);
 }
-/* §G.1: while unsent comments are staged, Accept is de-emphasized (Send becomes primary)
-   and clicking it requires an explicit confirm — so it can't be a one-click trap that
-   finalizes the round with 0 feedback. */
+
+/* §1: the ACTIVE/selected state of a NON-SEMANTIC interactive button is a FILL in the unified
+   blue (not the old lighter outline). Used by the camera toggle (on), the sidebar toggle
+   (open) and the width control (engaged on prose, §2). The inline-SVG icon is currentColor so
+   it flips to the on-fill text color automatically. */
+.annotate-btn.annotate-active {
+  background: var(--annotate-accent-strong);
+  border-color: var(--annotate-accent-strong);
+  color: var(--annotate-accent-fg);
+}
+.annotate-btn.annotate-active:hover {
+  background: var(--annotate-accent-strong);
+  border-color: var(--annotate-accent-strong);
+}
+
+/* §3: semantic action FILLS. Exactly one of Accept/Send is lit at a time
+   (reflectActionEmphasis). Accept = green identity (primary while nothing unsent is staged);
+   Send = orange (primary while unsent drafts are staged). */
+.annotate-accept.annotate-lit-accept {
+  background: var(--annotate-ok);
+  border-color: var(--annotate-ok);
+  color: var(--annotate-accent-fg);
+}
+.annotate-accept.annotate-lit-accept:hover {
+  background: var(--annotate-ok-strong);
+  border-color: var(--annotate-ok-strong);
+}
+.annotate-send.annotate-lit-send {
+  background: var(--annotate-warn);
+  border-color: var(--annotate-warn);
+  color: var(--annotate-accent-fg);
+}
+.annotate-send.annotate-lit-send:hover {
+  background: var(--annotate-warn-strong);
+  border-color: var(--annotate-warn-strong);
+}
+
+/* §3: the de-emphasized (muted) member — whichever of Accept/Send is NOT lit. A quiet neutral
+   button (supersedes the old dashed/opacity guard look). It still hints its own semantic color
+   on hover. `.annotate-accept-guarded` is the muted Accept (accept() also confirm-guards it). */
+.annotate-muted,
 .annotate-accept-guarded {
-  opacity: 0.6;
-  border-style: dashed;
+  background: var(--annotate-btn-bg);
+  color: var(--annotate-muted);
+  border-color: var(--annotate-line);
+  opacity: 0.85;
+}
+.annotate-accept.annotate-accept-guarded:hover {
+  border-color: var(--annotate-ok);
+  color: var(--annotate-fg);
+  opacity: 1;
+}
+.annotate-send.annotate-muted:hover {
+  border-color: var(--annotate-warn);
+  color: var(--annotate-fg);
+  opacity: 1;
+}
+
+/* §4: the Clear control — RED trash icon, shown only while unsent drafts are staged. A red
+   glyph that fills red (destructive emphasis) on hover; hidden via .annotate-clear-hidden. */
+.annotate-clear {
+  color: var(--annotate-danger);
+  border-color: var(--annotate-line);
+}
+.annotate-clear:hover {
+  background: var(--annotate-danger);
+  border-color: var(--annotate-danger);
+  color: var(--annotate-accent-fg);
+}
+.annotate-clear-hidden {
+  display: none !important;
+}
+
+/* §5: hover labels on every chrome button — a styled tooltip below the button reading
+   data-label. Right-anchored so the labels on the right-edge action cluster never clip off
+   the viewport. The native `title` is intentionally not set on these (no double tooltip). */
+.annotate-btn[data-label] {
+  position: relative;
+}
+.annotate-btn[data-label]:hover::after {
+  content: attr(data-label);
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  white-space: nowrap;
+  background: var(--annotate-fg);
+  color: var(--annotate-bg);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  padding: 3px 8px;
+  border-radius: 6px;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  z-index: 2147483610;
 }
 .annotate-icon-wrap {
   display: inline-flex;
@@ -195,13 +304,10 @@ body.annotate-themed {
   display: block;
 }
 
-/* screenshot toggle (#4): camera icon, brighter blue when active */
+/* screenshot toggle (#4): muted camera icon; the "on" state is the unified-blue FILL via the
+   generic .annotate-btn.annotate-active rule above (§1). */
 .annotate-shot-toggle {
   color: var(--annotate-muted);
-}
-.annotate-shot-toggle.annotate-active {
-  color: var(--annotate-accent-active);
-  border-color: var(--annotate-accent-active);
 }
 .annotate-shot-inert {
   opacity: 0.5;
@@ -572,10 +678,7 @@ body.annotate-themed {
   white-space: pre-wrap;
   word-break: break-word;
 }
-.annotate-sidebar-toggle.annotate-active {
-  color: var(--annotate-accent-active);
-  border-color: var(--annotate-accent-active);
-}
+/* §1: the sidebar toggle's "open" state is the unified-blue FILL (generic .annotate-active). */
 
 /* by-mode (document/code): SHRINK the canvas so the reading column reflows left of the
    sidebar. The chrome/footer are full-width fixed bars (unaffected). */
