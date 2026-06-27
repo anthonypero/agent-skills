@@ -484,6 +484,63 @@ body.annotate-themed {
   gap: 8px;
 }
 
+/* §I per-comment USER-IMAGE attach (the `.annotate-attach-*` namespace — distinct from the
+   auto-capture `.annotate-shot-toggle`). A paperclip button + an inline thumbnail/filename
+   preview with a remove control, shown once an image has been copied into the round folder. */
+.annotate-attach-input {
+  display: none;
+}
+.annotate-attach-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.annotate-attach-btn {
+  color: var(--annotate-muted);
+}
+.annotate-attach-preview {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+.annotate-attach-row.annotate-has-attach .annotate-attach-preview {
+  display: flex;
+}
+.annotate-attach-thumb {
+  width: 28px;
+  height: 28px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--annotate-line);
+  flex: none;
+}
+.annotate-attach-row.annotate-attach-no-thumb .annotate-attach-thumb {
+  display: none;
+}
+.annotate-attach-name {
+  font-size: 12px;
+  color: var(--annotate-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.annotate-attach-remove {
+  flex: none;
+  color: var(--annotate-muted);
+  font-size: 16px;
+  line-height: 1;
+  padding: 4px 8px;
+}
+.annotate-attach-remove:hover {
+  color: var(--annotate-danger);
+  border-color: var(--annotate-danger);
+}
+
 /* ===========================================================================
    §B comment PINS (on-canvas presence) — replaces the old right-margin rail.
    A small SEMI-TRANSPARENT comment-bubble (the same ICON_COMMENT used to create it)

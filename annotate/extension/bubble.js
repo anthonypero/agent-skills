@@ -44,6 +44,9 @@
       original: selected,
       replacement: '',
       elementContext: opts.elementContext || null,
+      // v2.2 §I: the stored filename of a user-attached image (copied into the round folder
+      // on select). null = no attachment. Distinct from the tool's auto-capture screenshot.
+      attachment: opts.attachment != null && opts.attachment !== '' ? String(opts.attachment) : null,
     };
 
     let api; // forward ref for chaining
@@ -70,6 +73,9 @@
     function setOriginal(s) { state.original = s == null ? '' : String(s); return api; }
     function setReplacement(s) { state.replacement = s == null ? '' : String(s); return api; }
     function setAnchor(a) { state.anchor = a; return api; }
+    // v2.2 §I: record / clear the user-image attachment (the server-stored filename). null or
+    // '' clears it. Independent of the comment/edit type — an attachment may ride either.
+    function setAttachment(name) { state.attachment = name == null || name === '' ? null : String(name); return api; }
 
     // A bubble is submittable when its required §5.2 fields are non-empty for its type.
     // (replacement MAY equal original — an intentional "keep as-is" edit; only emptiness
@@ -93,6 +99,7 @@
         item.replacement = state.replacement;
       }
       if (state.elementContext) item.elementContext = state.elementContext;
+      if (state.attachment) item.attachment = state.attachment; // v2.2 §I
       return item;
     }
 
@@ -102,7 +109,8 @@
       get original() { return state.original; },
       get replacement() { return state.replacement; },
       get anchor() { return state.anchor; },
-      setType, toggle, setComment, setOriginal, setReplacement, setAnchor,
+      get attachment() { return state.attachment; },
+      setType, toggle, setComment, setOriginal, setReplacement, setAnchor, setAttachment,
       isComplete, toFeedback,
     };
     return api;

@@ -40,6 +40,10 @@
         "outerHTML": { "type": "string" },
         "computedStyles": { "type": "object" }
       }
+    },
+    "attachment": {
+      "description": "Optional (v2.2 §I): the stored filename of a user-attached image copied into this round's folder ON SELECT (e.g. <guid>-attach-<n>.<ext>). Distinct from the tool's auto-capture <guid>-screenshot.png. The server writes the bytes (POST /<session>/<artifact>/attach) and the extension references the returned filename here; `annotate poll` resolves it to an absolute on-disk path (attachmentPath) for the agent to read. Omitted when the comment has no attached image — existing comment/edit items validate unchanged.",
+      "type": "string"
     }
   },
   "allOf": [

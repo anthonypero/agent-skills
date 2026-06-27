@@ -38,6 +38,11 @@ const JS_FIXTURE = path.join(PKG_ROOT, 'tests', 'fixtures', 'sample.js');
 const SERVER_PORT = 7992;
 const DEBUG_PORT = 9345;
 
+// A 1x1 PNG (real, decodable image bytes) for the §I user-image attachment check — set on
+// the file input via DataTransfer so headless CDP needs no native file dialog.
+const TINY_PNG_B64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
 // ---- DOM-driving expressions (run in the page main world via CDP) -------------
 
 const READY = `document.documentElement.getAttribute('data-annotate-ready')`;
@@ -266,6 +271,67 @@ async function main() {
     const codeShot = shotPathOf(codeRound.session, codeRound.artifact, codeRound.guid);
     ok('code view: NO screenshot captured/stored (gated off on a source view)', !fs.existsSync(codeShot),
       `screenshot exists=${fs.existsSync(codeShot)}`);
+
+    // ---- §I: per-comment USER IMAGE ATTACHMENT (v2.2) -----------------------------------
+    // A fresh image round in its OWN session, so the in-page auto-advance poll never disturbs it.
+    // Distinct from the auto-capture screenshot: the user attaches THEIR image and it is COPIED
+    // into the round folder ON SELECT (before Send) under <guid>-attach-<n>.<ext>.
+    const atRound = create({ dataDir, source: IMG_FIXTURE });
+    const atUrl = `http://127.0.0.1:${SERVER_PORT}/${atRound.session}/${atRound.artifact}`;
+    await cdp.send('Page.navigate', { url: atUrl });
+    await waitRound(atRound.guid, 'content ready on attachment round');
+
+    // Open a composer (click the image -> point anchor + the composer with the attach control).
+    await cdp.evaluate(gestureExpr(0.4, 0.4, 0.4, 0.4));
+    const hasAttachUI = await cdp.evaluate(`!!document.querySelector('.annotate-composer .annotate-attach-input')`);
+    ok('attach UI present in the composer (.annotate-attach-input — NEW namespace, not .annotate-shot-toggle)',
+      hasAttachUI === true, `present=${hasAttachUI}`);
+
+    // Set a real File on the hidden input + dispatch change — no native file dialog (headless).
+    const fired = await cdp.evaluate(`(() => {
+      const input = document.querySelector('.annotate-attach-input');
+      if (!input) return { err: 'no attach input' };
+      const b64 = ${JSON.stringify(TINY_PNG_B64)};
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const file = new File([bytes], 'my-illustration.png', { type: 'image/png' });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      input.files = dt.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      return { ok: true, n: input.files.length };
+    })()`);
+
+    // The upload is async (FileReader + POST /attach); the composer stamps data-attachment with
+    // the server-returned filename once the copy lands. Poll for it.
+    const storedName = await waitFor('attachment uploaded ON SELECT + referenced on the composer',
+      async () => (await cdp.evaluate(`(() => { const c = document.querySelector('.annotate-composer'); return c && c.getAttribute('data-attachment'); })()`)) || null,
+      { timeout: 12000 });
+    ok('attach: selecting an image uploads it ON SELECT; composer references the stored <guid>-attach-<n>.<ext>',
+      typeof storedName === 'string' && /-attach-\d+\.png$/.test(storedName), `fired=${JSON.stringify(fired)}; stored=${storedName}`);
+
+    // The file is COPIED INTO THE ROUND DIR at select time (before Send) — the §I gate proof,
+    // mirroring the existing "<guid>-screenshot.png exists" check.
+    const atFilePath = storedName
+      ? path.join(P.artifactDir(dataDir, atRound.session, atRound.artifact), atRound.guid, storedName)
+      : null;
+    ok('attach: the image file EXISTS in the round dir ON SELECT (like <guid>-screenshot.png)',
+      !!atFilePath && fs.existsSync(atFilePath), `path=${atFilePath}; exists=${atFilePath && fs.existsSync(atFilePath)}`);
+
+    // Add the comment, then Send — the attachment reference must ride the submitted feedback.
+    await cdp.evaluate(addCommentExpr('see the attached illustration'));
+    await cdp.evaluate(`document.querySelector('.annotate-send').click()`);
+    const atSubmit = await waitFor('attachment round submit result', async () =>
+      (await cdp.evaluate(`document.getElementById('annotate-chrome').getAttribute('data-last-submit')`)) || null);
+    const diskAt = JSON.parse(fs.readFileSync(roundFileOf(atRound.session, atRound.artifact, atRound.guid), 'utf8'));
+    const refItem = diskAt.feedback.find((f) => f.attachment);
+    ok('attach: the submitted feedback REFERENCES the attachment filename (round-trips to disk)',
+      atSubmit === 'submitted' && diskAt.status === 'submitted' && !!refItem && refItem.attachment === storedName,
+      `submit=${atSubmit}; status=${diskAt.status}; ref=${refItem && refItem.attachment}`);
+    // NOTE: `annotate poll` exposing the resolved on-disk attachmentPath is covered by the
+    // unit gate tests/launch.test.js ("poll bundle surfaces an on-disk attachmentPath … §I"),
+    // since poll is the CLI leg (not drivable from this in-page CDP harness).
 
     const failed = checks.filter((c) => !c.pass);
     console.log(`\n${failed.length ? 'GATE FAILED' : 'GATE PASSED'} — ${checks.length - failed.length}/${checks.length} checks passed`);

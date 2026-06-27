@@ -148,6 +148,33 @@ test('bubble items validate against feedback.schema.json (comment AND edit)', ()
   assert.ok(validateFeedback(e), JSON.stringify(validateFeedback.errors));
 });
 
+// v2.2 §I — a user-image attachment rides the §5.2 item's optional `attachment` field.
+test('bubble carries a user-image attachment (§I); omitted by default; clearable', () => {
+  const plain = bubble.createBubble({ kind: 'source', line: 1 }).setComment('x').toFeedback();
+  assert.equal('attachment' in plain, false, 'no attachment field when none is set (existing items unchanged)');
+
+  const b = bubble.createBubble({ kind: 'source', line: 5 }).setComment('see image');
+  b.setAttachment('G-attach-1.png');
+  assert.equal(b.attachment, 'G-attach-1.png');
+  const withAttach = b.toFeedback('a1');
+  assert.deepEqual(withAttach, {
+    id: 'a1', type: 'comment', anchor: { kind: 'source', line: 5 }, comment: 'see image', attachment: 'G-attach-1.png',
+  });
+
+  b.setAttachment(null); // removed before Add -> field drops back out
+  assert.equal(b.attachment, null);
+  assert.equal('attachment' in b.toFeedback(), false);
+});
+
+test('bubble items WITH an attachment still validate against feedback.schema.json (comment + edit)', () => {
+  const c = bubble.createBubble({ kind: 'source', line: 1 }).setComment('x').setAttachment('g-attach-1.png').toFeedback('a1');
+  const e = bubble.createBubble({ kind: 'spatial', point: [0.5, 0.5] }, { selectedText: 'o' })
+    .setType('edit').setReplacement('n').setAttachment('g-attach-2.jpg').toFeedback('a2');
+  assert.ok(validateFeedback(c), JSON.stringify(validateFeedback.errors));
+  assert.ok(validateFeedback(e), JSON.stringify(validateFeedback.errors));
+  assert.equal(c.attachment, 'g-attach-1.png');
+});
+
 // ===========================================================================
 // 3. Disjoint-range check — reject overlapping EDITs, allow overlapping COMMENTs
 // ===========================================================================

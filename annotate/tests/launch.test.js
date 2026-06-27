@@ -198,6 +198,51 @@ test('annotate poll <s>/<a>: blocks on the EXISTING head and mints NO new round'
   assert.equal(roundCount(session), 1, 'poll minted NO new round');
 });
 
+test('poll bundle surfaces an on-disk attachmentPath for an attached image (§I)', async () => {
+  const session = 'attach-poll';
+
+  // Seed a round + server (leaves the singleton up).
+  const seed = await run([SAMPLE, '--no-wait', '--no-open', '--session', session]).done;
+  assert.equal(seed.code, 0);
+  const r = findRound(session);
+  assert.ok(r, 'seed round exists');
+  await waitForServer();
+
+  // Upload an attachment into the round folder ON SELECT (POST /attach), get the stored name.
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64');
+  const up = await fetch(`http://127.0.0.1:${port}/${r.session}/${r.artifact}/attach`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Annotate-Token': r.token },
+    body: JSON.stringify({ head: r.guid, data: png, mime: 'image/png', name: 'illustration.png' }),
+  });
+  assert.equal(up.status, 200);
+  const stored = (await up.json()).filename;
+  assert.match(stored, /-attach-1\.png$/);
+
+  const rDir = path.join(P.artifactDir(dataDir, r.session, r.artifact), r.guid);
+  assert.ok(P.exists(path.join(rDir, stored)), 'attachment copied into the round dir on select');
+
+  // Poll, then submit a comment that REFERENCES the stored filename.
+  const h = run(['poll', `${session}/sample`, '--no-open']);
+  await waitForServer();
+  await delay(300);
+  const res = await postFeedback(r, [
+    { id: 'a1', type: 'comment', anchor: { kind: 'source', line: 3 }, comment: 'see attached', attachment: stored },
+  ]);
+  assert.equal(res.status, 200);
+
+  const { code, stdout } = await h.done;
+  assert.equal(code, 0);
+  const bundle = JSON.parse(stdout);
+  assert.equal(bundle.feedback[0].attachment, stored, 'feedback item keeps the stored filename');
+  assert.equal(
+    bundle.feedback[0].attachmentPath,
+    path.join(rDir, stored),
+    'poll resolves an absolute on-disk attachmentPath under the round dir'
+  );
+  assert.ok(P.exists(bundle.feedback[0].attachmentPath), 'the surfaced path points at a real file');
+});
+
 test('annotate <file> --wait --timeout: times out non-zero with the hand-off nudge', async () => {
   const session = 'timeout-1';
   const { code, stderr } = await run([SAMPLE, '--wait', '--timeout', '1', '--no-open', '--session', session]).done;

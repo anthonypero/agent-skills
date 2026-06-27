@@ -18,7 +18,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { start, loadRuntime } = require('../server/server.js');
+const { start, loadRuntime, sanitizeExt, extForAttachment } = require('../server/server.js');
 const { create } = require('../server/create.js');
 const P = require('../server/protocol.js');
 
@@ -195,6 +195,82 @@ test('POST /feedback writes a base64 screenshot to <guid>-screenshot.png (never 
   assert.ok(P.exists(P.screenshotIn(r.roundDir, r.guid)));
   const round = P.readJSON(r.roundFile);
   assert.equal(round.screenshot, undefined, 'screenshot is a sibling file, not a descriptor field');
+});
+
+// ---- v2.2 §I: user-image attachment (POST /<s>/<a>/attach) -----------------
+
+// pure helpers (no HTTP) — filename-extension derivation + sanitization.
+test('extForAttachment derives a safe extension from mime, then name, then default', () => {
+  assert.equal(extForAttachment('image/png'), 'png');
+  assert.equal(extForAttachment('image/jpeg'), 'jpg');
+  assert.equal(extForAttachment('image/svg+xml'), 'svg');
+  assert.equal(extForAttachment('image/x-icon'), 'ico');
+  assert.equal(extForAttachment('image/webp'), 'webp');
+  assert.equal(extForAttachment('image/heic'), 'heic'); // mapped uncommon type
+  assert.equal(extForAttachment('image/florp'), 'florp'); // unknown image/* subtype -> sanitized subtype
+  assert.equal(extForAttachment('', 'photo.JPG'), 'jpg'); // falls back to the filename ext (lowercased)
+  assert.equal(extForAttachment('', 'noext'), 'png'); // safe default for accept="image/*"
+  assert.equal(extForAttachment('application/x-msdownload', 'evil.exe'), 'exe'); // sanitized, never used for traversal
+});
+
+test('sanitizeExt strips path/traversal chars and caps length', () => {
+  assert.equal(sanitizeExt('../../etc'), 'etc');
+  assert.equal(sanitizeExt('p/n\\g'), 'png');
+  assert.equal(sanitizeExt('.PNG'), 'png');
+  assert.equal(sanitizeExt('toolongextension'), 'toolo'); // capped at 5
+  assert.equal(sanitizeExt(''), '');
+});
+
+test('POST /attach copies the image into the round dir ON SELECT and returns the stored filename', async () => {
+  const r = freshRound();
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString('base64');
+  const res = await post(
+    `/${r.session}/${r.artifact}/attach`,
+    { head: r.guid, data: png, mime: 'image/png', name: 'my shot.png' },
+    tokenHeader(r.token)
+  );
+  assert.equal(res.status, 200);
+  const j = await res.json();
+  assert.equal(j.ok, true);
+  assert.equal(j.filename, `${r.guid}-attach-1.png`, 'server-built <guid>-attach-<n>.<ext> name');
+  // The bytes are on disk in the round dir, decoded (not base64), distinct from the screenshot.
+  const onDisk = fs.readFileSync(path.join(r.roundDir, j.filename));
+  assert.deepEqual([...onDisk], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  // The 4-field descriptor is untouched (attachment is a sibling file + a feedback reference).
+  assert.deepEqual(Object.keys(P.readJSON(r.roundFile)).sort(), ['feedback', 'snapshot', 'source', 'status']);
+});
+
+test('POST /attach increments the index for a second attachment in the same round', async () => {
+  const r = freshRound();
+  const data = Buffer.from([1, 2, 3, 4]).toString('base64');
+  const a1 = await (await post(`/${r.session}/${r.artifact}/attach`, { head: r.guid, data, mime: 'image/jpeg' }, tokenHeader(r.token))).json();
+  const a2 = await (await post(`/${r.session}/${r.artifact}/attach`, { head: r.guid, data, mime: 'image/gif' }, tokenHeader(r.token))).json();
+  assert.equal(a1.filename, `${r.guid}-attach-1.jpg`);
+  assert.equal(a2.filename, `${r.guid}-attach-2.gif`);
+});
+
+test('POST /attach is head-checked (stale head -> 409) and token-guarded (no token -> 403)', async () => {
+  const r = freshRound();
+  const data = Buffer.from([1]).toString('base64');
+  const stale = await post(`/${r.session}/${r.artifact}/attach`, { head: 'nope', data, mime: 'image/png' }, tokenHeader(r.token));
+  assert.equal(stale.status, 409);
+  assert.equal((await stale.json()).error, 'stale-head');
+  const noTok = await post(`/${r.session}/${r.artifact}/attach`, { head: r.guid, data, mime: 'image/png' });
+  assert.equal(noTok.status, 403);
+});
+
+test('POST /attach with no data -> 400; onto a closed round -> 409', async () => {
+  const r = freshRound();
+  const bad = await post(`/${r.session}/${r.artifact}/attach`, { head: r.guid, mime: 'image/png' }, tokenHeader(r.token));
+  assert.equal(bad.status, 400);
+  // Close the round (submit), then an attach must 409 (can't attach to a closed round).
+  assert.equal((await post('/feedback', feedbackBundle(r), tokenHeader(r.token))).status, 200);
+  const closed = await post(
+    `/${r.session}/${r.artifact}/attach`,
+    { head: r.guid, data: Buffer.from([1]).toString('base64'), mime: 'image/png' },
+    tokenHeader(r.token)
+  );
+  assert.equal(closed.status, 409);
 });
 
 // ---- head-staleness (§5.5) -------------------------------------------------

@@ -40,6 +40,25 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]', '0:0:0
 const MAX_BODY = 32 * 1024 * 1024; // 32 MB — room for a base64 viewport screenshot
 
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.ico']);
+
+// v2.2 §I — mime -> file extension for a USER-attached image (POST /attach). The server
+// builds the whole on-disk filename (`<guid>-attach-<n>.<ext>`), so deriving + sanitizing
+// the extension here keeps the name fully server-controlled.
+const MIME_EXT = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/jpg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/bmp': 'bmp',
+  'image/svg+xml': 'svg',
+  'image/x-icon': 'ico',
+  'image/vnd.microsoft.icon': 'ico',
+  'image/avif': 'avif',
+  'image/heic': 'heic',
+  'image/heif': 'heif',
+  'image/tiff': 'tiff',
+};
 const CONTENT_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -56,6 +75,31 @@ const CONTENT_TYPES = {
   '.ico': 'image/x-icon',
   '.txt': 'text/plain; charset=utf-8',
 };
+
+// Keep only a short lowercase alphanumeric extension — the defense that makes a
+// server-built attachment filename impossible to weaponize for path traversal.
+function sanitizeExt(ext) {
+  return String(ext || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .slice(0, 5);
+}
+
+// Resolve the stored extension for a user-attached image (v2.2 §I), preferring the mime
+// type, then the original filename's extension, then a safe default (the input is
+// accept="image/*"). Never returns an unsafe/empty value.
+function extForAttachment(mime, name) {
+  const m = String(mime || '').toLowerCase().trim();
+  if (MIME_EXT[m]) return MIME_EXT[m];
+  const sub = /^image\/([a-z0-9.+-]+)$/.exec(m);
+  if (sub) {
+    const e = sanitizeExt(sub[1].replace('+xml', '').replace(/^x-/, ''));
+    if (e) return e;
+  }
+  const fromName = sanitizeExt(path.extname(String(name || '')).replace(/^\./, ''));
+  if (fromName) return fromName;
+  return 'png';
+}
 
 // ---------------------------------------------------------------------------
 // runtime.json (§6.6)
@@ -391,6 +435,73 @@ function makeAcceptHandler(dataDir) {
 }
 
 // ---------------------------------------------------------------------------
+// POST /<session>/<artifact>/attach — v2.2 §I user-image attachment. Head-checked +
+// token-guarded exactly like /feedback + /accept. The user picks an image in the composer;
+// the extension uploads its bytes (base64 in the JSON body) and the server COPIES them into
+// the round folder ON SELECT (before submit), under a server-built `<guid>-attach-<n>.<ext>`
+// name (mirrors the auto-capture `<guid>-screenshot.png` convention). Returns the stored
+// filename so the extension can reference it on the staged comment; the reference rides the
+// §5.2 feedback item's optional `attachment` field at submit time.
+//
+// ORPHANS: the copy is on-select, so an attachment the human then removes / cancels / clears
+// leaves an unreferenced file in the round dir. This is harmless and intentionally NOT
+// cleaned up here — only feedback items that carry `attachment` are surfaced to the agent
+// (annotate poll), so an unreferenced attachment is invisible to the loop (§I note).
+// ---------------------------------------------------------------------------
+
+function makeAttachHandler(dataDir) {
+  return async function attach(req, res, session, artifact) {
+    let body;
+    try {
+      const raw = await readBody(req);
+      body = JSON.parse(raw.toString('utf8'));
+    } catch (e) {
+      if (e && e.code === 'TOO_LARGE') return sendJSON(res, 413, { error: 'payload-too-large' });
+      return sendJSON(res, 400, { error: 'invalid-json' });
+    }
+
+    const denial = authorize(req, dataDir, session);
+    if (denial) return sendJSON(res, 403, { error: 'forbidden', reason: denial });
+
+    const { head: believedHead, data, mime, name } = body || {};
+    if (typeof data !== 'string' || !data) return sendJSON(res, 400, { error: 'missing-fields' });
+
+    const aDir = P.artifactDir(dataDir, session, artifact);
+    const head = P.resolveHead(aDir);
+    // Head-staleness (§5.5): only the current head's open round can take an attachment.
+    if (!head || believedHead !== head) return sendJSON(res, 409, { error: 'stale-head', head });
+
+    const rDir = path.join(aDir, head);
+    let round;
+    try {
+      round = P.readJSON(P.roundJsonIn(rDir, head));
+    } catch {
+      return sendJSON(res, 409, { error: 'stale-head', head });
+    }
+    // A closed round (submitted/accepted) can no longer take new attachments (§5.5 parity).
+    if (round.status !== 'pending') return sendJSON(res, 409, { error: 'stale-head', head });
+
+    let buf;
+    try {
+      buf = Buffer.from(data, 'base64');
+    } catch {
+      return sendJSON(res, 400, { error: 'invalid-data' });
+    }
+    if (!buf || buf.length === 0) return sendJSON(res, 400, { error: 'invalid-data' });
+
+    const ext = extForAttachment(mime, name);
+    const n = P.nextAttachIndex(rDir, head);
+    const filename = P.attachName(head, n, ext);
+    try {
+      P.atomicWriteFile(path.join(rDir, filename), buf); // §2.4 atomic temp+rename
+    } catch (e) {
+      return sendJSON(res, 500, { error: 'write-failed', message: String(e && e.message) });
+    }
+    return sendJSON(res, 200, { ok: true, filename });
+  };
+}
+
+// ---------------------------------------------------------------------------
 // GET helpers
 // ---------------------------------------------------------------------------
 
@@ -455,6 +566,7 @@ function makeHandler(opts) {
 
   const feedbackHandler = makeFeedbackHandler(dataDir, validateAnchor);
   const acceptHandler = makeAcceptHandler(dataDir);
+  const attachHandler = makeAttachHandler(dataDir);
 
   return function handler(req, res) {
     let parsed;
@@ -509,6 +621,9 @@ function makeHandler(opts) {
 
       if (parts.length === 3 && parts[2] === 'accept' && method === 'POST') {
         return acceptHandler(req, res, parts[0], parts[1]);
+      }
+      if (parts.length === 3 && parts[2] === 'attach' && method === 'POST') {
+        return attachHandler(req, res, parts[0], parts[1]);
       }
       if (parts.length === 3 && parts[2] === 'head' && method === 'GET') {
         return headInfo(dataDir, parts[0], parts[1], res);
@@ -565,6 +680,8 @@ module.exports = {
   start,
   makeHandler,
   loadRuntime,
+  sanitizeExt,
+  extForAttachment,
   HOST,
 };
 

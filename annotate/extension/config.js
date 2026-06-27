@@ -157,6 +157,35 @@
     return Object.assign({ httpStatus: res.status }, json || {});
   }
 
+  // v2.2 §I — upload a user-attached image so the server COPIES it into the round folder
+  // ON SELECT. POST <origin>/<session>/<artifact>/attach with the base64 bytes + mime/name
+  // and the per-session token in X-Annotate-Token (head-checked like /feedback + /accept).
+  // payload = { head, data (base64, no data: prefix), mime, name }. Returns
+  // { httpStatus, ok, filename } — the caller stamps `filename` on the staged comment.
+  async function uploadAttachment(ctx, payload, fetchImpl) {
+    const f = pickFetch(fetchImpl);
+    const url =
+      ctx.origin + '/' + encodeURIComponent(ctx.session) + '/' + encodeURIComponent(ctx.artifact) + '/attach';
+    const res = await f(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Annotate-Token': ctx.token },
+      body: JSON.stringify({
+        head: payload.head,
+        data: payload.data,
+        mime: payload.mime || '',
+        name: payload.name || '',
+      }),
+      cache: 'no-store',
+    });
+    let json = null;
+    try {
+      json = await res.json();
+    } catch (e) {
+      /* non-JSON error body */
+    }
+    return Object.assign({ httpStatus: res.status }, json || {});
+  }
+
   // One-time load-probe heartbeat (§6.6, proven in S0): POST <origin>/loaded so setup can
   // confirm the extension injected + ran. Best-effort; never throws.
   function sendHeartbeat(ctx, fetchImpl) {
@@ -189,6 +218,7 @@
     resolveContext,
     discoverLiveContext,
     makeFeedbackSink,
+    uploadAttachment,
     postAccept,
     sendHeartbeat,
     fetchHead,

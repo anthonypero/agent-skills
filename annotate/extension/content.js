@@ -139,6 +139,11 @@
   const ICON_TRASH =
     '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
     '<path fill="currentColor" d="M268 160L268 128L372 128L372 160L356 160L356 144L284 144L284 160L268 160zM120 162L520 162L520 192L120 192L120 162zM170 212L196 540L444 540L470 212L170 212z"/></svg>';
+  // §I: the user-image ATTACH affordance — a paperclip (distinct from ICON_CAMERA, which is the
+  // tool's auto-capture screenshot toggle). fill=currentColor so the icon-only button recolors.
+  const ICON_PAPERCLIP =
+    '<svg class="annotate-icon" viewBox="0 0 448 512" aria-hidden="true" focusable="false">' +
+    '<path fill="currentColor" d="M364.2 83.8c-24.4-24.4-64-24.4-88.4 0l-184 184c-42.1 42.1-42.1 110.3 0 152.4s110.3 42.1 152.4 0l152-152c10.9-10.9 28.7-10.9 39.6 0s10.9 28.7 0 39.6l-152 152c-64 64-167.6 64-231.6 0s-64-167.6 0-231.6l184-184c46.3-46.3 121.3-46.3 167.6 0s46.3 121.3 0 167.6l-176 176c-28.6 28.6-75 28.6-103.6 0s-28.6-75 0-103.6l144-144c10.9-10.9 28.7-10.9 39.6 0s10.9 28.7 0 39.6l-144 144c-6.7 6.7-6.7 17.7 0 24.4s17.7 6.7 24.4 0l176-176c24.4-24.4 24.4-64 0-88.4z"/></svg>';
 
   // ---------------------------------------------------------------------------
   // small DOM helpers
@@ -177,6 +182,18 @@
   function setStatus(msg) {
     const s = doc.querySelector('.annotate-status');
     if (s) s.textContent = msg;
+  }
+
+  // §I: read a picked File as a data URL (used both for the inline preview thumbnail and to
+  // derive the base64 bytes the attach upload sends). Browser-only (FileReader); content.js
+  // is not unit-tested in Node (the server/CLI legs are).
+  function readFileAsDataURL(file) {
+    return new Promise(function (resolve, reject) {
+      const fr = new FileReader();
+      fr.onload = function () { resolve(fr.result); };
+      fr.onerror = function () { reject(fr.error || new Error('read-failed')); };
+      fr.readAsDataURL(file);
+    });
   }
 
   // §L hover labels: every chrome button surfaces its name as a styled tooltip on hover
@@ -824,12 +841,86 @@
       onclick: closeComposer,
     });
 
+    // §I: per-comment USER-IMAGE attach control — a NEW `.annotate-attach-*` namespace,
+    // distinct from `.annotate-shot-toggle` (the tool's auto-capture). A hidden file input is
+    // triggered by a visible paperclip button; on select the bytes are COPIED into the round
+    // folder immediately (before submit) and the stored filename is stamped on the bubble.
+    const attachInput = el('input', {
+      type: 'file',
+      accept: 'image/*',
+      class: 'annotate-attach-input',
+    });
+    const attachBtn = el('button', { class: 'annotate-btn annotate-attach-btn annotate-icon-btn', type: 'button' });
+    attachBtn.appendChild(svgIcon(ICON_PAPERCLIP));
+    setBtnLabel(attachBtn, 'Attach an image to this comment');
+    const attachThumb = el('img', { class: 'annotate-attach-thumb', alt: 'attachment preview' });
+    const attachName = el('span', { class: 'annotate-attach-name' });
+    const attachRemove = el('button', { class: 'annotate-btn annotate-attach-remove annotate-icon-btn', type: 'button', text: '×' });
+    setBtnLabel(attachRemove, 'Remove attachment');
+    const attachPreview = el('div', { class: 'annotate-attach-preview' }, [attachThumb, attachName, attachRemove]);
+    const attachRow = el('div', { class: 'annotate-attach-row' }, [attachBtn, attachPreview, attachInput]);
+
+    function clearAttachment() {
+      bubble.setAttachment(null);
+      attachThumb.removeAttribute('src');
+      attachName.textContent = '';
+      attachRow.classList.remove('annotate-has-attach');
+      card.removeAttribute('data-attachment');
+      attachInput.value = '';
+    }
+    function showAttachment(filename, previewSrc, label) {
+      bubble.setAttachment(filename);
+      if (previewSrc) attachThumb.src = previewSrc;
+      else attachThumb.removeAttribute('src'); // re-opened from disk: filename only, no inline bytes
+      attachName.textContent = label || filename;
+      attachRow.classList.add('annotate-has-attach');
+      attachRow.classList.toggle('annotate-attach-no-thumb', !previewSrc);
+      card.setAttribute('data-attachment', filename);
+    }
+
+    attachBtn.addEventListener('click', function () { attachInput.click(); });
+    attachRemove.addEventListener('click', clearAttachment);
+    attachInput.addEventListener('change', async function () {
+      const file = attachInput.files && attachInput.files[0];
+      if (!file) return;
+      setStatus('Attaching image…');
+      let dataUrl;
+      try {
+        dataUrl = await readFileAsDataURL(file);
+      } catch (e) {
+        setStatus('Could not read the image file');
+        attachInput.value = '';
+        return;
+      }
+      const comma = dataUrl.indexOf(',');
+      const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : '';
+      let res;
+      try {
+        // ON SELECT: copy the file into the round folder now (the explicit user preference).
+        res = await A.config.uploadAttachment(
+          ctx,
+          { head: ctx.head, data: b64, mime: file.type || '', name: file.name || '' },
+          fetchImpl
+        );
+      } catch (e) {
+        res = { error: String(e && e.message) };
+      }
+      if (res && res.httpStatus === 200 && res.filename) {
+        showAttachment(res.filename, dataUrl, file.name || res.filename);
+        setStatus('Image attached');
+      } else {
+        attachInput.value = '';
+        setStatus('Attach failed' + (res && res.error ? ': ' + res.error : ' (' + (res && res.httpStatus) + ')'));
+      }
+    });
+
     card.appendChild(el('div', { class: 'annotate-composer-head' }, [
       el('span', { class: 'annotate-anchor-label', text: anchorLabel(anchor) }),
       toggleBtn,
     ]));
     card.appendChild(input);
     card.appendChild(replInput);
+    card.appendChild(attachRow);
     card.appendChild(el('div', { class: 'annotate-composer-foot' }, [cancelBtn, addBtn]));
 
     // §B edit-in-place: when reopened from a saved comment's pin / sidebar row, seed the
@@ -844,6 +935,9 @@
         bubble.setType('comment');
         input.value = it.comment || '';
       }
+      // §I: re-surface an existing attachment (filename only — the inline preview bytes aren't
+      // re-fetched off disk; the human can Remove + re-pick to change it).
+      if (it.attachment) showAttachment(it.attachment, null, it.attachment);
     }
 
     // §A: when initiated from the comment icon, the composer opens AT THE ICON

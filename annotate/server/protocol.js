@@ -88,6 +88,37 @@ function screenshotIn(rDir, guid) {
 function nonceIn(rDir, guid) {
   return path.join(rDir, `${guid}-nonce`);
 }
+// v2.2 §I — a user-attached image copied into the round folder ON SELECT. Mirrors the
+// auto-capture `<guid>-screenshot.png` convention but is per-comment and self-supplied, so
+// the name carries a 1-based index + a server-derived extension: `<guid>-attach-<n>.<ext>`.
+// (The <ext> is sanitized server-side from the mime/type — see server.js extForAttachment —
+// so the filename is fully server-built and never a path-traversal vector.)
+function attachName(guid, n, ext) {
+  return `${guid}-attach-${n}.${ext}`;
+}
+function attachIn(rDir, guid, n, ext) {
+  return path.join(rDir, attachName(guid, n, ext));
+}
+// Next free attachment index in a round dir (max existing + 1; 1 when none). A single-user
+// composer attaches serially, so the simple scan is race-free in practice.
+function nextAttachIndex(rDir, guid) {
+  let names;
+  try {
+    names = fs.readdirSync(rDir);
+  } catch {
+    return 1;
+  }
+  const prefix = `${guid}-attach-`;
+  let max = 0;
+  for (const n of names) {
+    if (!n.startsWith(prefix)) continue;
+    const rest = n.slice(prefix.length); // "<n>.<ext>"
+    const dot = rest.indexOf('.');
+    const num = parseInt(dot >= 0 ? rest.slice(0, dot) : rest, 10);
+    if (Number.isInteger(num) && num > max) max = num;
+  }
+  return max + 1;
+}
 function tokenPath(sDir) {
   return path.join(sDir, 'session.json');
 }
@@ -255,6 +286,9 @@ module.exports = {
   roundJsonIn,
   screenshotIn,
   nonceIn,
+  attachName,
+  attachIn,
+  nextAttachIndex,
   tokenPath,
   urlMapPath,
   // io
