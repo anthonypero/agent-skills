@@ -68,13 +68,15 @@ function gestureExpr(fx0, fy0, fx1, fy1) {
 }
 
 function addCommentExpr(text) {
+  // §B: a staged comment now LIVES as a semi-transparent on-canvas PIN (the old right-margin
+  // card is gone). `cards` counts pins in their NEW home so the existing assertions hold.
   return `(() => {
     const ta = document.querySelector('.annotate-composer-input');
     if (!ta) return { err: 'no composer input' };
     ta.value = ${JSON.stringify(text)};
     ta.dispatchEvent(new Event('input', { bubbles: true }));
     document.querySelector('.annotate-add').click();
-    return { cards: document.querySelectorAll('.annotate-card').length, composerOpen: !!document.querySelector('.annotate-composer') };
+    return { cards: document.querySelectorAll('.annotate-comment-pin').length, composerOpen: !!document.querySelector('.annotate-composer') };
   })()`;
 }
 
@@ -139,7 +141,7 @@ async function main() {
       point.kind === 'spatial' && Array.isArray(pv) && pv.length === 2 && pv.every(clamp01ok) && !point.box,
       `kind=${point.kind}; point=${point.point}; rect=${JSON.stringify(point.rect)}`);
     const addP = await cdp.evaluate(addCommentExpr('image: this region needs more contrast'));
-    ok('point anchor staged as a comment card', addP.cards === 1 && !addP.composerOpen, `cards=${addP.cards}`);
+    ok('point anchor staged as a pin (§B on-canvas presence)', addP.cards === 1 && !addP.composerOpen, `pins=${addP.cards}`);
 
     // ---- A3: DRAG -> normalized spatial BOX anchor (no crop, just coords) ----
     const box = await cdp.evaluate(gestureExpr(0.2, 0.25, 0.7, 0.8)); // real travel -> box
@@ -148,7 +150,7 @@ async function main() {
       box.kind === 'spatial' && Array.isArray(bv) && bv.length === 4 && bv.every(clamp01ok) && bv[2] > 0 && bv[3] > 0 && !box.point,
       `kind=${box.kind}; box=${box.box}`);
     const addB = await cdp.evaluate(addCommentExpr('image: crop tighter around this region'));
-    ok('box anchor staged as a second comment card', addB.cards === 2, `cards=${addB.cards}`);
+    ok('box anchor staged as a second pin (§B on-canvas presence)', addB.cards === 2, `pins=${addB.cards}`);
 
     // ---- A4: Send -> BOTH spatial anchors land on disk ----
     await cdp.evaluate(`document.querySelector('.annotate-send').click()`);
@@ -192,7 +194,7 @@ async function main() {
       head: (() => { const e = document.getElementById('annotate-config'); try { return JSON.parse(e.textContent).head; } catch (_) { return null; } })(),
       pendingAdvance: (document.getElementById('annotate-chrome') || {}).getAttribute ? document.getElementById('annotate-chrome').getAttribute('data-pending-advance') : null,
       warnBanner: !!document.querySelector('.annotate-advance-warn'),
-      cards: document.querySelectorAll('.annotate-card').length,
+      cards: document.querySelectorAll('.annotate-comment-pin').length, // §B: staged comment now lives as a pin
     }))()`);
     ok('preserve-unsent: a new head does NOT silently reload while a draft is staged (warns + keeps it)',
       preserve.sentinel === 'R2' && preserve.head === r2.guid && preserve.pendingAdvance === r3.guid && preserve.warnBanner && preserve.cards >= 1,
@@ -238,12 +240,17 @@ async function main() {
     ok('code view: screenshot gated OFF (data-screenshot-active=0 on a source view)',
       codeView.isCode && codeView.shotActive === '0', `isCode=${codeView.isCode}; shotActive=${codeView.shotActive}`);
 
+    // §A icon-only: hover the code line to reveal the comment icon, then click ONLY the icon
+    // (a code line is a plain block — no §C heading split). The v1 click-the-line path is gone.
     const codeClick = await cdp.evaluate(`(() => {
       const line = document.querySelector('.annotate-render [data-src-line]');
       if (!line) return { err: 'no line' };
-      line.click();
+      const r = line.getBoundingClientRect();
+      line.dispatchEvent(new MouseEvent('mousemove', { clientX: r.left + 5, clientY: r.top + 5, button: 0, bubbles: true, cancelable: true, view: window }));
+      const icon = document.querySelector('.annotate-comment-affordance');
+      if (icon) icon.click();
       const c = document.querySelector('.annotate-composer');
-      return { kind: c && c.getAttribute('data-anchor-kind'), line: c && c.getAttribute('data-anchor-line') };
+      return { iconShown: !!icon, kind: c && c.getAttribute('data-anchor-kind'), line: c && c.getAttribute('data-anchor-line') };
     })()`);
     await cdp.evaluate(addCommentExpr('code: this line'));
     await cdp.evaluate(`document.querySelector('.annotate-send').click()`);

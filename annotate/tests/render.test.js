@@ -152,6 +152,102 @@ test('markdown DRIFT: fenced code block + the block after it keep exact lines', 
 });
 
 // ===========================================================================
+// §C (v2.1) — nested <section class="annotate-section" data-src-line-range>
+// ===========================================================================
+
+test('markdown SECTION: each heading is the first child of a <section> with data-src-line-range', () => {
+  const { html } = render(fx('sample-sections.md'));
+  const root = dom(html);
+  const sections = [...root.querySelectorAll('section.annotate-section')];
+
+  // sample-sections.md has 4 headings (H1, H2, H3, H2) -> 4 wrapping sections.
+  assert.equal(sections.length, 4, 'one <section> per top-level heading');
+
+  // Every section's FIRST element child is the heading, and the section carries the
+  // inclusive 1-based data-src-line-range while the heading keeps its own data-src-line.
+  for (const s of sections) {
+    const first = s.firstElementChild;
+    assert.ok(/^H[1-6]$/.test(first.tagName), `section's first child must be a heading, got ${first.tagName}`);
+    assert.match(
+      s.getAttribute('data-src-line-range') || '',
+      /^\d+-\d+$/,
+      'section must carry data-src-line-range="N-M"'
+    );
+    assert.equal(s.hasAttribute('data-src-line'), false, 'section itself is NOT a [data-src-line] anchorable node');
+  }
+});
+
+test('markdown SECTION: line-ranges span heading -> last line before the next same-or-higher heading', () => {
+  const { html } = render(fx('sample-sections.md'));
+  const root = dom(html);
+  const rangeOf = (headingText) => {
+    const h = [...root.querySelectorAll('h1,h2,h3')].find((e) => norm(e.textContent) === headingText);
+    return h.parentElement.getAttribute('data-src-line-range');
+  };
+  // H1 wraps the WHOLE doc (no other H1): lines 1-15.
+  assert.equal(rangeOf('Doc Title'), '1-15');
+  // "## Section One" (line 5) closes just before "## Section Two" (line 13): 5-12.
+  assert.equal(rangeOf('Section One'), '5-12');
+  // "### Subsection A" (line 9) closes at the same boundary (next same-or-higher heading): 9-12.
+  assert.equal(rangeOf('Subsection A'), '9-12');
+  // "## Section Two" (line 13) is the trailing section: 13 to doc end (15).
+  assert.equal(rangeOf('Section Two'), '13-15');
+});
+
+test('markdown SECTION: subsection <section> nests INSIDE its parent section', () => {
+  const { html } = render(fx('sample-sections.md'));
+  const root = dom(html);
+  const subA = [...root.querySelectorAll('h3')].find((e) => norm(e.textContent) === 'Subsection A');
+  const subSection = subA.parentElement; // the H3's wrapping section
+  const sectionOne = [...root.querySelectorAll('h2')].find((e) => norm(e.textContent) === 'Section One').parentElement;
+  assert.ok(sectionOne.contains(subSection) && sectionOne !== subSection, 'the H3 section must nest inside the H2 (Section One) section');
+});
+
+test('markdown SECTION: single-heading doc wraps everything in one section; data-src-line unchanged', () => {
+  const { html } = render(fx('sample.md'));
+  const root = dom(html);
+  const sections = [...root.querySelectorAll('section.annotate-section')];
+  assert.equal(sections.length, 1, 'one section for the lone H1');
+  assert.equal(sections[0].getAttribute('data-src-line-range'), '1-17');
+  assert.equal(sections[0].firstElementChild.tagName, 'H1');
+  // The inner blocks keep their exact data-src-line (anchoring is unaffected by the wrap).
+  const byLine = srcLineIndex(html);
+  assert.ok((byLine.get(5) || []).some((e) => e.tagName === 'LI'), 'list item still anchored at line 5');
+  assert.ok((byLine.get(12) || []).some((e) => e.tagName === 'PRE'), 'fence still anchored at line 12');
+});
+
+// ===========================================================================
+// §D (v2.1) — each markdown <table> wrapped in <div class="annotate-table-wrap">
+// ===========================================================================
+
+test('markdown TABLE: each table is wrapped in div.annotate-table-wrap (full-width/scroll, §D)', () => {
+  const { html } = render(fx('sample-table.md'));
+  const root = dom(html);
+
+  const tables = [...root.querySelectorAll('table')];
+  assert.equal(tables.length, 1, 'sample-table.md has one table');
+  const table = tables[0];
+
+  // The table's parent is the §D scroll wrapper.
+  const wrap = table.parentElement;
+  assert.equal(wrap.tagName, 'DIV', "the table's parent is a <div>");
+  assert.ok(
+    wrap.classList.contains('annotate-table-wrap'),
+    'the <table> is wrapped in .annotate-table-wrap'
+  );
+
+  // The wrapper is purely presentational — NOT an anchorable node.
+  assert.equal(wrap.hasAttribute('data-src-line'), false, 'the wrap carries no data-src-line');
+  assert.equal(wrap.hasAttribute('data-key-path'), false, 'the wrap carries no data-key-path');
+
+  // Anchoring is unaffected: the <table> keeps its exact source line (the header row, line 5).
+  assert.equal(table.getAttribute('data-src-line'), '5', 'the table keeps data-src-line=5 (no drift)');
+
+  // And exactly one .annotate-table-wrap per table (no double-wrap).
+  assert.equal(root.querySelectorAll('.annotate-table-wrap').length, 1, 'exactly one wrap');
+});
+
+// ===========================================================================
 // Code — one data-src-line per rendered line (highlight.js)
 // ===========================================================================
 

@@ -93,23 +93,33 @@ const LAST_SUBMIT = `document.getElementById('annotate-chrome').getAttribute('da
 const LAST_ACCEPT = `document.getElementById('annotate-chrome').getAttribute('data-last-accept')`;
 
 function addCommentExpr(text) {
+  // §B: a staged comment now LIVES as a semi-transparent on-canvas PIN (the old right-margin
+  // rail/card is gone). Count the pin in its new home (not asserted here — the loop asserts
+  // on disk — but kept correct for parity with the other gates).
   return `(() => {
     const ta = document.querySelector('.annotate-composer-input');
     if (!ta) return { err: 'no composer input' };
     ta.value = ${JSON.stringify(text)};
     ta.dispatchEvent(new Event('input', { bubbles: true }));
     document.querySelector('.annotate-add').click();
-    return { cards: document.querySelectorAll('.annotate-card').length };
+    return { cards: document.querySelectorAll('.annotate-comment-pin').length };
   })()`;
 }
 
+// §A icon-only: HOVER a block to reveal the comment icon, then click ONLY the icon (the v1
+// click-the-line path is gone). Prefer a <p> (markdown plain block) so we avoid the §C
+// heading text-vs-section split; code views have no <p>, so fall back to the first stamped line.
 const clickLineExpr = `(() => {
-  const line = document.querySelector('.annotate-render [data-src-line]');
-  if (!line) return { err: 'no data-src-line node' };
-  const srcLine = parseInt(line.getAttribute('data-src-line'), 10);
-  line.click();
+  const block = document.querySelector('.annotate-render p[data-src-line]') ||
+                document.querySelector('.annotate-render [data-src-line]');
+  if (!block) return { err: 'no data-src-line node' };
+  const srcLine = parseInt(block.getAttribute('data-src-line'), 10);
+  const r = block.getBoundingClientRect();
+  block.dispatchEvent(new MouseEvent('mousemove', { clientX: r.left + 5, clientY: r.top + 5, button: 0, bubbles: true, cancelable: true, view: window }));
+  const icon = document.querySelector('.annotate-comment-affordance');
+  if (icon) icon.click();
   const c = document.querySelector('.annotate-composer');
-  return { srcLine, kind: c && c.getAttribute('data-anchor-kind'), line: c && c.getAttribute('data-anchor-line') };
+  return { srcLine, iconShown: !!icon, kind: c && c.getAttribute('data-anchor-kind'), line: c && c.getAttribute('data-anchor-line') };
 })()`;
 
 function gestureExpr(fx0, fy0, fx1, fy1) {

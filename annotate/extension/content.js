@@ -8,11 +8,19 @@
 //                config (Annotate.config), fire the one-time /loaded heartbeat (§6.6 / S0),
 //                inject the REQUIRED top "Annotate chrome" bar (accept + send + format badge +
 //                Copy + expand + reserved version slot), and start the 1s head auto-advance poll.
-//   click     -> read the renderer's stamped position attribute off the clicked node
-//                (Annotate.code for code views, Annotate.dom otherwise) -> a §5.2 anchor;
-//                open the comment/edit composer anchored to it.
-//   select    -> the REFS selection-pill affordance ("highlight to add a comment").
-//   add       -> Annotate.bubble draft -> a right-margin comment card.
+//   hover     -> outline the anchorable block (a single <section> / its <h_> on a heading,
+//                §C) and float the ONE comment icon (§A) at its edge. Transient: moving off
+//                the block hides it. Clicking BODY TEXT does nothing — only the icon starts a
+//                comment (the v1 click-anywhere region handler is gone; native selection +
+//                the browser context menu are left untouched).
+//   select    -> the same comment icon appears next to the selection; transient (the icon
+//                disappears if the selection collapses before the icon is clicked).
+//   icon click-> open the comment/edit composer AT THE ICON (openComposerAt — a reusable
+//                open-at-an-arbitrary-screen-point path) on the hovered/selected §5.2 anchor.
+//   add       -> a saved draft becomes a SEMI-TRANSPARENT comment-bubble PIN at its anchor
+//                (§B; rides with the content as it scrolls) PLUS a row in the toggleable
+//                comment SIDEBAR. The old right-margin rail is gone. Pin-click edits in place
+//                (sidebar closed) or scrolls the sidebar to that comment (sidebar open).
 //   send      -> Annotate.submit.submitFeedback with the REAL fetch sink (token in
 //                X-Annotate-Token) -> POST /feedback -> the server flips the round to submitted.
 //   accept    -> Annotate.config.postAccept (head-checked) -> the server flips to accepted.
@@ -26,7 +34,8 @@
 // [data-annotate-ready="1"] once initialized; the chrome is #annotate-chrome with .annotate-accept
 // and .annotate-send; a click on a [data-src-line] node opens .annotate-composer carrying
 // [data-anchor-kind]/[data-anchor-line]; .annotate-composer-input + .annotate-add compose a draft
-// (-> a .annotate-card[data-anchor-line]); after send/accept the chrome carries
+// (-> a .annotate-comment-pin[data-anchor-line] on the canvas + a .annotate-sidebar-item row,
+// §B); after send/accept the chrome carries
 // [data-last-submit] / [data-last-accept] result attributes. The integration gate drives these
 // via real DOM clicks and reads the result attributes.
 
@@ -58,9 +67,16 @@
   let deferredHead = null; // a new head awaiting in-progress work to clear (preserve-unsent)
   let screenshotToggle = true; // gated screenshot on/off (chrome.storage.local, default on)
   let widthPreset = 'comfortable'; // #3 reading-width preset (chrome.storage.local)
-  let hoverEl = null; // #1 the block currently hover-highlighted
-  let hoverEls = null; // #1 every element in the hovered region (a whole section for a heading)
+  let hoverEl = null; // §A the block currently hover-highlighted
+  let hoverEls = null; // §A the element(s) currently outlined (the block, or a single <section>)
+  let hoverMode = null; // §C 'block' | 'header' | 'section' — drives the anchor + outline target
   let viewKind = null; // cached detectView().kind (the view can't change without a reload)
+  // §B: every saved comment becomes an entry { item, pin, listItem, anchorEl }. The pins ride
+  // the canvas; the listItems fill the sidebar; both share one bidirectional-sync registry.
+  const comments = [];
+  let sidebarOpen = false; // §B sidebar open/closed — a pin-click's behavior depends on this
+  let pinRaf = null; // rAF token throttling pin repositioning on scroll/resize/reflow
+  const SIDEBAR_W = 320; // §B sidebar width (px); the shrink/overlay layouts key off this
 
   // #3 reading-width presets: a small cycle the width control steps through. Applied as a
   // max-width on the Markdown reading column (inert on code/image/wide-table — full-bleed).
@@ -75,6 +91,28 @@
   const ICON_WIDTH =
     '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
     '<path fill="currentColor" d="M64 176L64 480L32 480L32 160L64 160L64 176zM608 176L608 480L576 480L576 160L608 160L608 176zM518.6 320L507.3 331.3L427.3 411.3L416 422.6L393.4 400L404.7 388.7L457.4 336L182.7 336L235.4 388.7L246.7 400L224.1 422.6L212.8 411.3L132.8 331.3L121.5 320L132.8 308.7L212.8 228.7L224.1 217.4L246.7 240C246.1 240.6 224.7 262 182.7 304L457.4 304L404.7 251.3L393.4 240L416 217.4L427.3 228.7L507.3 308.7L518.6 320z"/></svg>';
+  // §A: the ONE comment affordance — a speech-bubble icon (comment.svg Sharp Light). It is
+  // the ONLY way to start a comment (hover a block, or select text, then click THIS icon).
+  // No "+", no "Highlight to add a comment" / "BLOCK" / "SECTION" text labels anywhere.
+  const ICON_COMMENT =
+    '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
+    '<path fill="currentColor" d="M152.6 443.4C150.9 447.6 140.1 474.1 120.2 522.9L206.1 493.4L217.6 489.5L228.8 494.1C256.6 505.6 287.4 512.1 320 512.1C445.7 512.1 544 417.1 544 304.1C544 191.1 445.7 96 320 96C194.3 96 96 191 96 304C96 350.6 112.5 393.8 140.7 428.7L152.6 443.4zM104.2 562.2L64 576C71.4 557.9 88.7 515.4 115.8 448.8C83.3 408.6 64 358.4 64 304C64 171.5 178.6 64 320 64C461.4 64 576 171.5 576 304C576 436.5 461.4 544 320 544C283.2 544 248.1 536.7 216.5 523.6L104.2 562.2z"/></svg>';
+  // §F: the doc-level add-comment affordance mounted at the TOP OF THE SIDEBAR (comment-plus
+  // Sharp Light) — creates a whole-document comment ({kind:'source', lineRange:[1, lastLine]}).
+  const ICON_COMMENT_PLUS =
+    '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
+    '<path fill="currentColor" d="M145.5 460.9L152.6 443.4L140.7 428.7C112.5 393.8 96 350.6 96 304C96 191 194.3 96 320 96C445.7 96 544 191 544 304C544 417 445.7 512 320 512C287.4 512 256.6 505.6 228.8 494L217.6 489.4L206.1 493.3L120.2 522.8L145.4 460.8zM64 576C78.8 570.9 129.6 553.4 216.5 523.6C248.1 536.7 283.2 544 320 544C461.4 544 576 436.5 576 304C576 171.5 461.4 64 320 64C178.6 64 64 171.5 64 304C64 358.4 83.3 408.6 115.8 448.8C88.7 515.5 71.4 557.9 64 576zM304 392L336 392L336 320L408 320L408 288L336 288L336 216L304 216L304 288L232 288L232 320L304 320L304 392z"/></svg>';
+  // §F: the reading-width control is now ICON-ONLY and cycles ALL THREE presets, showing the
+  // icon for the CURRENT preset: comfortable(compact) = compress, wide = expand, full = the
+  // arrows-left-right-to-line (<->) — all Sharp Light inline SVG.
+  const ICON_COMPRESS =
+    '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
+    '<path fill="currentColor" d="M256 112L256 96L224 96L224 224L96 224L96 256L256 256L256 112zM112 384L96 384L96 416L224 416L224 544L256 544L256 384L112 384zM416 112L416 96L384 96L384 256L544 256L544 224L416 224L416 112zM400 384L384 384L384 544L416 544L416 416L544 416L544 384L400 384z"/></svg>';
+  const ICON_EXPAND =
+    '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
+    '<path fill="currentColor" d="M240 96L256 96L256 128L128 128L128 256L96 256L96 96L240 96zM96 400L96 384L128 384L128 512L256 512L256 544L96 544L96 400zM528 96L544 96L544 256L512 256L512 128L384 128L384 96L528 96zM512 400L512 384L544 384L544 544L384 544L384 512L512 512L512 400z"/></svg>';
+  // current-preset -> icon (the button shows the icon for the state it is IN).
+  const WIDTH_ICONS = { comfortable: ICON_COMPRESS, wide: ICON_EXPAND, full: ICON_WIDTH };
 
   // ---------------------------------------------------------------------------
   // small DOM helpers
@@ -194,8 +232,37 @@
     return els;
   }
 
+  // §C: the section anchor derives DIRECTLY from the render.js wrapper's data-src-line-range
+  // ("N-M") rather than re-walking siblings. null if the heading isn't section-wrapped.
+  function sectionAnchorFromWrapper(section) {
+    if (!section) return null;
+    const m = /^(\d+)-(\d+)$/.exec(section.getAttribute('data-src-line-range') || '');
+    if (!m) return null;
+    return { kind: 'source', lineRange: [parseInt(m[1], 10), parseInt(m[2], 10)] };
+  }
+
+  // §C hit-test: is the pointer over the heading's actual TEXT RUN (its glyph rects) vs the
+  // empty horizontal area of the (full-width) heading line? Over the text -> header-only;
+  // over the empty area -> the whole section. Uses the rendered text rects, so it is correct
+  // for any font/zoom and tolerates a heading that wraps to multiple lines.
+  function pointerOverTextRun(h, x, y) {
+    try {
+      const range = doc.createRange();
+      range.selectNodeContents(h);
+      const rects = range.getClientRects();
+      for (let i = 0; i < rects.length; i++) {
+        const r = rects[i];
+        if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return true;
+      }
+    } catch (e) {
+      /* fall through to "not over text" */
+    }
+    return false;
+  }
+
   // A heading -> its whole section as an inclusive 1-based [start, end] line range (#2):
   // heading line through the line BEFORE the next same-or-higher heading (or doc end).
+  // Sibling-walk FALLBACK for when the render.js <section> wrapper is absent.
   function sectionRange(h) {
     const start = parseInt(h.getAttribute('data-src-line'), 10) || 1;
     const L = headingLevel(h);
@@ -224,43 +291,44 @@
     viewKind = view.kind; // cache for the hover hot path
     const widthApplies = view.kind === 'markdown'; // #3: reading width suits prose only
 
-    // #2 document affordance: "comment on the whole document" (Markdown / code views).
-    const docCommentBtn =
-      view.kind === 'markdown' || view.kind === 'code'
-        ? el('button', {
-            class: 'annotate-btn annotate-doc-comment',
-            type: 'button',
-            title: 'Comment on the whole document',
-            onclick: onDocComment,
-            text: 'Comment on doc',
-          })
-        : null;
-
-    // #3 + #4: the reading-width preset control REPLACES the old Expand button — the
-    // arrows-left-right-to-line (<->) icon + the current preset label. Inert (full-bleed)
-    // on code/image/wide-table.
+    // §F #3 + #4: the reading-width control is ICON-ONLY now — no "Wide" text label. It cycles
+    // ALL THREE presets (compact -> wide -> full -> compact) and shows the icon for the current
+    // state (compress / expand / arrows-left-right-to-line). Inert (full-bleed) on
+    // code/image/wide-table.
     const widthBtn = el('button', {
-      class: 'annotate-btn annotate-width' + (widthApplies ? '' : ' annotate-btn-inert'),
+      class: 'annotate-btn annotate-width annotate-icon-btn' + (widthApplies ? '' : ' annotate-btn-inert'),
       type: 'button',
-      title: widthApplies ? 'Reading width — click to cycle presets' : 'Reading width (full-bleed for this view)',
+      title: widthApplies ? widthTitle() : 'Reading width (full-bleed for this view)',
       onclick: onCycleWidth,
-    }, [svgIcon(ICON_WIDTH), el('span', { class: 'annotate-btn-label annotate-width-label', text: WIDTH_LABELS[widthPreset] })]);
+    }, [svgIcon(WIDTH_ICONS[widthPreset])]);
 
-    // #4: screenshot toggle = the camera icon, brighter blue when active (reflectShotToggle).
+    // §F #4: screenshot toggle = the CAMERA ICON ONLY (no "Screenshot" word); brighter blue
+    // when active (reflectShotToggle).
     const shotBtn = el('button', {
-      class: 'annotate-btn annotate-shot-toggle',
+      class: 'annotate-btn annotate-shot-toggle annotate-icon-btn',
       type: 'button',
       title: 'Attach a viewport screenshot on send (visual views only)',
       onclick: onToggleShot,
-    }, [svgIcon(ICON_CAMERA), el('span', { class: 'annotate-btn-label', text: 'Screenshot' })]);
+    }, [svgIcon(ICON_CAMERA)]);
+
+    // §F: the SINGLE top-bar comment-bubble — it REPLACES the old "Comment on doc" text button
+    // and the interim §B `.annotate-sidebar-toggle`, consolidated into one icon whose job is to
+    // open/close the §B comment sidebar. The whole-document comment action now lives at the top
+    // of that sidebar (mountSidebarDocAdd), not in the top bar.
+    const sidebarBtn = el('button', {
+      class: 'annotate-btn annotate-sidebar-toggle annotate-icon-btn',
+      type: 'button',
+      title: 'Toggle the comment sidebar',
+      'aria-pressed': 'false',
+      onclick: function () { toggleSidebar(); },
+    }, [svgIcon(ICON_COMMENT)]);
 
     const actions = [
       // Reserved slot for the deferred revert/version dropdown (PRD §6 — seam only in v1).
       el('div', { class: 'annotate-version-slot', title: 'version history (coming soon)', text: 'v ▾' }),
-      docCommentBtn,
+      sidebarBtn,
       widthBtn,
       shotBtn,
-      el('button', { class: 'annotate-btn annotate-copy', type: 'button', onclick: onCopy, text: 'Copy' }),
       el('button', {
         class: 'annotate-btn annotate-send',
         type: 'button',
@@ -294,10 +362,19 @@
       el('div', { class: 'annotate-ui annotate-status', text: 'Ready — click a line, hover a block, or select text to annotate' })
     );
 
-    // Right rail that holds the margin comment cards (REFS: cards aligned to the right).
-    doc.body.appendChild(el('div', { class: 'annotate-ui annotate-rail', id: 'annotate-rail' }, []));
+    // §B: the comment SIDEBAR (supersedes the old right-margin rail + the accordion idea).
+    // Closed by default; the top-bar comment-bubble (and, later, §F) toggles it.
+    buildSidebar();
 
     applyWidth(); // reflect the current preset on <body> + the control label
+    // Stamp the screenshot gating SYNCHRONOUSLY here, while the view is first set up and
+    // BEFORE init() sets data-annotate-ready="1". reflectShotToggle() derives data-screenshot
+    // /data-screenshot-active from the current view + the default toggle (screenshotToggle is
+    // true at module load), so an image view reads data-screenshot-active="1" the instant the
+    // chrome exists. loadShotToggle() then REFINES this asynchronously from chrome.storage —
+    // but that async storage callback must NOT be what first publishes the attribute, or a
+    // reader gated on data-annotate-ready (e.g. the image-gate) can win the race and read null.
+    reflectShotToggle();
   }
 
   function updateSendCount() {
@@ -305,30 +382,33 @@
     if (b) b.textContent = 'Send feedback (' + drafts.length + ')';
   }
 
-  function onCopy() {
-    const target = doc.querySelector('.annotate-render') || doc.body;
-    const text = target.innerText || '';
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(() => setStatus('Copied'), () => setStatus('Copy blocked'));
-      } else {
-        setStatus('Copy unavailable');
-      }
-    } catch (e) {
-      setStatus('Copy unavailable');
-    }
-  }
+  // §F: "Copy" is GONE — native browser selection (⌘C / right-click → Copy) works now that
+  // click-anywhere-to-comment is removed (§A) and nothing hijacks the selection / context menu.
 
   // ---------------------------------------------------------------------------
-  // #3 reading-width preset — cycles a small set of max-width presets over the
-  // Markdown reading column; persisted per-user (chrome.storage.local); inert on
-  // code/image/wide-table (full-bleed).
+  // §F #3 reading-width preset — an ICON-ONLY control cycling all three max-width presets
+  // over the Markdown reading column; persisted per-user (chrome.storage.local); inert on
+  // code/image/wide-table (full-bleed). The button shows the icon for the CURRENT preset.
   // ---------------------------------------------------------------------------
+
+  function widthTitle() {
+    return 'Reading width: ' + WIDTH_LABELS[widthPreset] + ' — click to cycle presets';
+  }
+
+  // Swap the width control's icon to the current preset's icon (no text label, §F). Replaces
+  // the icon span's children in place so the button element + its click handler are preserved.
+  function refreshWidthIcon() {
+    const btn = doc.querySelector('.annotate-width');
+    if (!btn) return;
+    const wrap = btn.querySelector('.annotate-icon-wrap');
+    if (wrap) wrap.innerHTML = WIDTH_ICONS[widthPreset];
+    if (detectView().kind === 'markdown') btn.setAttribute('title', widthTitle());
+  }
 
   function applyWidth() {
     doc.body.setAttribute('data-annotate-width', widthPreset);
-    const lbl = doc.querySelector('.annotate-width-label');
-    if (lbl) lbl.textContent = WIDTH_LABELS[widthPreset];
+    refreshWidthIcon();
+    schedulePinReposition(); // §B: a width change reflows the column -> pins must re-track
   }
 
   function persistWidth() {
@@ -469,7 +549,8 @@
   // Open the comment/edit composer for an anchor. `selectedText` seeds the edit box.
   function openComposer(opts) {
     closeComposer();
-    clearHover(); // a composer supersedes the transient hover affordance (#1)
+    clearHover(); // a composer supersedes the transient hover affordance (§A)
+    removeSelectionIcon(); // ...and the transient selection affordance
     const anchor = opts.anchor;
     const bubble = A.bubble.createBubble(anchor, { selectedText: opts.selectedText || '' });
     pending = { bubble, anchor, element: opts.element || null };
@@ -526,7 +607,11 @@
         setStatus(bubble.type === 'comment' ? 'Enter a comment first' : 'Enter a replacement first');
         return;
       }
-      addDraft(bubble.toFeedback());
+      const item = bubble.toFeedback();
+      // §B: reopened from a pin / sidebar row -> update that comment in place (no duplicate);
+      // otherwise it is a brand-new draft.
+      if (opts.editEntry) updateEntry(opts.editEntry, item);
+      else addDraft(item);
       closeComposer();
     });
 
@@ -545,10 +630,55 @@
     card.appendChild(replInput);
     card.appendChild(el('div', { class: 'annotate-composer-foot' }, [cancelBtn, addBtn]));
 
-    positionNear(card, opts.element);
+    // §B edit-in-place: when reopened from a saved comment's pin / sidebar row, seed the
+    // composer with the existing content (and switch to the edit field for an edit item) so
+    // the human edits FROM what they wrote.
+    if (opts.editEntry) {
+      const it = opts.editEntry.item;
+      if (it.type === 'edit') {
+        bubble.setType('edit');
+        if (it.replacement != null) replInput.value = it.replacement;
+      } else {
+        bubble.setType('comment');
+        input.value = it.comment || '';
+      }
+    }
+
+    // §A: when initiated from the comment icon, the composer opens AT THE ICON
+    // (opts.point — a viewport {x,y}); otherwise it falls back to the top-right placement
+    // (the whole-document "Comment on doc" path, which has no on-canvas origin).
+    if (opts.point) positionAtPoint(card, opts.point);
+    else positionNear(card, opts.element);
     doc.body.appendChild(card);
     renderMode();
     input.focus();
+  }
+
+  // §A reusable open-at-an-arbitrary-screen-point entry. A later agent (§B) reuses this to
+  // reopen the composer in place at a saved comment's pin: openComposerAt({x,y}, {anchor,...}).
+  // `point` is in VIEWPORT (clientX/clientY) coordinates.
+  function openComposerAt(point, opts) {
+    openComposer(Object.assign({}, opts, { point: point }));
+  }
+
+  // The viewport point of a floating affordance icon (its bottom-left), used to open the
+  // composer right at the icon the user just clicked.
+  function iconPoint(node) {
+    const r = node.getBoundingClientRect();
+    return { x: r.left, y: r.bottom };
+  }
+
+  // Place the composer at a viewport point (converted to page coords for position:absolute),
+  // nudged just below-right and clamped so the 320px card stays within the viewport width.
+  function positionAtPoint(card, point) {
+    const vw = doc.documentElement.clientWidth || 1024;
+    const cardW = 320;
+    let vx = point.x + 8;
+    if (vx + cardW > vw - 8) vx = Math.max(8, vw - cardW - 8);
+    const vy = Math.max(60, point.y + 8);
+    card.style.position = 'absolute';
+    card.style.left = vx + (root.scrollX || 0) + 'px';
+    card.style.top = vy + (root.scrollY || 0) + 'px';
   }
 
   function positionNear(card, element) {
@@ -564,13 +694,15 @@
   }
 
   // ---------------------------------------------------------------------------
-  // drafts + margin cards
+  // §B drafts -> semi-transparent PINS (on canvas) + a toggleable comment SIDEBAR.
+  // Saving a comment registers an entry; the entry owns a pin (canvas presence + in-place
+  // edit) and a sidebar row (the list + navigation), wired for bidirectional sync.
   // ---------------------------------------------------------------------------
 
   function addDraft(item) {
     drafts.push(item);
-    renderCard(item);
-    // A committed spatial anchor leaves a visible marker over the image (§6.4 image adapter).
+    registerComment(item); // §B: pin (canvas) + sidebar row, in one registry entry
+    // A committed spatial anchor also leaves the image-adapter's region marker over the image.
     if (item.anchor && item.anchor.kind === 'spatial' && A.image && A.image.placeMarker) {
       A.image.placeMarker(doc, item.anchor, root);
     }
@@ -578,54 +710,425 @@
     setStatus(drafts.length + ' annotation' + (drafts.length === 1 ? '' : 's') + ' staged — Send when ready');
   }
 
-  function renderCard(item) {
-    const rail = doc.getElementById('annotate-rail');
-    if (!rail) return;
-    const a = item.anchor || {};
-    const card = el('div', {
-      class: 'annotate-card annotate-card-' + item.type,
-      'data-anchor-kind': a.kind,
+  // Stamp the §5.2 anchor onto a DOM node as data-anchor-* attrs (shared by pins + sidebar
+  // rows; the gates read these to locate a staged comment in its NEW home).
+  function setAnchorAttrs(node, a) {
+    if (!a) return;
+    node.setAttribute('data-anchor-kind', a.kind);
+    if (a.line != null) node.setAttribute('data-anchor-line', String(a.line));
+    if (a.lineRange != null) node.setAttribute('data-anchor-line-range', JSON.stringify(a.lineRange));
+    if (a.keyPath != null) node.setAttribute('data-anchor-keypath', a.keyPath);
+    if (a.cell != null) node.setAttribute('data-anchor-cell', a.cell);
+    if (a.point != null) node.setAttribute('data-anchor-point', JSON.stringify(a.point));
+    if (a.box != null) node.setAttribute('data-anchor-box', JSON.stringify(a.box));
+  }
+
+  // ---- reverse map: a §5.2 anchor -> the rendered element it points at (for pin placement
+  // + scroll-into-view). document/code anchors resolve to a stamped node; spatial anchors
+  // resolve to the image (positioned by the normalized point). ----
+
+  function renderRoot() {
+    return doc.querySelector('.annotate-render') || doc.body;
+  }
+  function lineEl(n) {
+    return doc.querySelector('.annotate-render [data-src-line="' + n + '"]');
+  }
+  function keyPathEl(kp) {
+    const nodes = doc.querySelectorAll('.annotate-render [data-key-path]');
+    for (let i = 0; i < nodes.length; i++) {
+      if (nodes[i].getAttribute('data-key-path') === kp) return nodes[i];
+    }
+    return null;
+  }
+  function elementForAnchor(a) {
+    if (!a) return null;
+    if (a.lineRange != null) {
+      // §C section wrapper first (data-src-line-range), else the heading at the start line.
+      return (
+        doc.querySelector('.annotate-section[data-src-line-range="' + a.lineRange[0] + '-' + a.lineRange[1] + '"]') ||
+        lineEl(a.lineRange[0])
+      );
+    }
+    if (a.line != null) return lineEl(a.line);
+    if (a.keyPath != null) return keyPathEl(a.keyPath);
+    if (a.cell != null) return doc.querySelector('.annotate-render [data-cell="' + a.cell + '"]');
+    if (a.kind === 'spatial') return doc.querySelector('.annotate-image img') || renderRoot();
+    return null;
+  }
+
+  // ---- pins ----
+
+  // Register a saved comment: build its pin + sidebar row, push the entry, lay out the pin.
+  function registerComment(item) {
+    const entry = { item: item, pin: null, listItem: null, anchorEl: null };
+    entry.anchorEl =
+      item.anchor.kind === 'spatial' ? (doc.querySelector('.annotate-image img') || null) : elementForAnchor(item.anchor);
+    entry.pin = makePin(entry);
+    doc.body.appendChild(entry.pin);
+    entry.listItem = makeSidebarItem(entry);
+    appendSidebarItem(entry.listItem);
+    comments.push(entry);
+    schedulePinReposition();
+    return entry;
+  }
+
+  // The semi-transparent comment-bubble pin (same ICON_COMMENT used to create it, §A).
+  function makePin(entry) {
+    const pin = el('div', {
+      class: 'annotate-ui annotate-comment-pin annotate-comment-pin-' + entry.item.type,
+      role: 'button',
+      title: 'Saved comment — click to edit (with the sidebar open, click to find it in the list)',
+      'aria-label': 'Saved comment',
+    }, [svgIcon(ICON_COMMENT)]);
+    setAnchorAttrs(pin, entry.item.anchor);
+    // Swallow mousedown so a pin-click never collapses a selection / reaches the page.
+    pin.addEventListener('mousedown', function (e) { e.preventDefault(); });
+    pin.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      onPinClick(entry);
+    });
+    return pin;
+  }
+
+  // §B pin-click — the sidebar's open/closed state decides the behavior:
+  //   sidebar CLOSED -> reopen the composer in place at the pin (edit it here).
+  //   sidebar OPEN   -> reverse-sync: scroll the sidebar to that comment (edit it there);
+  //                     do NOT open the in-place composer.
+  function onPinClick(entry) {
+    if (isSidebarOpen()) {
+      revealInSidebar(entry);
+      return;
+    }
+    openComposerAt(pinPoint(entry.pin), {
+      anchor: entry.item.anchor,
+      element: entry.anchorEl,
+      editEntry: entry,
+      selectedText: entry.item.type === 'edit' ? (entry.item.original || entry.item.replacement || '') : '',
+    });
+  }
+
+  function pinPoint(pin) {
+    const r = pin.getBoundingClientRect();
+    return { x: r.left, y: r.bottom };
+  }
+
+  // The viewport point where an entry's pin should sit. document/code -> the TOP of the
+  // anchored block/line, sat in the left gutter (rides the content as it scrolls). spatial ->
+  // the normalized point over the image (box -> its top-left corner).
+  function anchorViewportPoint(entry) {
+    const a = entry.item.anchor;
+    if (a.kind === 'spatial') {
+      const target = doc.querySelector('.annotate-image img') || renderRoot();
+      if (!target) return null;
+      const r = target.getBoundingClientRect();
+      const p = a.point || (a.box ? [a.box[0], a.box[1]] : [0, 0]);
+      return { x: r.left + p[0] * r.width, y: r.top + p[1] * r.height };
+    }
+    let elx = entry.anchorEl;
+    if (!elx || !doc.contains(elx)) {
+      elx = elementForAnchor(a);
+      entry.anchorEl = elx;
+    }
+    if (!elx) return null;
+    const r = elx.getBoundingClientRect();
+    return { x: Math.max(2, r.left - 22), y: r.top };
+  }
+
+  // Lay every pin out in viewport coords; hide a pin whose anchor scrolled under the top
+  // chrome / the status footer. Pins are position:fixed, so they track on scroll/reflow.
+  function repositionPins() {
+    if (!comments.length) return;
+    const topBand = 52; // top chrome height
+    const bottomBand = 30; // status footer height
+    const vh = doc.documentElement.clientHeight || root.innerHeight || 768;
+    comments.forEach(function (entry) {
+      const pin = entry.pin;
+      if (!pin) return;
+      const pt = anchorViewportPoint(entry);
+      if (!pt || pt.y < topBand - 6 || pt.y > vh - bottomBand) {
+        pin.style.display = 'none';
+        return;
+      }
+      pin.style.display = '';
+      pin.style.left = Math.round(pt.x) + 'px';
+      pin.style.top = Math.round(pt.y) + 'px';
+    });
+  }
+
+  // rAF-throttle repositioning (scroll/resize/reflow can fire in bursts).
+  function schedulePinReposition() {
+    if (pinRaf != null) return;
+    const raf = root.requestAnimationFrame || function (cb) { return root.setTimeout(cb, 16); };
+    pinRaf = raf(function () {
+      pinRaf = null;
+      repositionPins();
+    });
+  }
+
+  // Edit-in-place commit: replace an entry's §5.2 item (from the reopened composer) without
+  // creating a duplicate; refresh its pin + sidebar row.
+  function updateEntry(entry, newItem) {
+    const di = drafts.indexOf(entry.item);
+    if (di >= 0) drafts[di] = newItem;
+    else drafts.push(newItem);
+    entry.item = newItem;
+    entry.pin.className = 'annotate-ui annotate-comment-pin annotate-comment-pin-' + newItem.type;
+    setAnchorAttrs(entry.pin, newItem.anchor);
+    const fresh = makeSidebarItem(entry);
+    if (entry.listItem && entry.listItem.parentNode) entry.listItem.parentNode.replaceChild(fresh, entry.listItem);
+    entry.listItem = fresh;
+    updateSendCount();
+    setStatus('Comment updated');
+    schedulePinReposition();
+  }
+
+  // ---------------------------------------------------------------------------
+  // §B comment sidebar — the list + navigation (what the margin was really for). Lists every
+  // staged comment of this round (+ any already on the round — none are delivered to the
+  // content script in v1; this reflects the staged drafts). Toggles open/closed; in
+  // document/code views it SHRINKS the canvas, on a live (frontend) page it OVERLAYS + makes
+  // the canvas horizontally pannable so content under it can be slid out.
+  // ---------------------------------------------------------------------------
+
+  function buildSidebar() {
+    // §F: the whole-document comment action moved OUT of the top bar and into this slot at the
+    // top of the sidebar — an "add comment" affordance that creates a document-level comment
+    // ({kind:'source', lineRange:[1, lastLine]}). Markdown / code views only (where a whole-doc
+    // source range is meaningful); other views leave the slot empty.
+    const docSlot = el('div', { class: 'annotate-sidebar-doc-slot' }, []);
+    if (viewKind === 'markdown' || viewKind === 'code') {
+      docSlot.appendChild(el('button', {
+        class: 'annotate-btn annotate-sidebar-doc-add',
+        type: 'button',
+        title: 'Comment on the whole document',
+        'aria-label': 'Comment on the whole document',
+        onclick: onDocComment,
+      }, [svgIcon(ICON_COMMENT_PLUS), el('span', { class: 'annotate-sidebar-doc-add-label', text: 'Comment on document' })]));
+    }
+    const sidebar = el('div', { id: 'annotate-sidebar', class: 'annotate-ui annotate-sidebar', 'data-open': '0' }, [
+      el('div', { class: 'annotate-sidebar-head' }, [
+        el('span', { class: 'annotate-sidebar-title', text: 'Comments' }),
+        docSlot,
+        el('button', {
+          class: 'annotate-sidebar-close',
+          type: 'button',
+          title: 'Close the comment sidebar',
+          'aria-label': 'Close',
+          text: '✕',
+          onclick: function () { closeSidebar(); },
+        }),
+      ]),
+      el('div', {
+        class: 'annotate-sidebar-empty',
+        text: 'No comments yet — hover a block or select text, then click the comment icon.',
+      }),
+      el('div', { id: 'annotate-sidebar-list', class: 'annotate-sidebar-list' }, []),
+    ]);
+    doc.body.appendChild(sidebar);
+    applySidebarLayout(); // closed by default
+  }
+
+  function isSidebarOpen() { return sidebarOpen; }
+  function openSidebar() {
+    if (sidebarOpen) return;
+    sidebarOpen = true;
+    applySidebarLayout();
+    reflectSidebarToggle();
+  }
+  function closeSidebar() {
+    if (!sidebarOpen) return;
+    sidebarOpen = false;
+    applySidebarLayout();
+    reflectSidebarToggle();
+  }
+  function toggleSidebar() {
+    if (sidebarOpen) closeSidebar();
+    else openSidebar();
+  }
+
+  function reflectSidebarToggle() {
+    const btn = doc.querySelector('.annotate-sidebar-toggle');
+    if (btn) {
+      btn.classList.toggle('annotate-active', sidebarOpen);
+      btn.setAttribute('aria-pressed', sidebarOpen ? 'true' : 'false');
+    }
+  }
+
+  // By-mode layout (decided 2026-06-27): document/code -> shrink the canvas (reflow the
+  // reading column left); live UI (frontend) -> overlay (no reflow) + a horizontal pan spacer
+  // so content hidden under the overlay can be slid out from under it.
+  function applySidebarLayout() {
+    const mode = viewKind === 'frontend' ? 'overlay' : 'shrink';
+    doc.body.setAttribute('data-sidebar-mode', mode);
+    doc.body.classList.toggle('annotate-sidebar-open', sidebarOpen);
+    const sb = doc.getElementById('annotate-sidebar');
+    if (sb) {
+      sb.classList.toggle('annotate-sidebar-open', sidebarOpen);
+      sb.setAttribute('data-open', sidebarOpen ? '1' : '0');
+    }
+    if (sidebarOpen && mode === 'overlay') addPanSpacer();
+    else removePanSpacer();
+    schedulePinReposition();
+  }
+
+  // The pan spacer extends the document's scroll width by the sidebar width so a frontend
+  // page becomes horizontally scrollable — sliding right reveals content that the fixed
+  // overlay was covering (explicit user requirement). Removed when not in overlay mode.
+  function addPanSpacer() {
+    if (doc.querySelector('.annotate-pan-spacer')) return;
+    const spacer = el('div', { class: 'annotate-ui annotate-pan-spacer', 'aria-hidden': 'true' }, []);
+    spacer.style.width = SIDEBAR_W + 'px';
+    doc.body.appendChild(spacer);
+  }
+  function removePanSpacer() {
+    const s = doc.querySelector('.annotate-pan-spacer');
+    if (s) s.remove();
+  }
+
+  function appendSidebarItem(li) {
+    const list = doc.getElementById('annotate-sidebar-list');
+    if (list) list.appendChild(li);
+    updateSidebarEmpty();
+  }
+  function updateSidebarEmpty() {
+    const empty = doc.querySelector('.annotate-sidebar-empty');
+    if (empty) empty.style.display = comments.length ? 'none' : '';
+  }
+
+  function makeSidebarItem(entry) {
+    const item = entry.item;
+    const li = el('div', {
+      class: 'annotate-sidebar-item annotate-sidebar-item-' + item.type,
+      role: 'button',
+      title: 'Scroll this comment’s anchor into view',
     }, []);
-    if (a.line != null) card.setAttribute('data-anchor-line', String(a.line));
-    if (a.lineRange != null) card.setAttribute('data-anchor-line-range', JSON.stringify(a.lineRange));
-    if (a.keyPath != null) card.setAttribute('data-anchor-keypath', a.keyPath);
-    if (a.cell != null) card.setAttribute('data-anchor-cell', a.cell);
-    if (a.point != null) card.setAttribute('data-anchor-point', JSON.stringify(a.point));
-    if (a.box != null) card.setAttribute('data-anchor-box', JSON.stringify(a.box));
-    card.appendChild(el('div', { class: 'annotate-card-head' }, [
-      el('span', { class: 'annotate-card-type', text: item.type }),
-      el('span', { class: 'annotate-card-anchor', text: anchorLabel(a) }),
+    setAnchorAttrs(li, item.anchor);
+    li.appendChild(el('div', { class: 'annotate-sidebar-item-head' }, [
+      el('span', { class: 'annotate-sidebar-item-type', text: item.type }),
+      el('span', { class: 'annotate-sidebar-item-anchor', text: anchorLabel(item.anchor) }),
+      el('button', {
+        class: 'annotate-sidebar-item-edit',
+        type: 'button',
+        title: 'Edit this comment',
+        text: 'Edit',
+        onclick: function (e) { e.stopPropagation(); editFromSidebar(entry); },
+      }),
     ]));
-    const bodyText = item.type === 'comment' ? item.comment : '→ ' + item.replacement;
-    card.appendChild(el('div', { class: 'annotate-card-body', text: bodyText }));
-    rail.appendChild(card);
+    const bodyText = item.type === 'comment' ? (item.comment || '') : '→ ' + (item.replacement || '');
+    li.appendChild(el('div', { class: 'annotate-sidebar-item-body', text: bodyText }));
+    // §B sidebar -> canvas: clicking the row scrolls its anchor into view + highlights it.
+    li.addEventListener('click', function () { scrollToAnchor(entry); });
+    return li;
+  }
+
+  // §B sidebar -> canvas navigation: scroll the anchor into view + flash the pin and region.
+  function scrollToAnchor(entry) {
+    const elx = resolveAnchorEl(entry);
+    if (elx && typeof elx.scrollIntoView === 'function') {
+      elx.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+    }
+    flashRegion(elx);
+    // pins track via the scroll listener; flash the target pin once the scroll has begun.
+    root.setTimeout(function () {
+      schedulePinReposition();
+      flashPin(entry.pin);
+    }, 80);
+  }
+
+  function resolveAnchorEl(entry) {
+    const a = entry.item.anchor;
+    if (a.kind === 'spatial') {
+      entry.anchorEl = doc.querySelector('.annotate-image img') || entry.anchorEl;
+      return entry.anchorEl;
+    }
+    if (!entry.anchorEl || !doc.contains(entry.anchorEl)) entry.anchorEl = elementForAnchor(a);
+    return entry.anchorEl;
+  }
+
+  // §B canvas -> sidebar reverse sync: scroll the sidebar to a comment's row + flash it.
+  function revealInSidebar(entry) {
+    if (!sidebarOpen) openSidebar();
+    if (entry.listItem && typeof entry.listItem.scrollIntoView === 'function') {
+      entry.listItem.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+    flashListItem(entry.listItem);
+  }
+
+  // Edit from the sidebar row ("edit there") — reopen the composer at the pin if it is on
+  // screen, else next to the row.
+  function editFromSidebar(entry) {
+    schedulePinReposition();
+    let point;
+    if (entry.pin && entry.pin.style.display !== 'none') {
+      point = pinPoint(entry.pin);
+    } else if (entry.listItem) {
+      const r = entry.listItem.getBoundingClientRect();
+      point = { x: Math.max(8, r.left - 8), y: r.top };
+    } else {
+      point = { x: 80, y: 80 };
+    }
+    openComposerAt(point, {
+      anchor: entry.item.anchor,
+      element: entry.anchorEl,
+      editEntry: entry,
+      selectedText: entry.item.type === 'edit' ? (entry.item.original || entry.item.replacement || '') : '',
+    });
+  }
+
+  function flashPin(pin) {
+    if (!pin) return;
+    pin.classList.add('annotate-pin-flash');
+    root.setTimeout(function () { pin.classList.remove('annotate-pin-flash'); }, 1600);
+  }
+  function flashRegion(elx) {
+    if (!elx || !elx.classList) return;
+    elx.classList.add('annotate-region-flash');
+    root.setTimeout(function () { elx.classList.remove('annotate-region-flash'); }, 1600);
+  }
+  function flashListItem(li) {
+    if (!li) return;
+    li.classList.add('annotate-item-flash');
+    root.setTimeout(function () { li.classList.remove('annotate-item-flash'); }, 1600);
   }
 
   // ---------------------------------------------------------------------------
-  // interactions (click + selection)
+  // §A interactions — the comment icon is the ONLY thing that starts a comment.
+  // Clicking body text does nothing; native selection + the browser context menu are
+  // never hijacked (no document click handler, no preventDefault on the page).
   // ---------------------------------------------------------------------------
 
-  function onClick(ev) {
-    const t = ev.target;
-    if (inUi(t)) return; // chrome / composer / cards manage their own clicks
-    // A non-collapsed selection is handled by the selection-pill path; a bare click anchors
-    // to the clicked element/line (paragraph/line granularity, #2). SECTION granularity is
-    // the hover-"+"-bubble path on a heading (#1/#2 "section HOVER on a heading"), so a
-    // direct click keeps the existing single-line anchor.
-    const sel = root.getSelection ? root.getSelection() : null;
-    if (sel && !sel.isCollapsed && String(sel).trim()) return;
-    const anchor = anchorFor(t);
-    if (!anchor) return;
-    ev.preventDefault();
-    const lineEl = (A.code && A.code.lineElementFor(t)) || (A.dom && A.dom.nearestAnchorable(t)) || t;
-    openComposer({ anchor, element: lineEl, selectedText: (lineEl.innerText || lineEl.textContent || '').trim() });
+  // Build a floating comment-icon affordance (the speech bubble, ICON_COMMENT). `onOpen`
+  // is called with the icon's screen point when it is clicked.
+  function commentAffordance(extraClass, title, onOpen) {
+    const icon = el('div', {
+      class: 'annotate-ui annotate-comment-affordance ' + extraClass,
+      title: title,
+      role: 'button',
+      'aria-label': title,
+    }, [svgIcon(ICON_COMMENT)]);
+    // Swallow mousedown so clicking the icon doesn't collapse the active text selection
+    // (and doesn't reach the page); only `click` acts.
+    icon.addEventListener('mousedown', function (e) { e.preventDefault(); });
+    icon.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      onOpen(iconPoint(icon));
+    });
+    return icon;
   }
 
-  // Selection-pill affordance (REFS "highlight to add a comment").
+  // ---- text-selection affordance (§A #3): the comment icon next to a selection ----
+
+  function removeSelectionIcon() {
+    const p = doc.querySelector('.annotate-sel-affordance');
+    if (p) p.remove();
+  }
+
   function onMouseUp(ev) {
     if (inUi(ev.target)) return;
     const sel = root.getSelection ? root.getSelection() : null;
-    removePill();
+    removeSelectionIcon();
     if (!sel || sel.isCollapsed) return;
     const text = String(sel).trim();
     if (!text) return;
@@ -634,114 +1137,138 @@
     if (!host || inUi(host)) return;
     const anchor = anchorFor(host);
     if (!anchor) return;
-    showPill(sel, anchor, text, host);
+    showSelectionIcon(sel, anchor, text, host);
   }
 
-  function removePill() {
-    const p = doc.querySelector('.annotate-pill');
-    if (p) p.remove();
-  }
-
-  function showPill(sel, anchor, text, host) {
+  function showSelectionIcon(sel, anchor, text, host) {
     let rect;
     try {
       rect = sel.getRangeAt(0).getBoundingClientRect();
     } catch (e) {
       rect = host.getBoundingClientRect();
     }
-    const pill = el('div', { class: 'annotate-ui annotate-pill' }, [
-      el('span', { class: 'annotate-pill-label', text: 'Highlight to add a comment' }),
-      el('button', {
-        class: 'annotate-btn annotate-pill-add',
-        type: 'button',
-        text: '+',
-        onclick: function () {
-          removePill();
-          openComposer({ anchor, element: host, selectedText: text });
-        },
-      }),
-    ]);
-    pill.style.position = 'absolute';
-    pill.style.top = Math.max(64, rect.top + (root.scrollY || 0) - 40) + 'px';
-    pill.style.left = rect.left + (root.scrollX || 0) + 'px';
-    doc.body.appendChild(pill);
+    const icon = commentAffordance('annotate-sel-affordance', 'Comment on the selected text', function (point) {
+      removeSelectionIcon();
+      openComposerAt(point, { anchor: anchor, element: host, selectedText: text });
+    });
+    icon.style.position = 'absolute';
+    icon.style.top = Math.max(56, rect.top + (root.scrollY || 0) - 4) + 'px';
+    icon.style.left = rect.right + (root.scrollX || 0) + 6 + 'px';
+    doc.body.appendChild(icon);
+  }
+
+  // Transience (§A #3): if the selection is cleared/collapsed (a click elsewhere, a new
+  // selection) WITHOUT the icon being clicked, the icon disappears.
+  function onSelectionChange() {
+    if (!doc.querySelector('.annotate-sel-affordance')) return;
+    const sel = root.getSelection ? root.getSelection() : null;
+    if (!sel || sel.isCollapsed || !String(sel).trim()) removeSelectionIcon();
   }
 
   // ---------------------------------------------------------------------------
-  // #1 block hover affordance — on hover, outline the anchorable region (a whole
-  // section for a heading, #2) and float a "+" comment bubble at its edge; click the
-  // bubble (or the region, via onClick) -> composer. Markdown view only; the existing
-  // selection-pill stays the path for text spans. Extends the REFS pill pattern to blocks.
+  // §A #2 / §C block-hover affordance — outline the anchorable region and float the
+  // comment icon at its edge. On a markdown HEADING the §C gesture splits the line:
+  // pointer over the heading's TEXT RUN -> header-only ({line:N}, outline just the <h_>);
+  // pointer over the heading line's EMPTY area -> the whole section ({lineRange:[N,M]} from
+  // the render.js <section data-src-line-range>, outline the SINGLE <section>). Transient:
+  // moving off the block hides it. Driven by mousemove so the text-vs-empty split updates as
+  // the pointer slides along the same heading.
   // ---------------------------------------------------------------------------
 
   function clearHover() {
     if (hoverEls) {
       hoverEls.forEach(function (e) {
-        if (e && e.classList) e.classList.remove('annotate-hover-region');
+        if (e && e.classList) e.classList.remove('annotate-hover-region', 'annotate-hover-section');
       });
     }
     hoverEls = null;
     hoverEl = null;
+    hoverMode = null;
     const b = doc.querySelector('.annotate-hover-add');
     if (b) b.remove();
   }
 
-  function showHover(block) {
-    clearHover();
-    hoverEl = block;
-    const isHeading = headingLevel(block) > 0;
-    const els = isHeading ? sectionElements(block) : [block];
-    hoverEls = els;
-    els.forEach(function (e) { e.classList.add('annotate-hover-region'); });
-
-    const ref = els[0];
-    const rect = ref.getBoundingClientRect();
-    const bubble = el('div', {
-      class: 'annotate-ui annotate-hover-add',
-      title: isHeading ? 'Comment on this section' : 'Comment on this block',
-    }, [
-      el('span', { class: 'annotate-hover-plus', text: '+' }),
-      el('span', { class: 'annotate-hover-text', text: isHeading ? 'section' : 'block' }),
-    ]);
-    bubble.addEventListener('click', function (e) {
-      e.preventDefault();
-      e.stopPropagation();
-      const anchor = isHeading
-        ? { kind: 'source', lineRange: sectionRange(block) }
-        : (A.dom ? A.dom.anchorFromElement(block) : null);
-      if (!anchor) return;
-      const seed = ((block.innerText || block.textContent) || '').trim();
-      openComposer({ anchor: anchor, element: block, selectedText: isHeading ? '' : seed });
-    });
-    bubble.style.position = 'absolute';
-    bubble.style.top = Math.max(56, rect.top + (root.scrollY || 0)) + 'px';
-    bubble.style.left = Math.max(2, rect.left + (root.scrollX || 0) - 30) + 'px';
-    doc.body.appendChild(bubble);
+  // Resolve the hover target under the pointer to { mode, els, anchor }, or null if there is
+  // nothing anchorable there. `mode`: 'header' | 'section' | 'block'.
+  function resolveHoverTarget(block, x, y) {
+    if (headingLevel(block) > 0) {
+      if (pointerOverTextRun(block, x, y)) {
+        const line = parseInt(block.getAttribute('data-src-line'), 10);
+        if (!Number.isFinite(line)) return null;
+        return { mode: 'header', els: [block], anchor: { kind: 'source', line: line } };
+      }
+      const section = block.closest('.annotate-section');
+      const anchor = sectionAnchorFromWrapper(section) || { kind: 'source', lineRange: sectionRange(block) };
+      return { mode: 'section', els: [section || block], anchor: anchor };
+    }
+    const anchor = A.dom ? A.dom.anchorFromElement(block) : null;
+    if (!anchor) return null;
+    return { mode: 'block', els: [block], anchor: anchor };
   }
 
-  function onMouseOver(ev) {
-    if (viewKind !== 'markdown') return;
+  function showHover(block, target) {
+    clearHover();
+    hoverEl = block;
+    hoverMode = target.mode;
+    hoverEls = target.els;
+    target.els.forEach(function (e) {
+      e.classList.add('annotate-hover-region');
+      if (target.mode === 'section') e.classList.add('annotate-hover-section');
+    });
+
+    const ref = target.els[0];
+    const rect = ref.getBoundingClientRect();
+    const title =
+      target.mode === 'header' ? 'Comment on this heading'
+      : target.mode === 'section' ? 'Comment on this section'
+      : 'Comment on this block';
+    const seedMode = target.mode; // block seeds the edit box with the block text; header/section don't
+    const anchor = target.anchor;
+    const icon = commentAffordance('annotate-hover-add', title, function (point) {
+      const seed = seedMode === 'block' ? ((block.innerText || block.textContent) || '').trim() : '';
+      clearHover();
+      openComposerAt(point, { anchor: anchor, element: block, selectedText: seed });
+    });
+    icon.style.position = 'absolute';
+    // Sit on the region's top-left edge (slightly overlapping) so the pointer can reach the
+    // icon without crossing a gap that would clear the hover.
+    icon.style.top = Math.max(56, rect.top + (root.scrollY || 0)) + 'px';
+    icon.style.left = Math.max(2, rect.left + (root.scrollX || 0) - 24) + 'px';
+    doc.body.appendChild(icon);
+  }
+
+  function onMouseMove(ev) {
+    if (viewKind === 'image' || viewKind === 'frontend') return; // image: own adapter; frontend: untouched
     const t = ev.target;
-    if (inUi(t)) return; // moving within our own UI (incl. the "+" bubble): keep state
+    if (inUi(t)) return; // over our own UI (incl. the comment icon): keep state
     if (pending) { clearHover(); return; } // a composer is open
     const sel = root.getSelection ? root.getSelection() : null;
     if (sel && !sel.isCollapsed && String(sel).trim()) { clearHover(); return; }
-    const render = doc.querySelector('.annotate-markdown');
-    const block = render && render.contains(t) ? (A.dom && A.dom.nearestAnchorable(t)) : null;
+    const render = doc.querySelector('.annotate-render');
+    if (!render || !render.contains(t)) { clearHover(); return; }
+    const block = A.dom && A.dom.nearestAnchorable(t);
     if (!block || !render.contains(block)) { clearHover(); return; }
-    if (block === hoverEl) return; // unchanged region
-    showHover(block);
+    const target = resolveHoverTarget(block, ev.clientX, ev.clientY);
+    if (!target) { clearHover(); return; }
+    if (block === hoverEl && target.mode === hoverMode) return; // unchanged region + mode
+    showHover(block, target);
   }
 
   function wireInteractions() {
-    doc.addEventListener('click', onClick, true);
+    // NOTE (§A): NO document-level click handler — clicking body text must do nothing toward
+    // commenting, and the page's native selection / context menu must stay intact.
     doc.addEventListener('mouseup', onMouseUp, false);
-    doc.addEventListener('mouseover', onMouseOver, false);
-    // Hover positions are viewport-relative; a scroll invalidates the bubble/outline.
+    doc.addEventListener('mousemove', onMouseMove, false);
+    doc.addEventListener('selectionchange', onSelectionChange, false);
+    // Hover positions are viewport-relative; a scroll invalidates the icon/outline.
     root.addEventListener('scroll', clearHover, true);
+    // §B: pins are position:fixed in viewport coords and must re-track the content as it
+    // scrolls / the layout reflows (a separate concern from clearing the hover affordance).
+    root.addEventListener('scroll', schedulePinReposition, true);
+    root.addEventListener('resize', schedulePinReposition);
     // Image view (§6.4 leverage order DOM -> code -> image): the dom/code adapters return
-    // null on an image (no source position), so route click/drag here -> §5.2 spatial
-    // anchors. The document-level onClick stays inert on the image (anchorFor -> null).
+    // null on an image (no source position), so the image adapter owns its click/drag ->
+    // §5.2 spatial anchors and opens the composer directly.
     const view = detectView();
     if (view.kind === 'image' && A.image) {
       imageDetach = A.image.attach(doc, {
@@ -984,9 +1511,18 @@
     getDrafts: function () { return drafts.slice(); },
     addDraft: addDraft,
     openComposer: openComposer,
+    // §A: reusable open-at-an-arbitrary-screen-point composer. §B reuses this to reopen the
+    // composer in place at a saved comment's pin -> openComposerAt({x,y}, {anchor, ...}).
+    openComposerAt: openComposerAt,
     send: send,
     accept: accept,
     anchorFor: anchorFor,
+    // §B sidebar toggle API (for §F to wire the top-bar comment-bubble + the doc-level
+    // add-comment affordance that mounts in .annotate-sidebar-doc-slot).
+    toggleSidebar: toggleSidebar,
+    openSidebar: openSidebar,
+    closeSidebar: closeSidebar,
+    isSidebarOpen: isSidebarOpen,
   };
 
   if (doc.readyState === 'loading') {

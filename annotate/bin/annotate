@@ -188,12 +188,22 @@ open_browser() {
   url=$1
   # Assemble + surface the real CfT/Chromium invocation (S0) regardless, so T7 can
   # verify it even when the actual launch is stubbed.
-  # v2 punch-list #8 — launch-window presentation (CfT-150 flags; verify on real browser):
-  #   --kiosk     immersive fullscreen, hides the tab strip + omnibox (no URL bar) AND the
-  #               CfT banner as a side effect (#8a).
-  #   --test-type suppresses the "Chrome for Testing … is only for automated testing"
-  #               infobar (belt-and-suspenders to --kiosk's side effect, #8b).
-  real_cmd="\"$CFG_BROWSER_PATH\" --user-data-dir=\"$CFG_PROFILE\" --load-extension=\"$CFG_EXT\" --disable-extensions-except=\"$CFG_EXT\" --no-first-run --no-default-browser-check --kiosk --test-type \"$url\""
+  # Launch-window presentation flags (CfT 150 — verified against current Chromium source, v2.1 §E):
+  #   --kiosk            true edge-to-edge fullscreen; hides the tab strip + omnibox (no URL bar).
+  #   --test-type        suppresses the "unsupported command-line flag" bad-flags WARNING infobars
+  #                      (e.g. the --load-extension / --disable-extensions-except warning).
+  #   --disable-infobars removes the gray "Chrome for Testing … is only for automated testing.
+  #                      Download Chrome" banner. v2's --kiosk/--test-type did NOT remove it: that
+  #                      banner (ChromeForTestingInfoBarDelegate) is created in Chromium's
+  #                      AddInfoBarsIfNecessary BEFORE both the --test-type and --kiosk early-returns,
+  #                      so neither suppresses it (this is the v2.1 §E dogfood failure). The banner is
+  #                      BUTTONLESS ("Download Chrome" is a LINK, GetButtons()==BUTTON_NONE); on a
+  #                      Chrome-for-Testing build --disable-infobars disables infobars WITHOUT needing
+  #                      --headless (the `&& --headless` guard is `#if !CHROME_FOR_TESTING`-compiled
+  #                      out), so InfoBarManager::ShouldShowInfoBar drops the buttonless banner
+  #                      (crbug.com/333945848). Needs a CfT/Chromium binary (runtime browser.kind
+  #                      'cft'/'chromium'); a non-honoring binary just ignores it (covered by --test-type).
+  real_cmd="\"$CFG_BROWSER_PATH\" --user-data-dir=\"$CFG_PROFILE\" --load-extension=\"$CFG_EXT\" --disable-extensions-except=\"$CFG_EXT\" --no-first-run --no-default-browser-check --kiosk --test-type --disable-infobars \"$url\""
   echo "annotate: browser invocation: $real_cmd" >&2
 
   if [ "$NO_OPEN" -eq 1 ]; then
@@ -212,7 +222,7 @@ open_browser() {
   fi
   "$CFG_BROWSER_PATH" --user-data-dir="$CFG_PROFILE" --load-extension="$CFG_EXT" \
     --disable-extensions-except="$CFG_EXT" --no-first-run --no-default-browser-check \
-    --kiosk --test-type "$url" \
+    --kiosk --test-type --disable-infobars "$url" \
     >/dev/null 2>&1 &
   echo "annotate: opened browser (pid $!)" >&2
 }

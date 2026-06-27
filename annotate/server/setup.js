@@ -353,11 +353,16 @@ function launchProbeBrowser({ browserPath, profileDir, extensionDir, url }) {
     `--disable-extensions-except=${extensionDir}`,
     '--no-first-run',
     '--no-default-browser-check',
-    // v2 punch-list #8b — suppress the CfT "only for automated testing" infobar during the
-    // throwaway load probe too (belt-and-suspenders). NOT --kiosk: the probe is a quick,
-    // killed-after-heartbeat launch, not the user-facing review window, so fullscreen would
-    // be inappropriate (and conflicts with --headless=new below).
+    // v2.1 §E — keep the throwaway probe window clean too. --test-type suppresses the bad-flags
+    // WARNING infobars; --disable-infobars removes the buttonless CfT "only for automated testing"
+    // banner (which --test-type does NOT — that banner is created BEFORE the --test-type early-
+    // return in Chromium's AddInfoBarsIfNecessary). On a Chrome-for-Testing build --disable-infobars
+    // works without --headless (the `&& --headless` guard is `#if !CHROME_FOR_TESTING`-compiled out),
+    // so it applies to the default HEADFUL probe too. NOT --kiosk: the probe is a quick, killed-after-
+    // heartbeat launch, not the user-facing window, so fullscreen would be inappropriate (and
+    // conflicts with --headless=new below).
     '--test-type',
+    '--disable-infobars',
     '--no-service-autorun',
     '--disable-background-networking',
   ];

@@ -123,6 +123,96 @@ function buildMarkdownRenderer() {
     return out;
   };
 
+  // §D (v2.1 punch-list): wrap each rendered <table> in a horizontal-scroll container,
+  // <div class="annotate-table-wrap">. The extension (ui.css) makes the wrap span the full
+  // content width and scroll a too-wide table INSIDE its own box rather than break the page
+  // layout / the §B sidebar. The <table> keeps its data-src-line (stamped by annotate_src_line
+  // on table_open) — the wrap is purely presentational and carries NO anchoring attribute, so
+  // it is not an anchorable node. table_open/table_close still render via the default rules
+  // (which honor the token's attrs); we only bracket them with the wrap.
+  const defaultTableOpen =
+    md.renderer.rules.table_open || ((t, i, o, e, s) => s.renderToken(t, i, o));
+  const defaultTableClose =
+    md.renderer.rules.table_close || ((t, i, o, e, s) => s.renderToken(t, i, o));
+  md.renderer.rules.table_open = function (tokens, idx, options, env, self) {
+    return '<div class="annotate-table-wrap">\n' + defaultTableOpen(tokens, idx, options, env, self);
+  };
+  md.renderer.rules.table_close = function (tokens, idx, options, env, self) {
+    return defaultTableClose(tokens, idx, options, env, self) + '</div>\n';
+  };
+
+  // §C (v2.1 punch-list): NESTED-SECTION wrapping. markdown-it emits a flat sibling
+  // stream (<h2>, <p>, <ul>…), so "the whole section" used to mean "loop over N siblings"
+  // in the extension. Instead, wrap each heading + the blocks following it (up to the next
+  // same-or-higher heading) in <section class="annotate-section" data-src-line-range="N-M">,
+  // with the <h_> as the section's FIRST child. NESTED: an h3 under an h2 gets its own
+  // nested <section>, so EVERY heading is the first child of its own section — this is what
+  // makes the extension's heading-vs-section hover gesture (header-only vs whole-section)
+  // work at every level, and lets the section lineRange derive straight from the wrapper.
+  //
+  //   * data-src-line on the inner blocks is left UNCHANGED — anchoring still depends on it;
+  //     the <section> carries ONLY the new data-src-line-range (so it is NOT a [data-src-line]
+  //     anchorable node, and the existing dom adapter ignores it).
+  //   * Only TOP-LEVEL headings are wrapped (depth 0 in the token stream): a heading nested
+  //     inside a list item / blockquote is left alone, so section open/close never cross a
+  //     container boundary (well-formed nesting). A doc with no top-level headings emits no
+  //     sections (bare blocks — the extension falls back to block-level hover).
+  md.core.ruler.push('annotate_sections', (state) => {
+    const tokens = state.tokens;
+    const Token = state.Token;
+
+    // 1-based last source line in the document (a trailing section's range end).
+    let docEndLine = 1;
+    for (const t of tokens) {
+      if (t.map && t.map[1] > docEndLine) docEndLine = t.map[1];
+    }
+
+    const out = [];
+    const stack = []; // open sections: { level, startLine, openToken }
+
+    const closeSection = (endLine) => {
+      const s = stack.pop();
+      const end = Math.max(s.startLine, endLine);
+      s.openToken.attrSet('data-src-line-range', `${s.startLine}-${end}`);
+      const close = new Token('annotate_section_close', 'section', -1);
+      close.block = true;
+      out.push(close);
+    };
+
+    let depth = 0; // structural nesting depth of the ORIGINAL tokens (lists/quotes/…)
+    for (let i = 0; i < tokens.length; i++) {
+      const tok = tokens[i];
+      // Wrap only top-level headings (depth 0) so section boundaries never split a
+      // list item / blockquote.
+      if (tok.type === 'heading_open' && depth === 0) {
+        const level = parseInt(tok.tag.slice(1), 10) || 6; // h2 -> 2
+        const line = tok.map ? tok.map[0] + 1 : 1;
+        // A heading at this level ends any open section of the same-or-higher level.
+        while (stack.length && stack[stack.length - 1].level >= level) {
+          closeSection(line - 1);
+        }
+        const open = new Token('annotate_section_open', 'section', 1);
+        open.block = true;
+        open.attrSet('class', 'annotate-section');
+        out.push(open); // range is finalized on this token when the section closes
+        stack.push({ level, startLine: line, openToken: open });
+      }
+      out.push(tok);
+      if (tok.nesting === 1) depth++;
+      else if (tok.nesting === -1) depth--;
+    }
+    while (stack.length) closeSection(docEndLine);
+
+    state.tokens = out;
+  });
+
+  md.renderer.rules.annotate_section_open = function (tokens, idx, options, env, self) {
+    return '<section' + self.renderAttrs(tokens[idx]) + '>\n';
+  };
+  md.renderer.rules.annotate_section_close = function () {
+    return '</section>\n';
+  };
+
   return md;
 }
 

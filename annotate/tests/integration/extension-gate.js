@@ -95,36 +95,50 @@ async function main() {
     ok('config injected (session/artifact/head/token)', env.cfg && env.cfg.session === round.session && env.cfg.artifact === round.artifact && env.cfg.head === round.guid && !!env.cfg.token, JSON.stringify({ ...env.cfg, token: env.cfg && env.cfg.token ? '<' + env.cfg.token.length + ' chars>' : null }));
     ok('Annotate chrome present (accept + send controls)', env.hasChrome && env.hasAccept && env.hasSend);
 
-    // GATE 3 — click a rendered line -> the composer opens with the correct §5.2 anchor
+    // GATE 3 — §A icon-only: HOVER a rendered block to reveal the comment icon, then click
+    // ONLY the icon -> the composer opens with the correct §5.2 anchor. (Clicking the line
+    // itself no longer starts a comment — the v1 click-anywhere path was removed.) Target a
+    // <p> so we exercise the plain block/line path (not the §C heading text-vs-section split).
     const clicked = await cdp.evaluate(`(() => {
-      const line = document.querySelector('.annotate-render [data-src-line]');
-      if (!line) return { err: 'no data-src-line node' };
-      const srcLine = parseInt(line.getAttribute('data-src-line'), 10);
-      line.click();
+      const block = document.querySelector('.annotate-render p[data-src-line]') ||
+                    document.querySelector('.annotate-render [data-src-line]');
+      if (!block) return { err: 'no data-src-line node' };
+      const srcLine = parseInt(block.getAttribute('data-src-line'), 10);
+      const r = block.getBoundingClientRect();
+      block.dispatchEvent(new MouseEvent('mousemove', { clientX: r.left + 5, clientY: r.top + 5, button: 0, bubbles: true, cancelable: true, view: window }));
+      const icon = document.querySelector('.annotate-comment-affordance');
+      if (icon) icon.click(); // the ONLY click that starts a comment
       const c = document.querySelector('.annotate-composer');
       return {
         srcLine,
+        iconShown: !!icon,
         composerOpened: !!c,
         anchorKind: c && c.getAttribute('data-anchor-kind'),
         anchorLine: c && c.getAttribute('data-anchor-line'),
       };
     })()`);
     ok(
-      'click on a line -> source/line anchor (matches data-src-line)',
-      clicked.composerOpened && clicked.anchorKind === 'source' && Number(clicked.anchorLine) === clicked.srcLine,
-      `clicked line ${clicked.srcLine} -> anchor {kind:${clicked.anchorKind}, line:${clicked.anchorLine}}`
+      'hover a line + click the comment icon -> source/line anchor (matches data-src-line)',
+      clicked.iconShown && clicked.composerOpened && clicked.anchorKind === 'source' && Number(clicked.anchorLine) === clicked.srcLine,
+      `line ${clicked.srcLine} -> icon=${clicked.iconShown}; anchor {kind:${clicked.anchorKind}, line:${clicked.anchorLine}}`
     );
 
     // compose a comment + Add (real DOM), then Send (real button)
+    // §B: a staged comment now LIVES as a semi-transparent on-canvas PIN (+ a sidebar row),
+    // NOT the old right-margin card. Count the pin in its new home.
     const composed = await cdp.evaluate(`(() => {
       const ta = document.querySelector('.annotate-composer-input');
       if (!ta) return { err: 'no composer input' };
       ta.value = 'integration: this guard clause is unreachable';
       ta.dispatchEvent(new Event('input', { bubbles: true }));
       document.querySelector('.annotate-add').click();
-      return { cards: document.querySelectorAll('.annotate-card').length };
+      return {
+        pins: document.querySelectorAll('.annotate-comment-pin').length,
+        sidebarRows: document.querySelectorAll('.annotate-sidebar-item').length,
+      };
     })()`);
-    ok('Add -> a margin comment card is staged', composed.cards === 1, `cards=${composed.cards}`);
+    ok('Add -> a staged comment is pinned on the canvas (+ a sidebar row)',
+      composed.pins === 1 && composed.sidebarRows === 1, `pins=${composed.pins}; rows=${composed.sidebarRows}`);
 
     // GATE 4 — Send -> the server flips the round to submitted ON DISK
     await cdp.evaluate(`document.querySelector('.annotate-send').click()`);

@@ -161,6 +161,11 @@ body.annotate-themed {
   font-size: 13px;
   line-height: 1;
 }
+/* §F icon-only chrome buttons (camera / width / sidebar-bubble): square-ish, no text label. */
+.annotate-icon-btn {
+  padding: 6px 9px;
+  gap: 0;
+}
 .annotate-btn-inert {
   opacity: 0.45;
   cursor: default;
@@ -195,68 +200,52 @@ body.annotate-themed {
   opacity: 0.5;
 }
 
-/* reading-width control (#3): the <-> icon + the current preset label */
+/* reading-width control (§F): ICON-ONLY now — the icon for the current preset
+   (compress / expand / arrows-left-right-to-line), no text label. */
 .annotate-width {
   color: var(--annotate-fg);
 }
 
-/* ---- selection pill (REFS "highlight to add a comment") ---- */
-.annotate-pill {
+/* ---- §A the ONE comment affordance: a round speech-bubble icon button. It is the ONLY
+   way to start a comment — floated next to a text selection, or at the edge of a hovered
+   block / heading / section. No "+", no text label. ---- */
+.annotate-comment-affordance {
   z-index: 2147483601;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 6px 4px 10px;
-  background: var(--annotate-bg);
-  color: var(--annotate-fg);
-  border: 1px solid var(--annotate-line);
-  border-radius: 999px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-  font-size: 12px;
-}
-.annotate-pill-add {
-  width: 24px;
-  height: 24px;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
   padding: 0;
-  border-radius: 50%;
-  font-size: 16px;
   background: var(--annotate-accent);
   color: var(--annotate-accent-fg);
   border: none;
+  border-radius: 50%;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.32);
+  cursor: pointer;
+}
+.annotate-comment-affordance:hover {
+  background: var(--annotate-accent-active);
+}
+.annotate-comment-affordance .annotate-icon {
+  width: 16px;
+  height: 16px;
 }
 
-/* ---- block hover affordance (#1): outline the anchorable region + a "+" bubble ---- */
+/* ---- §A/§C hover outline: the anchorable region under the pointer. Solid = a block, or
+   header-only (just the <h_>); the region itself is NOT clickable (no click-to-comment) —
+   only the icon is, so no pointer cursor here. ---- */
 .annotate-hover-region {
   outline: 2px solid var(--annotate-accent);
   outline-offset: 3px;
   background: var(--annotate-hover);
   border-radius: 4px;
-  cursor: pointer;
 }
-.annotate-hover-add {
-  z-index: 2147483601;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 9px 3px 7px;
-  background: var(--annotate-accent);
-  color: var(--annotate-accent-fg);
-  border: none;
-  border-radius: 999px;
-  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);
-  font-size: 12px;
-  cursor: pointer;
-}
-.annotate-hover-plus {
-  font-size: 15px;
-  font-weight: 700;
-  line-height: 1;
-}
-.annotate-hover-text {
-  font-size: 11px;
-  opacity: 0.92;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
+/* §C whole-section hover (pointer over the heading line's empty area): a dashed box around
+   the SINGLE <section> distinguishes "whole section" from the solid header-only outline. */
+.annotate-hover-region.annotate-hover-section {
+  outline-style: dashed;
+  outline-offset: 4px;
 }
 
 /* ---- composer ---- */
@@ -299,23 +288,145 @@ body.annotate-themed {
   gap: 8px;
 }
 
-/* ---- right-margin comment cards (REFS) ---- */
-.annotate-rail {
+/* ===========================================================================
+   §B comment PINS (on-canvas presence) — replaces the old right-margin rail.
+   A small SEMI-TRANSPARENT comment-bubble (the same ICON_COMMENT used to create it)
+   at the saved comment's anchor. position:fixed; content.js re-tracks it on scroll/reflow.
+   =========================================================================== */
+.annotate-comment-pin {
   position: fixed;
-  top: 64px;
-  right: 16px;
-  width: 280px;
-  max-width: 32vw;
-  max-height: calc(100vh - 64px - 40px); /* clear chrome (top) + status footer (bottom) */
+  z-index: 2147483591;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: var(--annotate-accent);
+  color: var(--annotate-accent-fg);
+  border: none;
+  border-radius: 50% 50% 50% 2px; /* a pin/bubble silhouette */
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  opacity: 0.55; /* semi-transparent so content shows through (§B) */
+  cursor: pointer;
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+.annotate-comment-pin:hover {
+  opacity: 1;
+  transform: scale(1.08);
+}
+.annotate-comment-pin .annotate-icon {
+  width: 14px;
+  height: 14px;
+}
+.annotate-comment-pin-edit {
+  background: #f0a020; /* edits read amber, matching the composer's edit accent */
+}
+/* navigation flash (sidebar -> canvas): briefly pop the target pin to full presence */
+.annotate-comment-pin.annotate-pin-flash {
+  opacity: 1;
+  transform: scale(1.25);
+  box-shadow: 0 0 0 4px var(--annotate-hover), 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+/* the anchored region briefly highlights when navigated to from the sidebar */
+.annotate-region-flash {
+  outline: 2px solid var(--annotate-accent);
+  outline-offset: 3px;
+  background: var(--annotate-hover);
+  border-radius: 4px;
+}
+
+/* ===========================================================================
+   §B comment SIDEBAR — the list + navigation. Toggles open/closed. document/code views
+   SHRINK the canvas (body padding-right); a live (frontend) page gets an OVERLAY + a pan
+   spacer so content under it can be slid out from under the fixed panel.
+   =========================================================================== */
+.annotate-sidebar {
+  position: fixed;
+  top: 52px; /* under the top chrome */
+  right: 0;
+  bottom: 30px; /* above the status footer */
+  width: 320px;
+  max-width: 92vw;
+  z-index: 2147483595; /* above pins, below the composer/hover icon */
+  display: flex;
+  flex-direction: column;
+  background: var(--annotate-bg);
+  color: var(--annotate-fg);
+  border-left: 1px solid var(--annotate-line);
+  box-shadow: -2px 0 16px rgba(0, 0, 0, 0.28);
+  transform: translateX(100%); /* closed: slid off the right edge */
+  transition: transform 0.18s ease;
+}
+.annotate-sidebar.annotate-sidebar-open {
+  transform: translateX(0);
+}
+.annotate-sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--annotate-line);
+}
+.annotate-sidebar-title {
+  font-weight: 700;
+  font-size: 14px;
+}
+/* §F: the doc-level "add comment" affordance lives HERE (top of the sidebar). */
+.annotate-sidebar-doc-slot {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+/* the whole-document add-comment button: compact icon + label, creates a {lineRange:[1,last]}
+   source comment. Truncates its label rather than crowding the "Comments" title / close ✕. */
+.annotate-sidebar-doc-add {
+  min-width: 0;
+  gap: 6px;
+  padding: 5px 9px;
+  font-size: 12px;
+  color: var(--annotate-accent);
+}
+.annotate-sidebar-doc-add:hover {
+  border-color: var(--annotate-accent);
+}
+.annotate-sidebar-doc-add-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.annotate-sidebar-close {
+  appearance: none;
+  border: 1px solid var(--annotate-line);
+  background: var(--annotate-btn-bg);
+  color: var(--annotate-fg);
+  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+  line-height: 1;
+}
+.annotate-sidebar-close:hover {
+  border-color: var(--annotate-accent);
+}
+.annotate-sidebar-empty {
+  padding: 16px 14px;
+  font-size: 13px;
+  color: var(--annotate-muted);
+}
+.annotate-sidebar-list {
+  flex: 1 1 auto;
   overflow-y: auto;
-  z-index: 2147483590;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  pointer-events: none;
+  padding: 10px;
 }
-.annotate-card {
-  pointer-events: auto;
+.annotate-sidebar-item {
   background: var(--annotate-card);
   color: var(--annotate-fg);
   border: 1px solid var(--annotate-line);
@@ -323,31 +434,76 @@ body.annotate-themed {
   border-radius: 8px;
   padding: 8px 10px;
   font-size: 13px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
 }
-.annotate-card-edit {
-  border-left-color: #f0a020;
+.annotate-sidebar-item:hover {
+  border-color: var(--annotate-accent);
 }
-.annotate-card-head {
+.annotate-sidebar-item-edit {
+  appearance: none;
+  margin-left: auto;
+  border: 1px solid var(--annotate-line);
+  background: var(--annotate-btn-bg);
+  color: var(--annotate-fg);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.annotate-sidebar-item-edit:hover {
+  border-color: var(--annotate-accent);
+}
+.annotate-sidebar-item-edit:focus { outline: none; }
+.annotate-sidebar-item.annotate-item-flash {
+  box-shadow: 0 0 0 2px var(--annotate-accent);
+}
+.annotate-sidebar-item-edit:focus-visible {
+  outline: 2px solid var(--annotate-accent);
+}
+.annotate-sidebar-item-head {
   display: flex;
   gap: 8px;
   align-items: center;
   margin-bottom: 4px;
 }
-.annotate-card-type {
+.annotate-sidebar-item-type {
   text-transform: uppercase;
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.4px;
   color: var(--annotate-muted);
 }
-.annotate-card-anchor {
+.annotate-sidebar-item-anchor {
   font-size: 11px;
   color: var(--annotate-accent);
 }
-.annotate-card-body {
+.annotate-sidebar-item-body {
   white-space: pre-wrap;
   word-break: break-word;
+}
+.annotate-sidebar-toggle.annotate-active {
+  color: var(--annotate-accent-active);
+  border-color: var(--annotate-accent-active);
+}
+
+/* by-mode (document/code): SHRINK the canvas so the reading column reflows left of the
+   sidebar. The chrome/footer are full-width fixed bars (unaffected). */
+body.annotate-sidebar-open[data-sidebar-mode="shrink"] {
+  padding-right: 320px;
+}
+/* by-mode (live UI / frontend): OVERLAY — do NOT reflow the page; just make it horizontally
+   pannable so content under the fixed sidebar can be slid out. The pan spacer extends the
+   scroll width by the sidebar width. */
+body.annotate-sidebar-open[data-sidebar-mode="overlay"] {
+  overflow-x: auto;
+}
+.annotate-pan-spacer {
+  position: absolute;
+  top: 0;
+  left: 100%;
+  height: 1px;
+  pointer-events: none;
 }
 
 /* ---- advance warning banner (auto-advance, §6.4) ---- */
@@ -378,27 +534,33 @@ body.annotate-themed {
   color: var(--annotate-content-fg);
 }
 
-/* reading column (#3): max-width preset applied to the Markdown render only; the
-   preset attribute is set on <body> by content.js and persisted per-user. */
+/* reading column (#3 / §D): the Markdown root + every <section> span the FULL content width;
+   the reading-width preset (set on <body> by content.js, persisted per-user) is applied to the
+   PROSE BLOCKS inside them, NOT to the container — so a TABLE (wrapped in .annotate-table-wrap,
+   deliberately left unconstrained below) breaks OUT of the reading column to the full content
+   width. The content width already reflects the §B sidebar in shrink mode (body padding-right),
+   so the table needs no extra handling. The child combinators keep the constraint to a
+   section's DIRECT block children — nested sections recurse; blocks inside a list item are not
+   double-centered; the <section> wrappers and the table wrap are excluded. */
 .annotate-markdown {
   padding: 24px 28px 72px;
   line-height: 1.62;
   font-size: 15px;
   word-wrap: break-word;
 }
-body[data-annotate-width="comfortable"] .annotate-markdown {
+body[data-annotate-width="comfortable"] .annotate-markdown > :not(.annotate-section):not(.annotate-table-wrap),
+body[data-annotate-width="comfortable"] .annotate-markdown .annotate-section > :not(.annotate-section):not(.annotate-table-wrap) {
   max-width: 760px;
   margin-left: auto;
   margin-right: auto;
 }
-body[data-annotate-width="wide"] .annotate-markdown {
+body[data-annotate-width="wide"] .annotate-markdown > :not(.annotate-section):not(.annotate-table-wrap),
+body[data-annotate-width="wide"] .annotate-markdown .annotate-section > :not(.annotate-section):not(.annotate-table-wrap) {
   max-width: 1080px;
   margin-left: auto;
   margin-right: auto;
 }
-body[data-annotate-width="full"] .annotate-markdown {
-  max-width: none;
-}
+/* full: prose blocks span the full content width too (no max-width) — tables already do. */
 
 .annotate-markdown h1,
 .annotate-markdown h2,
@@ -449,9 +611,24 @@ body[data-annotate-width="full"] .annotate-markdown {
   margin: 0.6em 0;
 }
 .annotate-markdown li { margin: 0.25em 0; }
+/* §D full-width scrolling tables: render.js wraps each markdown <table> in
+   .annotate-table-wrap. The wrap is a horizontal-scroll box (overflow-x:auto; max-width:100%)
+   so a wide table scrolls INSIDE its own box instead of breaking the page layout / the §B
+   sidebar. The table fills the box when narrow (min-width:100%) and grows past it when wide
+   (width:max-content), at which point the box scrolls. The wrap is excluded from the
+   reading-column constraint above, so tables span the full content width. */
+.annotate-table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 0.9em 0;
+}
 .annotate-markdown table {
   border-collapse: collapse;
-  margin: 0.8em 0;
+}
+.annotate-table-wrap > table {
+  min-width: 100%;
+  width: max-content;
+  margin: 0;
 }
 .annotate-markdown th,
 .annotate-markdown td {
