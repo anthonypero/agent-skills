@@ -21,10 +21,11 @@
 //   comment   -> open the comment/edit composer (openComposerAt — a reusable
 //                open-at-an-arbitrary-screen-point path) on the locked level's / selection's
 //                §5.2 anchor.
-//   add       -> a saved draft becomes a SEMI-TRANSPARENT comment-bubble PIN at its anchor
-//                (§B; rides with the content as it scrolls) PLUS a row in the toggleable
-//                comment SIDEBAR. The old right-margin rail is gone. Pin-click edits in place
-//                (sidebar closed) or scrolls the sidebar to that comment (sidebar open).
+//   add       -> a saved draft becomes a SEMI-TRANSPARENT, type-colored ICON PIN at its anchor
+//                (§B; the comment-bubble / edit-pen glyph, ON the anchored words; rides with
+//                the content as it scrolls; CSS grows the full marker on hover) PLUS a row in
+//                the toggleable comment SIDEBAR. The old right-margin rail is gone. Clicking a
+//                pin opens the composer to EDIT that annotation in place.
 //   send      -> Annotate.submit.submitFeedback with the REAL fetch sink (token in
 //                X-Annotate-Token) -> POST /feedback -> the server flips the round to submitted.
 //   accept    -> Annotate.config.postAccept (head-checked) -> the server flips to accepted.
@@ -111,6 +112,13 @@
   const ICON_COMMENT_PLUS =
     '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
     '<path fill="currentColor" d="M145.5 460.9L152.6 443.4L140.7 428.7C112.5 393.8 96 350.6 96 304C96 191 194.3 96 320 96C445.7 96 544 191 544 304C544 417 445.7 512 320 512C287.4 512 256.6 505.6 228.8 494L217.6 489.4L206.1 493.3L120.2 522.8L145.4 460.8zM64 576C78.8 570.9 129.6 553.4 216.5 523.6C248.1 536.7 283.2 544 320 544C461.4 544 576 436.5 576 304C576 171.5 461.4 64 320 64C178.6 64 64 171.5 64 304C64 358.4 83.3 408.6 115.8 448.8C88.7 515.5 71.4 557.9 64 576zM304 392L336 392L336 320L408 320L408 288L336 288L336 216L304 216L304 288L232 288L232 320L304 320L304 392z"/></svg>';
+  // §B pin glyph for EDITS — a pen (filled) so an edit pin reads distinctly from a comment
+  // pin's speech bubble. fill=currentColor so the resting pin recolors to the edit/yellow type
+  // color and the hover/flash marker recolors to white. (NEW for the pin pass — no edit-icon
+  // constant existed; FA-style pen on its own 512 grid, like ICON_PAPERCLIP.)
+  const ICON_PEN =
+    '<svg class="annotate-icon" viewBox="0 0 512 512" aria-hidden="true" focusable="false">' +
+    '<path fill="currentColor" d="M362.7 19.3L314.3 67.7 444.3 197.7 492.7 149.3c25-25 25-65.5 0-90.5L453.3 19.3c-25-25-65.5-25-90.5 0zm-71 71L58.6 323.5c-10.4 10.4-18 23.3-22.2 37.4L1 481.2C-1.5 489.7 .8 498.8 7 505s15.3 8.5 23.7 6.1l120.3-35.4c14.1-4.2 27-11.8 37.4-22.2L421.7 220.3 291.7 90.3z"/></svg>';
   // §F: the reading-width control is now ICON-ONLY and cycles ALL THREE presets, showing the
   // icon for the CURRENT preset: comfortable(compact) = compress, wide = expand, full = the
   // arrows-left-right-to-line (<->) — all Sharp Light inline SVG.
@@ -895,9 +903,11 @@
       }
       const item = bubble.toFeedback();
       // §B: reopened from a pin / sidebar row -> update that comment in place (no duplicate);
-      // otherwise it is a brand-new draft.
+      // otherwise it is a brand-new draft. A new draft from a text selection carries its cloned
+      // Range (opts.targetRange) so its pin sits ON the words; an edit-in-place keeps the
+      // entry's existing range.
       if (opts.editEntry) updateEntry(opts.editEntry, item);
-      else addDraft(item);
+      else addDraft(item, opts.targetRange || null);
       closeComposer();
     }
 
@@ -1085,9 +1095,9 @@
   // edit) and a sidebar row (the list + navigation), wired for bidirectional sync.
   // ---------------------------------------------------------------------------
 
-  function addDraft(item) {
+  function addDraft(item, targetRange) {
     drafts.push(item);
-    registerComment(item); // §B: pin (canvas) + sidebar row, in one registry entry
+    registerComment(item, targetRange); // §B: pin (canvas) + sidebar row, in one registry entry
     // A committed spatial anchor also leaves the image-adapter's region marker over the image.
     if (item.anchor && item.anchor.kind === 'spatial' && A.image && A.image.placeMarker) {
       A.image.placeMarker(doc, item.anchor, root);
@@ -1145,8 +1155,10 @@
   // ---- pins ----
 
   // Register a saved comment: build its pin + sidebar row, push the entry, lay out the pin.
-  function registerComment(item) {
-    const entry = { item: item, pin: null, listItem: null, anchorEl: null };
+  // `targetRange` (a cloned Range from a real TEXT selection) is kept so the pin can sit ON
+  // the selected words rather than the line's far-left gutter; null for block/line anchors.
+  function registerComment(item, targetRange) {
+    const entry = { item: item, pin: null, listItem: null, anchorEl: null, targetRange: targetRange || null };
     entry.anchorEl =
       item.anchor.kind === 'spatial' ? (doc.querySelector('.annotate-image img') || null) : elementForAnchor(item.anchor);
     entry.pin = makePin(entry);
@@ -1158,14 +1170,17 @@
     return entry;
   }
 
-  // The semi-transparent comment-bubble pin (same ICON_COMMENT used to create it, §A).
+  // The semi-transparent, type-colored ICON pin (§B). RESTING = just the glyph (comment bubble
+  // for a comment, pen for an edit) in the type color; CSS grows the full marker on hover. The
+  // GLYPH differs by type, so updateEntry rebuilds the pin when the type changes.
   function makePin(entry) {
+    const isEdit = entry.item.type === 'edit';
     const pin = el('div', {
       class: 'annotate-ui annotate-comment-pin annotate-comment-pin-' + entry.item.type,
       role: 'button',
-      title: 'Saved comment — click to edit (with the sidebar open, click to find it in the list)',
-      'aria-label': 'Saved comment',
-    }, [svgIcon(ICON_COMMENT)]);
+      title: 'Saved ' + entry.item.type + ' — click to edit',
+      'aria-label': 'Saved ' + entry.item.type + ' — click to edit',
+    }, [svgIcon(isEdit ? ICON_PEN : ICON_COMMENT)]);
     setAnchorAttrs(pin, entry.item.anchor);
     // Swallow mousedown so a pin-click never collapses a selection / reaches the page.
     pin.addEventListener('mousedown', function (e) { e.preventDefault(); });
@@ -1177,15 +1192,11 @@
     return pin;
   }
 
-  // §B pin-click — the sidebar's open/closed state decides the behavior:
-  //   sidebar CLOSED -> reopen the composer in place at the pin (edit it here).
-  //   sidebar OPEN   -> reverse-sync: scroll the sidebar to that comment (edit it there);
-  //                     do NOT open the in-place composer.
+  // §B pin-click (pin pass 2026-06-27) — ALWAYS open the full composer to EDIT this annotation,
+  // populated with its existing content, in edit mode (the same composer the sidebar "Edit"
+  // button opens). Opens in place at the pin. (Previously this branched on the sidebar's
+  // open/closed state and only revealed the row when open — that reveal path is retired.)
   function onPinClick(entry) {
-    if (isSidebarOpen()) {
-      revealInSidebar(entry);
-      return;
-    }
     openComposerAt(pinPoint(entry.pin), {
       anchor: entry.item.anchor,
       element: entry.anchorEl,
@@ -1199,9 +1210,10 @@
     return { x: r.left, y: r.bottom };
   }
 
-  // The viewport point where an entry's pin should sit. document/code -> the TOP of the
-  // anchored block/line, sat in the left gutter (rides the content as it scrolls). spatial ->
-  // the normalized point over the image (box -> its top-left corner).
+  // The viewport point where an entry's pin should sit (recomputed every reposition tick, so
+  // it tracks scroll/reflow). spatial -> the normalized point over the image (box -> its
+  // top-left corner). text-anchored (a real selection) -> ON the selected WORDS, from the
+  // cloned Range's bounding-rect leading edge. other anchors -> the anchor element's rect start.
   function anchorViewportPoint(entry) {
     const a = entry.item.anchor;
     if (a.kind === 'spatial') {
@@ -1211,14 +1223,25 @@
       const p = a.point || (a.box ? [a.box[0], a.box[1]] : [0, 0]);
       return { x: r.left + p[0] * r.width, y: r.top + p[1] * r.height };
     }
+    // Text-anchored (inline edit / text-selection comment): sit the pin ON the words, at the
+    // range's top-left (leading) edge — NOT the line's far-left gutter. The cloned range stays
+    // live as long as its nodes do; getBoundingClientRect re-reads current scroll position.
+    if (entry.targetRange) {
+      try {
+        const rr = entry.targetRange.getBoundingClientRect();
+        if (rr && (rr.width > 0 || rr.height > 0)) return { x: rr.left, y: rr.top };
+      } catch (e) { /* range invalidated by a DOM change -> fall back to the anchor element */ }
+    }
     let elx = entry.anchorEl;
     if (!elx || !doc.contains(elx)) {
       elx = elementForAnchor(a);
       entry.anchorEl = elx;
     }
     if (!elx) return null;
+    // Non-text anchor (line / list / section / document / cell): the element's rect START
+    // (its leading top-left corner) — a consistent default ON the anchored content.
     const r = elx.getBoundingClientRect();
-    return { x: Math.max(2, r.left - 22), y: r.top };
+    return { x: r.left, y: r.top };
   }
 
   // Lay every pin out in viewport coords; hide a pin whose anchor scrolled under the top
@@ -1259,8 +1282,12 @@
     if (di >= 0) drafts[di] = newItem;
     else drafts.push(newItem);
     entry.item = newItem;
-    entry.pin.className = 'annotate-ui annotate-comment-pin annotate-comment-pin-' + newItem.type;
-    setAnchorAttrs(entry.pin, newItem.anchor);
+    // Rebuild the pin so its GLYPH (comment bubble vs edit pen) + type class + anchor attrs all
+    // follow a possibly-changed type. entry.targetRange is untouched, so it stays on its words.
+    const freshPin = makePin(entry);
+    if (entry.pin && entry.pin.parentNode) entry.pin.parentNode.replaceChild(freshPin, entry.pin);
+    else doc.body.appendChild(freshPin);
+    entry.pin = freshPin;
     const fresh = makeSidebarItem(entry);
     if (entry.listItem && entry.listItem.parentNode) entry.listItem.parentNode.replaceChild(fresh, entry.listItem);
     entry.listItem = fresh;
@@ -1394,7 +1421,10 @@
       el('span', { class: 'annotate-sidebar-item-type', text: item.type }),
       el('span', { class: 'annotate-sidebar-item-anchor', text: anchorLabel(item.anchor) }),
       el('button', {
-        class: 'annotate-sidebar-item-edit',
+        // NOTE: NOT `annotate-sidebar-item-edit` — that token collides with the edit-TYPE
+        // entry div (`annotate-sidebar-item-<type>`), which would bleed button styling onto
+        // edit cards. The per-entry Edit BUTTON owns its own class.
+        class: 'annotate-sidebar-edit-btn',
         type: 'button',
         title: 'Edit this comment',
         text: 'Edit',
@@ -1432,15 +1462,6 @@
     return entry.anchorEl;
   }
 
-  // §B canvas -> sidebar reverse sync: scroll the sidebar to a comment's row + flash it.
-  function revealInSidebar(entry) {
-    if (!sidebarOpen) openSidebar();
-    if (entry.listItem && typeof entry.listItem.scrollIntoView === 'function') {
-      entry.listItem.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    }
-    flashListItem(entry.listItem);
-  }
-
   // Edit from the sidebar row ("edit there") — reopen the composer at the pin if it is on
   // screen, else next to the row.
   function editFromSidebar(entry) {
@@ -1471,11 +1492,6 @@
     if (!elx || !elx.classList) return;
     elx.classList.add('annotate-region-flash');
     root.setTimeout(function () { elx.classList.remove('annotate-region-flash'); }, 1600);
-  }
-  function flashListItem(li) {
-    if (!li) return;
-    li.classList.add('annotate-item-flash');
-    root.setTimeout(function () { li.classList.remove('annotate-item-flash'); }, 1600);
   }
 
   // ---------------------------------------------------------------------------
