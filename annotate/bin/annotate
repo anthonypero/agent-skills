@@ -43,9 +43,19 @@ BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$target")" && pwd) || exit 1
 PKG_ROOT=$(CDPATH= cd -- "$BIN_DIR/.." && pwd) || exit 1
 LAUNCH_JS="$PKG_ROOT/server/launch.js"
 SERVER_JS="$PKG_ROOT/server/server.js"
+SETUP_JS="$PKG_ROOT/server/setup.js"
 
 NODE=${ANNOTATE_NODE:-node}
 RUNTIME=${ANNOTATE_RUNTIME:-$HOME/.annotate/runtime.json}
+
+# --- setup — repair entry point (§6.6) -------------------------------------
+# A leading subcommand that re-provisions the browser, regenerates runtime.json, and
+# re-runs the load probe. Dispatches to the Node setup engine (the same one install.sh
+# runs, minus `npm install`); mints NO round. Must precede `poll` / arg parsing.
+if [ "${1:-}" = "setup" ]; then
+  shift
+  exec "$NODE" "$SETUP_JS" setup --runtime "$RUNTIME" "$@"
+fi
 
 # --- defaults ---------------------------------------------------------------
 SUBCMD=""
