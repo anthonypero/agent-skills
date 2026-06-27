@@ -1428,6 +1428,7 @@
     if (!sel || sel.isCollapsed) return;
     const text = String(sel).trim();
     if (!text) return;
+    clearLock(); // §M: one affordance at a time — an active text selection supersedes the §K lock
     const node = sel.anchorNode;
     const host = node && (node.nodeType === 1 ? node : node.parentElement);
     if (!host || inUi(host)) return;
@@ -1529,15 +1530,13 @@
     selLock.bubble.style.top = Math.max(56, selLock.pagePoint.y) + 'px';
   }
 
-  // Select level `idx` of the locked chain: update the box overlay, the label, and the
+  // Select level `idx` of the locked chain: update the box overlay and the
   // arrow enabled/disabled state (top = document, bottom = clicked innermost).
   function setLockLevel(idx) {
     if (!selLock) return;
     const n = selLock.levels.length;
     if (!n) { clearLock(); return; }
     selLock.idx = Math.max(0, Math.min(n - 1, idx));
-    const level = selLock.levels[selLock.idx];
-    selLock.label.textContent = anchorLabel(level.anchor);
     const atTop = selLock.idx >= n - 1; // broadest (document) — can't go up
     const atBottom = selLock.idx <= 0; // innermost clicked — can't go down
     selLock.upBtn.disabled = atTop;
@@ -1573,8 +1572,8 @@
   // re-clicks elsewhere, presses Escape, or clicks outside the rendered content.
   function openLock(levels, idx, point) {
     clearLock();
+    removeSelectionIcon(); // §M: locking clears any stale inline text-selection affordance
     const box = el('div', { class: 'annotate-ui annotate-sel-box' });
-    const label = el('span', { class: 'annotate-lock-label' });
     const upBtn = el('button', {
       class: 'annotate-lock-arrow annotate-lock-up', type: 'button',
       title: 'Broaden selection (parent)', 'aria-label': 'Broaden selection to the parent',
@@ -1590,7 +1589,7 @@
     const bubble = el('div', {
       class: 'annotate-ui annotate-lock-bubble', tabindex: '0', role: 'group',
       'aria-label': 'Comment target — up/down arrows change the level',
-    }, [upBtn, downBtn, label, commentBtn]);
+    }, [upBtn, downBtn, commentBtn]);
     // Swallow mousedown so interacting with the bubble never collapses a selection / reaches
     // the page; the click handlers (below) act, and onDocClick ignores .annotate-ui targets.
     bubble.addEventListener('mousedown', function (e) { e.preventDefault(); });
@@ -1608,7 +1607,7 @@
 
     const pagePoint = { x: (point ? point.x : 0) + (root.scrollX || 0), y: (point ? point.y : 0) + (root.scrollY || 0) };
     selLock = {
-      levels: levels, idx: idx, box: box, bubble: bubble, label: label,
+      levels: levels, idx: idx, box: box, bubble: bubble,
       upBtn: upBtn, downBtn: downBtn, commentBtn: commentBtn, pagePoint: pagePoint,
     };
     doc.body.appendChild(box);
@@ -1634,6 +1633,12 @@
     if (!render || !render.contains(t)) { clearLock(); return; }
     const levels = traversalLevels(t);
     if (!levels.length) { clearLock(); return; }
+    // §M: re-clicking the already-locked element toggles the lock OFF; a click on a DIFFERENT
+    // element re-locks there. Compare innermost stops (stable across up/down traversal).
+    if (selLock && selLock.levels[0] && levels[0] && selLock.levels[0].el === levels[0].el) {
+      clearLock();
+      return;
+    }
     openLock(levels, 0, { x: ev.clientX, y: ev.clientY }); // 0 = the innermost stop
   }
 

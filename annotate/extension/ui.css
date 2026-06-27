@@ -415,13 +415,6 @@ body.annotate-themed {
 .annotate-lock-arrow:disabled:hover {
   background: transparent;
 }
-.annotate-lock-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--annotate-accent);
-  padding: 0 4px;
-  white-space: nowrap;
-}
 .annotate-lock-comment {
   appearance: none;
   display: inline-flex;
