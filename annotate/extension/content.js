@@ -57,6 +57,24 @@
   let pollTimer = null; // the auto-advance poll interval (stopped on accept, §6.4)
   let deferredHead = null; // a new head awaiting in-progress work to clear (preserve-unsent)
   let screenshotToggle = true; // gated screenshot on/off (chrome.storage.local, default on)
+  let widthPreset = 'comfortable'; // #3 reading-width preset (chrome.storage.local)
+  let hoverEl = null; // #1 the block currently hover-highlighted
+  let hoverEls = null; // #1 every element in the hovered region (a whole section for a heading)
+  let viewKind = null; // cached detectView().kind (the view can't change without a reload)
+
+  // #3 reading-width presets: a small cycle the width control steps through. Applied as a
+  // max-width on the Markdown reading column (inert on code/image/wide-table — full-bleed).
+  const WIDTH_PRESETS = ['comfortable', 'wide', 'full'];
+  const WIDTH_LABELS = { comfortable: 'Comfortable', wide: 'Wide', full: 'Full' };
+
+  // Inline SVG icons (#4) — Font Awesome Pro 7 Sharp Light, fill=currentColor so the active
+  // state is just a CSS color. Never an <img> (prefer-inline-svg-icons).
+  const ICON_CAMERA =
+    '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
+    '<path fill="currentColor" d="M224 96L416 96L448 160L576 160L576 544L64 544L64 160L192 160L224 96zM448 192L428.2 192C424.7 185 414 163.6 396.2 128L243.8 128C226 163.6 215.3 185 211.8 192L96 192L96 512L544 512L544 192L448 192zM320 240C381.9 240 432 290.1 432 352C432 413.9 381.9 464 320 464C258.1 464 208 413.9 208 352C208 290.1 258.1 240 320 240zM400 352C400 307.8 364.2 272 320 272C275.8 272 240 307.8 240 352C240 396.2 275.8 432 320 432C364.2 432 400 396.2 400 352z"/></svg>';
+  const ICON_WIDTH =
+    '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
+    '<path fill="currentColor" d="M64 176L64 480L32 480L32 160L64 160L64 176zM608 176L608 480L576 480L576 160L608 160L608 176zM518.6 320L507.3 331.3L427.3 411.3L416 422.6L393.4 400L404.7 388.7L457.4 336L182.7 336L235.4 388.7L246.7 400L224.1 422.6L212.8 411.3L132.8 331.3L121.5 320L132.8 308.7L212.8 228.7L224.1 217.4L246.7 240C246.1 240.6 224.7 262 182.7 304L457.4 304L404.7 251.3L393.4 240L416 217.4L427.3 228.7L507.3 308.7L518.6 320z"/></svg>';
 
   // ---------------------------------------------------------------------------
   // small DOM helpers
@@ -81,6 +99,15 @@
 
   function inUi(node) {
     return !!(node && typeof node.closest === 'function' && node.closest('.annotate-ui'));
+  }
+
+  // Wrap a trusted constant inline-SVG string (#4) in a span. The markup is a build-time
+  // constant (never page/user input), so innerHTML here is safe.
+  function svgIcon(markup) {
+    const span = doc.createElement('span');
+    span.className = 'annotate-icon-wrap';
+    span.innerHTML = markup;
+    return span;
   }
 
   function setStatus(msg) {
@@ -120,6 +147,7 @@
 
   function anchorLabel(anchor) {
     if (!anchor) return '';
+    if (anchor.lineRange) return 'Lines ' + anchor.lineRange[0] + '–' + anchor.lineRange[1];
     if (anchor.line != null) return 'Line ' + anchor.line;
     if (anchor.keyPath != null) return anchor.keyPath === '' ? '(root)' : anchor.keyPath;
     if (anchor.cell != null) return 'Cell ' + anchor.cell;
@@ -129,50 +157,147 @@
   }
 
   // ---------------------------------------------------------------------------
+  // anchoring granularity (#2): selection -> paragraph -> SECTION -> document
+  // ---------------------------------------------------------------------------
+
+  function headingLevel(elm) {
+    if (!elm || !elm.tagName) return 0;
+    const m = /^H([1-6])$/.exec(elm.tagName);
+    return m ? parseInt(m[1], 10) : 0;
+  }
+
+  // Largest stamped source line in the rendered view — the document's last line for the
+  // trailing-section / whole-document range (the renderer stamps a block's FIRST line, so
+  // this is the last block's start line; precise enough for v1, noted in the report).
+  function maxSourceLine() {
+    let max = 0;
+    const nodes = doc.querySelectorAll('.annotate-render [data-src-line]');
+    nodes.forEach(function (n) {
+      const v = parseInt(n.getAttribute('data-src-line'), 10);
+      if (Number.isFinite(v) && v > max) max = v;
+    });
+    return max;
+  }
+
+  // Every top-level block belonging to a heading's section: the heading itself through the
+  // block before the next same-or-higher heading (a deeper heading stays IN the section).
+  function sectionElements(h) {
+    const L = headingLevel(h);
+    const els = [h];
+    let n = h.nextElementSibling;
+    while (n) {
+      const lv = headingLevel(n);
+      if (lv && lv <= L) break;
+      els.push(n);
+      n = n.nextElementSibling;
+    }
+    return els;
+  }
+
+  // A heading -> its whole section as an inclusive 1-based [start, end] line range (#2):
+  // heading line through the line BEFORE the next same-or-higher heading (or doc end).
+  function sectionRange(h) {
+    const start = parseInt(h.getAttribute('data-src-line'), 10) || 1;
+    const L = headingLevel(h);
+    let n = h.nextElementSibling;
+    let nextLine = null;
+    while (n) {
+      const lv = headingLevel(n);
+      if (lv && lv <= L) {
+        const v = parseInt(n.getAttribute('data-src-line'), 10);
+        if (Number.isFinite(v)) nextLine = v;
+        break;
+      }
+      n = n.nextElementSibling;
+    }
+    let end = nextLine != null ? nextLine - 1 : maxSourceLine();
+    if (!Number.isFinite(end) || end < start) end = start;
+    return [start, end];
+  }
+
+  // ---------------------------------------------------------------------------
   // the REQUIRED top "Annotate chrome" bar (§6.4 + REFS.md)
   // ---------------------------------------------------------------------------
 
   function buildChrome() {
     const view = detectView();
+    viewKind = view.kind; // cache for the hover hot path
+    const widthApplies = view.kind === 'markdown'; // #3: reading width suits prose only
+
+    // #2 document affordance: "comment on the whole document" (Markdown / code views).
+    const docCommentBtn =
+      view.kind === 'markdown' || view.kind === 'code'
+        ? el('button', {
+            class: 'annotate-btn annotate-doc-comment',
+            type: 'button',
+            title: 'Comment on the whole document',
+            onclick: onDocComment,
+            text: 'Comment on doc',
+          })
+        : null;
+
+    // #3 + #4: the reading-width preset control REPLACES the old Expand button — the
+    // arrows-left-right-to-line (<->) icon + the current preset label. Inert (full-bleed)
+    // on code/image/wide-table.
+    const widthBtn = el('button', {
+      class: 'annotate-btn annotate-width' + (widthApplies ? '' : ' annotate-btn-inert'),
+      type: 'button',
+      title: widthApplies ? 'Reading width — click to cycle presets' : 'Reading width (full-bleed for this view)',
+      onclick: onCycleWidth,
+    }, [svgIcon(ICON_WIDTH), el('span', { class: 'annotate-btn-label annotate-width-label', text: WIDTH_LABELS[widthPreset] })]);
+
+    // #4: screenshot toggle = the camera icon, brighter blue when active (reflectShotToggle).
+    const shotBtn = el('button', {
+      class: 'annotate-btn annotate-shot-toggle',
+      type: 'button',
+      title: 'Attach a viewport screenshot on send (visual views only)',
+      onclick: onToggleShot,
+    }, [svgIcon(ICON_CAMERA), el('span', { class: 'annotate-btn-label', text: 'Screenshot' })]);
+
+    const actions = [
+      // Reserved slot for the deferred revert/version dropdown (PRD §6 — seam only in v1).
+      el('div', { class: 'annotate-version-slot', title: 'version history (coming soon)', text: 'v ▾' }),
+      docCommentBtn,
+      widthBtn,
+      shotBtn,
+      el('button', { class: 'annotate-btn annotate-copy', type: 'button', onclick: onCopy, text: 'Copy' }),
+      el('button', {
+        class: 'annotate-btn annotate-send',
+        type: 'button',
+        onclick: function () { send(); },
+        text: 'Send feedback (0)',
+      }),
+      el('button', {
+        class: 'annotate-btn annotate-primary annotate-accept',
+        type: 'button',
+        onclick: function () { accept(); },
+        text: 'Accept',
+      }),
+    ].filter(Boolean);
+
     const bar = el('div', { id: 'annotate-chrome', class: 'annotate-ui annotate-chrome' }, [
       el('div', { class: 'annotate-brand' }, [
         el('span', { class: 'annotate-logo', text: 'annotate' }),
         el('span', { class: 'annotate-badge', text: view.badge }),
         el('span', { class: 'annotate-title', text: ctx.artifact }),
       ]),
-      el('div', { class: 'annotate-actions' }, [
-        // Reserved slot for the deferred revert/version dropdown (PRD §6 — seam only in v1).
-        el('div', { class: 'annotate-version-slot', title: 'version history (coming soon)', text: 'v ▾' }),
-        // Screenshot capture toggle (§6.4): persistent, default-on, inert on non-visual views.
-        el('button', {
-          class: 'annotate-btn annotate-shot-toggle',
-          type: 'button',
-          title: 'Attach a viewport screenshot on send (visual views only)',
-          onclick: onToggleShot,
-          text: 'Shot: on',
-        }),
-        el('button', { class: 'annotate-btn annotate-copy', type: 'button', onclick: onCopy, text: 'Copy' }),
-        el('button', { class: 'annotate-btn annotate-expand', type: 'button', onclick: onExpand, text: 'Expand' }),
-        el('button', {
-          class: 'annotate-btn annotate-send',
-          type: 'button',
-          onclick: function () { send(); },
-          text: 'Send feedback (0)',
-        }),
-        el('button', {
-          class: 'annotate-btn annotate-primary annotate-accept',
-          type: 'button',
-          onclick: function () { accept(); },
-          text: 'Accept',
-        }),
-      ]),
-      el('div', { class: 'annotate-status', text: 'Ready — click a line or select text to annotate' }),
+      el('div', { class: 'annotate-actions' }, actions),
     ]);
     doc.body.appendChild(bar);
     doc.body.classList.add('annotate-has-chrome');
+    // #7: theme the rendered content (Markdown/code/struct/csv/image) but NEVER a
+    // --as-frontend page (detectView -> 'frontend'), whose own CSS we must not touch.
+    if (view.kind !== 'frontend') doc.body.classList.add('annotate-themed');
+
+    // #9: status line is now a fixed bottom FOOTER (a body child, not under the top chrome).
+    doc.body.appendChild(
+      el('div', { class: 'annotate-ui annotate-status', text: 'Ready — click a line, hover a block, or select text to annotate' })
+    );
 
     // Right rail that holds the margin comment cards (REFS: cards aligned to the right).
     doc.body.appendChild(el('div', { class: 'annotate-ui annotate-rail', id: 'annotate-rail' }, []));
+
+    applyWidth(); // reflect the current preset on <body> + the control label
   }
 
   function updateSendCount() {
@@ -194,8 +319,67 @@
     }
   }
 
-  function onExpand() {
-    doc.body.classList.toggle('annotate-expanded');
+  // ---------------------------------------------------------------------------
+  // #3 reading-width preset — cycles a small set of max-width presets over the
+  // Markdown reading column; persisted per-user (chrome.storage.local); inert on
+  // code/image/wide-table (full-bleed).
+  // ---------------------------------------------------------------------------
+
+  function applyWidth() {
+    doc.body.setAttribute('data-annotate-width', widthPreset);
+    const lbl = doc.querySelector('.annotate-width-label');
+    if (lbl) lbl.textContent = WIDTH_LABELS[widthPreset];
+  }
+
+  function persistWidth() {
+    if (chromeApi && chromeApi.storage && chromeApi.storage.local) {
+      try {
+        chromeApi.storage.local.set({ widthPreset: widthPreset });
+      } catch (e) {
+        /* best-effort persistence */
+      }
+    }
+  }
+
+  function loadWidth() {
+    if (!chromeApi || !chromeApi.storage || !chromeApi.storage.local) {
+      applyWidth();
+      return;
+    }
+    try {
+      chromeApi.storage.local.get({ widthPreset: 'comfortable' }, function (items) {
+        if (!(chromeApi.runtime && chromeApi.runtime.lastError) && items && WIDTH_PRESETS.indexOf(items.widthPreset) >= 0) {
+          widthPreset = items.widthPreset;
+        }
+        applyWidth();
+      });
+    } catch (e) {
+      applyWidth();
+    }
+  }
+
+  function onCycleWidth() {
+    if (detectView().kind !== 'markdown') {
+      setStatus('Reading width applies to Markdown views only');
+      return;
+    }
+    const i = WIDTH_PRESETS.indexOf(widthPreset);
+    widthPreset = WIDTH_PRESETS[(i + 1) % WIDTH_PRESETS.length];
+    persistWidth();
+    applyWidth();
+    setStatus('Reading width: ' + WIDTH_LABELS[widthPreset]);
+  }
+
+  // #2 document affordance: open the composer on a whole-document line range.
+  function onDocComment() {
+    const view = detectView();
+    if (view.kind !== 'markdown' && view.kind !== 'code') {
+      setStatus('Whole-document comments apply to Markdown / code views');
+      return;
+    }
+    const last = maxSourceLine() || 1;
+    clearHover();
+    openComposer({ anchor: { kind: 'source', lineRange: [1, last] }, element: null, selectedText: '' });
   }
 
   // ---------------------------------------------------------------------------
@@ -211,8 +395,11 @@
     const view = detectView();
     const willCapture = A.config.shouldCaptureScreenshot(view.kind, screenshotToggle);
     if (btn) {
-      btn.textContent = 'Shot: ' + (screenshotToggle ? 'on' : 'off');
+      // #4: camera icon stays; "active" = brighter blue. Toggle classes, never textContent
+      // (that would wipe the inline SVG).
+      btn.classList.toggle('annotate-active', !!screenshotToggle);
       btn.classList.toggle('annotate-shot-inert', A.config.VISUAL_VIEWS && !A.config.VISUAL_VIEWS.has(view.kind));
+      btn.setAttribute('aria-pressed', screenshotToggle ? 'true' : 'false');
     }
     if (bar) {
       bar.setAttribute('data-screenshot', screenshotToggle ? 'on' : 'off');
@@ -282,6 +469,7 @@
   // Open the comment/edit composer for an anchor. `selectedText` seeds the edit box.
   function openComposer(opts) {
     closeComposer();
+    clearHover(); // a composer supersedes the transient hover affordance (#1)
     const anchor = opts.anchor;
     const bubble = A.bubble.createBubble(anchor, { selectedText: opts.selectedText || '' });
     pending = { bubble, anchor, element: opts.element || null };
@@ -308,6 +496,7 @@
       'data-anchor-kind': anchor.kind,
     }, []);
     if (anchor.line != null) card.setAttribute('data-anchor-line', String(anchor.line));
+    if (anchor.lineRange != null) card.setAttribute('data-anchor-line-range', JSON.stringify(anchor.lineRange));
     if (anchor.keyPath != null) card.setAttribute('data-anchor-keypath', anchor.keyPath);
     if (anchor.cell != null) card.setAttribute('data-anchor-cell', anchor.cell);
     if (anchor.point != null) card.setAttribute('data-anchor-point', JSON.stringify(anchor.point));
@@ -398,6 +587,7 @@
       'data-anchor-kind': a.kind,
     }, []);
     if (a.line != null) card.setAttribute('data-anchor-line', String(a.line));
+    if (a.lineRange != null) card.setAttribute('data-anchor-line-range', JSON.stringify(a.lineRange));
     if (a.keyPath != null) card.setAttribute('data-anchor-keypath', a.keyPath);
     if (a.cell != null) card.setAttribute('data-anchor-cell', a.cell);
     if (a.point != null) card.setAttribute('data-anchor-point', JSON.stringify(a.point));
@@ -419,7 +609,9 @@
     const t = ev.target;
     if (inUi(t)) return; // chrome / composer / cards manage their own clicks
     // A non-collapsed selection is handled by the selection-pill path; a bare click anchors
-    // to the clicked element/line.
+    // to the clicked element/line (paragraph/line granularity, #2). SECTION granularity is
+    // the hover-"+"-bubble path on a heading (#1/#2 "section HOVER on a heading"), so a
+    // direct click keeps the existing single-line anchor.
     const sel = root.getSelection ? root.getSelection() : null;
     if (sel && !sel.isCollapsed && String(sel).trim()) return;
     const anchor = anchorFor(t);
@@ -475,9 +667,78 @@
     doc.body.appendChild(pill);
   }
 
+  // ---------------------------------------------------------------------------
+  // #1 block hover affordance — on hover, outline the anchorable region (a whole
+  // section for a heading, #2) and float a "+" comment bubble at its edge; click the
+  // bubble (or the region, via onClick) -> composer. Markdown view only; the existing
+  // selection-pill stays the path for text spans. Extends the REFS pill pattern to blocks.
+  // ---------------------------------------------------------------------------
+
+  function clearHover() {
+    if (hoverEls) {
+      hoverEls.forEach(function (e) {
+        if (e && e.classList) e.classList.remove('annotate-hover-region');
+      });
+    }
+    hoverEls = null;
+    hoverEl = null;
+    const b = doc.querySelector('.annotate-hover-add');
+    if (b) b.remove();
+  }
+
+  function showHover(block) {
+    clearHover();
+    hoverEl = block;
+    const isHeading = headingLevel(block) > 0;
+    const els = isHeading ? sectionElements(block) : [block];
+    hoverEls = els;
+    els.forEach(function (e) { e.classList.add('annotate-hover-region'); });
+
+    const ref = els[0];
+    const rect = ref.getBoundingClientRect();
+    const bubble = el('div', {
+      class: 'annotate-ui annotate-hover-add',
+      title: isHeading ? 'Comment on this section' : 'Comment on this block',
+    }, [
+      el('span', { class: 'annotate-hover-plus', text: '+' }),
+      el('span', { class: 'annotate-hover-text', text: isHeading ? 'section' : 'block' }),
+    ]);
+    bubble.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      const anchor = isHeading
+        ? { kind: 'source', lineRange: sectionRange(block) }
+        : (A.dom ? A.dom.anchorFromElement(block) : null);
+      if (!anchor) return;
+      const seed = ((block.innerText || block.textContent) || '').trim();
+      openComposer({ anchor: anchor, element: block, selectedText: isHeading ? '' : seed });
+    });
+    bubble.style.position = 'absolute';
+    bubble.style.top = Math.max(56, rect.top + (root.scrollY || 0)) + 'px';
+    bubble.style.left = Math.max(2, rect.left + (root.scrollX || 0) - 30) + 'px';
+    doc.body.appendChild(bubble);
+  }
+
+  function onMouseOver(ev) {
+    if (viewKind !== 'markdown') return;
+    const t = ev.target;
+    if (inUi(t)) return; // moving within our own UI (incl. the "+" bubble): keep state
+    if (pending) { clearHover(); return; } // a composer is open
+    const sel = root.getSelection ? root.getSelection() : null;
+    if (sel && !sel.isCollapsed && String(sel).trim()) { clearHover(); return; }
+    const render = doc.querySelector('.annotate-markdown');
+    const block = render && render.contains(t) ? (A.dom && A.dom.nearestAnchorable(t)) : null;
+    if (!block || !render.contains(block)) { clearHover(); return; }
+    if (block === hoverEl) return; // unchanged region
+    showHover(block);
+  }
+
   function wireInteractions() {
     doc.addEventListener('click', onClick, true);
     doc.addEventListener('mouseup', onMouseUp, false);
+    doc.addEventListener('mouseover', onMouseOver, false);
+    // Hover positions are viewport-relative; a scroll invalidates the bubble/outline.
+    root.addEventListener('scroll', clearHover, true);
     // Image view (§6.4 leverage order DOM -> code -> image): the dom/code adapters return
     // null on an image (no source position), so route click/drag here -> §5.2 spatial
     // anchors. The document-level onClick stays inert on the image (anchorFor -> null).
@@ -709,6 +970,7 @@
     A.config.sendHeartbeat(ctx, fetchImpl); // §6.6 load probe (POST /loaded)
     buildChrome();
     loadShotToggle(); // reflect the persisted toggle + stamp data-screenshot[-active] for THIS view
+    loadWidth(); // #3: apply the persisted reading-width preset
     wireInteractions();
     startPolling();
     doc.documentElement.setAttribute('data-annotate-ready', '1');

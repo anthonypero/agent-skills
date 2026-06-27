@@ -69,6 +69,13 @@
       "properties": {
         "kind": { "const": "source" },
         "line": { "type": "integer" },
+        "lineRange": {
+          "description": "Section / whole-document anchor (v2 #2): [startLine, endLine], inclusive, 1-based. A heading section spans the heading line through the line before the next same-or-higher heading; a whole-document comment is [1, lastLine].",
+          "type": "array",
+          "items": { "type": "integer" },
+          "minItems": 2,
+          "maxItems": 2
+        },
         "keyPath": { "type": "string" },
         "cell": { "type": "string" },
         "cellIndex": { "type": "integer" },
@@ -81,6 +88,7 @@
       },
       "oneOf": [
         { "required": ["line"] },
+        { "required": ["lineRange"] },
         { "required": ["keyPath"] },
         { "required": ["cell"] },
         { "required": ["cellIndex"] },

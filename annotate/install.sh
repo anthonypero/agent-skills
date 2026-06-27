@@ -16,13 +16,29 @@
 #
 # The shell owns only the npm step (per §3: the shell delegates JSON-safe work to Node).
 #
-# Usage:   sh install.sh [--data-dir <dir>] [--port <n>] [--extension <dir>]
+# CONSENT GATE (v2 punch-list #10 — supply-chain / partner concern): if NO reusable browser
+# is found (no explicit/cached Chrome-for-Testing, no system Chromium), the ~358MB CfT
+# DOWNLOAD is NOT performed silently. A bare `sh install.sh` STOPS with a one-line "re-run
+# with --download-cft to confirm" and exits 3. Authorize the download by one of:
+#   * sh install.sh --download-cft           (or env ANNOTATE_CONFIRM_DOWNLOAD=1)
+#   * write ~/.annotate/config.json {"browser":"cft","consented":true}   (durable consent)
+#   * write ~/.annotate/config.json {"browser":"system","path":"<chrome/chromium>"}  (use
+#     your own browser — NO download; still builds the profile/runtime.json + load probe)
+#   * write ~/.annotate/config.json {"declined":true}  (opt out; setup stays dormant)
+# Reusing an already-present system Chromium or a cached CfT needs no gate (no download).
+# The PRIMARY gate is the SKILL.md behavioral contract (the LLM presents this and waits for
+# the human's explicit answer BEFORE running install) — this guard is belt-and-suspenders.
+#
+# Usage:   sh install.sh [--download-cft] [--data-dir <dir>] [--port <n>] [--extension <dir>]
 # Seams:   ANNOTATE_NODE (node binary), ANNOTATE_CFT / ANNOTATE_BROWSER_CACHE (reuse an
-#          already-downloaded Chrome for Testing), ANNOTATE_HEADLESS, ANNOTATE_NO_DOWNLOAD,
+#          already-downloaded Chrome for Testing), ANNOTATE_CONFIRM_DOWNLOAD (=1 authorizes
+#          the CfT download, like --download-cft), ANNOTATE_HEADLESS, ANNOTATE_NO_DOWNLOAD,
 #          ANNOTATE_PROBE_TIMEOUT — see server/setup.js.
 #
-# Exit:    0 = stack fully up (extension heartbeat confirmed); 2 = up but DEGRADED (a
-#          probed manual checklist was printed); non-zero otherwise.
+# Exit:    0 = stack fully up (extension heartbeat confirmed) OR a deliberately-declined,
+#          dormant install; 2 = up but DEGRADED (a probed manual checklist was printed);
+#          3 = CONSENT REQUIRED (the #10 download gate fired — re-run to confirm); other
+#          non-zero otherwise.
 set -eu
 
 PKG_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1

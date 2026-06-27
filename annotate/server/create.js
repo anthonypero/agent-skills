@@ -59,6 +59,16 @@ function resolveArtifactId(dataDir, session, absSource) {
   return `${baseId}-${P.shortHash(absSource)}`;
 }
 
+// Generated session FALLBACK id (§6.1 step 1; v2 punch-list #6b). DISTINCT from the
+// round-GUID shape (<timestamp>-<8char>) so a session id is never mistaken for a
+// round/version id — the `sess-` prefix is the marker (the round GUID stays the version
+// unit and is untouched). Prefer an explicit --session (the harness session id, passed by
+// SKILL.md / picked up from CLAUDE_CODE_SESSION_ID in bin/annotate); this is only the
+// no-id fallback. Keeps a sortable timestamp for debuggability, behind the prefix.
+function makeSessionId(d = new Date()) {
+  return `sess-${P.makeTimestamp(d)}-${P.randSuffix(6)}`;
+}
+
 // A live page has no file basename; derive a stable id from the URL.
 function artifactIdFromUrl(url) {
   try {
@@ -75,8 +85,9 @@ function create(opts = {}) {
   const dataDir = opts.dataDir || P.defaultDataDir();
   P.ensureDir(dataDir, 0o700);
 
-  // 1. Session id (§6.1 step 1).
-  const session = opts.session || P.makeGuid();
+  // 1. Session id (§6.1 step 1). Explicit --session wins (the harness session id);
+  //    otherwise a DISTINCT `sess-`-prefixed fallback (NOT the round-GUID shape, #6b).
+  const session = opts.session || makeSessionId();
   const sDir = P.sessionDir(dataDir, session);
   P.ensureDir(sDir, 0o700);
   const token = P.ensureToken(sDir); // per-session auth token (§6.3)
@@ -134,4 +145,4 @@ function create(opts = {}) {
   };
 }
 
-module.exports = { create, resolveArtifactId, artifactIdFromUrl };
+module.exports = { create, resolveArtifactId, artifactIdFromUrl, makeSessionId };

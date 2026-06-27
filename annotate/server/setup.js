@@ -53,8 +53,38 @@ const SERVER_JS = path.join(__dirname, 'server.js');
 const BIN_ANNOTATE = path.join(PKG_ROOT, 'bin', 'annotate');
 const DEFAULT_PORT = 7878;
 const PROBE_SESSION = '__setup_probe__';
+const CONSENT_FILE = 'config.json';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---------------------------------------------------------------------------
+// Consent / preference config (v2 punch-list #10 — first-run browser-install gate).
+// `~/.annotate/config.json` is the user's DURABLE install decision, DISTINCT from the
+// machine-generated `runtime.json` (which may be regenerated). It is the source of truth
+// for whether the ~358MB Chrome-for-Testing download is allowed. Recognized shapes:
+//   {}                                            absent/undecided -> gate fires, NO download
+//   { "browser":"cft", "consented":true }         CfT download approved -> proceed
+//   { "browser":"system", "path":"<chrome>" }     use the user's own browser, NO download
+//   { "declined":true }                           opted out -> skill stays dormant, no re-prompt
+// The PRIMARY gate is the SKILL.md behavioral contract (the LLM stops + asks first); this
+// file + the --download-cft / ANNOTATE_CONFIRM_DOWNLOAD guard is the belt-and-suspenders so
+// a bare install.sh can never silently pull a browser.
+// ---------------------------------------------------------------------------
+
+function consentPath(dataDir) {
+  return path.join(dataDir, CONSENT_FILE);
+}
+
+function readConsent(dataDir) {
+  const p = consentPath(dataDir);
+  if (!P.exists(p)) return {};
+  try {
+    const c = P.readJSON(p);
+    return c && typeof c === 'object' ? c : {};
+  } catch {
+    return {}; // a malformed config.json is treated as undecided -> gate fires
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Browser classification — the §7 gate: does a binary honor --load-extension?
@@ -221,6 +251,22 @@ async function provisionBrowser(opts) {
   if (opts.noDownload || process.env.ANNOTATE_NO_DOWNLOAD) {
     return { path: null, kind: null, buildId: null, source: 'none', honors: false, error: 'no browser found and download disabled' };
   }
+  // v2 punch-list #10 — the CfT DOWNLOAD is the ONLY gated step (reusing an explicit /
+  // cached / system browser above happened without a gate, because no download occurs).
+  // Require explicit confirmation (config consent OR the --download-cft / ANNOTATE_CONFIRM_
+  // DOWNLOAD seam, threaded in as opts.confirmDownload) so a bare install.sh cannot silently
+  // pull ~358MB.
+  if (!opts.confirmDownload) {
+    return {
+      path: null,
+      kind: null,
+      buildId: null,
+      source: 'download',
+      honors: false,
+      needsConsent: true,
+      error: 'Chrome for Testing (~358MB) download not yet authorized',
+    };
+  }
   return downloadCft(path.join(dataDir, 'cache'));
 }
 
@@ -307,6 +353,11 @@ function launchProbeBrowser({ browserPath, profileDir, extensionDir, url }) {
     `--disable-extensions-except=${extensionDir}`,
     '--no-first-run',
     '--no-default-browser-check',
+    // v2 punch-list #8b — suppress the CfT "only for automated testing" infobar during the
+    // throwaway load probe too (belt-and-suspenders). NOT --kiosk: the probe is a quick,
+    // killed-after-heartbeat launch, not the user-facing review window, so fullscreen would
+    // be inappropriate (and conflicts with --headless=new below).
+    '--test-type',
     '--no-service-autorun',
     '--disable-background-networking',
   ];
@@ -509,21 +560,54 @@ async function runSetup(opts = {}) {
   // (1) data tree, 0700 (§6.3)
   P.ensureDir(dataDir, 0o700);
 
+  // (1b) consent / preference gate (v2 punch-list #10). config.json is the user's durable
+  // install decision, DISTINCT from the generated runtime.json.
+  const consent = readConsent(dataDir);
+  if (consent.declined === true) {
+    // Opted out -> stay dormant; do NOT provision/download/probe and do NOT re-prompt.
+    log('annotate setup: DORMANT — consent declined in ~/.annotate/config.json; not provisioning a browser.');
+    log('annotate setup: delete that file (or replace it with a browser choice) to enable annotate.');
+    return { verdict: 'declined', dataDir, runtimePath, port, extensionDir, profileDir, browser: null, consent, checklist: [] };
+  }
+  // Choice (c): point at the user's own already-installed browser -> use it, NO download.
+  let browserPath = opts.browserPath;
+  if (!browserPath && consent.browser === 'system' && consent.path) {
+    browserPath = consent.path;
+    log(`annotate setup: using your own browser from config.json -> ${browserPath}`);
+  }
+  // The CfT download is allowed only by an explicit confirm seam OR a consented config.
+  const confirmDownload =
+    opts.confirmDownload === true ||
+    !!process.env.ANNOTATE_CONFIRM_DOWNLOAD ||
+    (consent.browser === 'cft' && consent.consented === true);
+
   // (2) extension load dir (§6.4) — validate now; a bad one still proceeds to probe so
   // the degrade checklist can name it (and so a good browser is still provisioned).
   const extValid = validateExtensionDir(extensionDir);
   if (extValid.ok) log(`annotate setup: extension load dir ${extensionDir}`);
   else log(`annotate setup: WARNING extension load dir invalid (${extValid.reason}): ${extensionDir}`);
 
-  // (3) provision a --load-extension-honoring browser (§7)
+  // (3) provision a --load-extension-honoring browser (§7), with the #10 download gate
   const browser = await provisionBrowser({
     dataDir,
-    browserPath: opts.browserPath,
+    browserPath,
     browserCacheDirs: opts.browserCacheDirs,
     noDownload: opts.noDownload,
+    confirmDownload,
   });
   if (browser.path && browser.honors) log(`annotate setup: browser ${browser.kind} ${browser.buildId || ''} (${browser.source}) -> ${browser.path}`);
   else log(`annotate setup: WARNING no auto-usable browser${browser.error ? ` — ${browser.error}` : browser.kind === 'branded' ? ' — branded Chrome cannot CLI-load extensions' : ''}`);
+
+  // (3b) #10 download gate fired: no reusable browser exists and the download is unconfirmed.
+  // Surface the one-line "how to confirm" and STOP — do NOT write runtime.json, start the
+  // server, or download. (A bare install.sh thus cannot silently pull a browser.)
+  if (browser.needsConsent) {
+    log('annotate setup: CONSENT REQUIRED — no system Chromium or cached Chrome for Testing was found,');
+    log('annotate setup: so enabling annotate needs a one-time ~358MB Chrome-for-Testing download under ~/.annotate/.');
+    log('annotate setup: re-run with --download-cft (or ANNOTATE_CONFIRM_DOWNLOAD=1) to confirm the download, OR');
+    log('annotate setup: point at an existing browser via ~/.annotate/config.json {"browser":"system","path":"<chrome/chromium>"}.');
+    return { verdict: 'needs-consent', dataDir, runtimePath, port, extensionDir, profileDir, browser, consent, checklist: [] };
+  }
 
   // (4) profile dir, 0700 (§6.4)
   P.ensureDir(profileDir, 0o700);
@@ -567,6 +651,7 @@ async function runSetup(opts = {}) {
     extensionDir,
     profileDir,
     browser,
+    consent,
     server,
     probe,
     checklist: [],
@@ -628,11 +713,18 @@ async function main() {
   if (a.profile) opts.profileDir = a.profile;
   if (a['probe-timeout']) opts.probeTimeoutMs = Number(a['probe-timeout']) * 1000;
   if (a['no-download']) opts.noDownload = true;
+  if (a['download-cft']) opts.confirmDownload = true; // #10 explicit CfT-download confirmation
 
   const result = await runSetup(opts);
-  // 0 = full pass; 2 = degraded-with-checklist (completed, human steps needed); the
-  // checklist is already printed. A hard error throws before here -> non-zero via catch.
-  process.exit(result.verdict === 'pass' ? 0 : 2);
+  // Exit codes: 0 = full pass OR a deliberately-declined (dormant) install; 3 = consent
+  // required (the #10 gate fired — re-run with --download-cft or write config.json); 2 =
+  // degraded-with-checklist (completed, human steps needed; already printed). A hard error
+  // throws before here -> non-zero via catch.
+  let code;
+  if (result.verdict === 'pass' || result.verdict === 'declined') code = 0;
+  else if (result.verdict === 'needs-consent') code = 3;
+  else code = 2;
+  process.exit(code);
 }
 
 module.exports = {
@@ -649,8 +741,11 @@ module.exports = {
   findSystemChromium,
   ensureServer,
   runLoadProbe,
+  consentPath,
+  readConsent,
   PKG_EXTENSION,
   PROBE_SESSION,
+  CONSENT_FILE,
 };
 
 if (require.main === module) {

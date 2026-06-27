@@ -87,7 +87,23 @@
     return p[0] >= box[0] && p[0] <= box[0] + box[2] && p[1] >= box[1] && p[1] <= box[1] + box[3];
   }
 
+  // Inclusive 1-based line span for a source anchor: a single `line` is [N,N]; a v2
+  // section/document `lineRange` is [start,end]. Returns null for non-line source anchors.
+  function lineSpan(a) {
+    if (Array.isArray(a.lineRange)) return [a.lineRange[0], a.lineRange[1]];
+    if (a.line != null) return [a.line, a.line];
+    return null;
+  }
+
   function sourceOverlap(a, b) {
+    // v2 #2: if either side is a line RANGE (section / whole-document), compare inclusive
+    // line spans. A line-range can only overlap another line-based source anchor.
+    if (Array.isArray(a.lineRange) || Array.isArray(b.lineRange)) {
+      const sa = lineSpan(a);
+      const sb = lineSpan(b);
+      if (sa && sb) return sa[0] <= sb[1] && sb[0] <= sa[1];
+      return false;
+    }
     if (a.line != null && b.line != null) {
       if (Array.isArray(a.charRange) && Array.isArray(b.charRange)) {
         return a.line === b.line && intervalsOverlap(a.charRange, b.charRange);

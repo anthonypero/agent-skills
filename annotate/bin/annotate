@@ -102,6 +102,13 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+# --- session id (§6.1 step 1; v2 punch-list #6a) ----------------------------
+# Prefer an explicit --session (the harness session id the agent passes per SKILL.md).
+# If it was forgotten, fall back to the Claude Code harness session env var when exposed,
+# so the run still groups under a STABLE harness id rather than a generated fallback (the
+# dogfood failure mode). If both are absent, create.js mints a distinct `sess-` id (#6b).
+[ -n "$SESSION" ] || SESSION=${CLAUDE_CODE_SESSION_ID:-}
+
 if [ -z "$POSI" ]; then
   echo "annotate: missing artifact path/url${SUBCMD:+ or <session>/<artifact>}" >&2
   usage
@@ -181,7 +188,12 @@ open_browser() {
   url=$1
   # Assemble + surface the real CfT/Chromium invocation (S0) regardless, so T7 can
   # verify it even when the actual launch is stubbed.
-  real_cmd="\"$CFG_BROWSER_PATH\" --user-data-dir=\"$CFG_PROFILE\" --load-extension=\"$CFG_EXT\" --disable-extensions-except=\"$CFG_EXT\" --no-first-run --no-default-browser-check \"$url\""
+  # v2 punch-list #8 — launch-window presentation (CfT-150 flags; verify on real browser):
+  #   --kiosk     immersive fullscreen, hides the tab strip + omnibox (no URL bar) AND the
+  #               CfT banner as a side effect (#8a).
+  #   --test-type suppresses the "Chrome for Testing … is only for automated testing"
+  #               infobar (belt-and-suspenders to --kiosk's side effect, #8b).
+  real_cmd="\"$CFG_BROWSER_PATH\" --user-data-dir=\"$CFG_PROFILE\" --load-extension=\"$CFG_EXT\" --disable-extensions-except=\"$CFG_EXT\" --no-first-run --no-default-browser-check --kiosk --test-type \"$url\""
   echo "annotate: browser invocation: $real_cmd" >&2
 
   if [ "$NO_OPEN" -eq 1 ]; then
@@ -199,7 +211,8 @@ open_browser() {
     return 0
   fi
   "$CFG_BROWSER_PATH" --user-data-dir="$CFG_PROFILE" --load-extension="$CFG_EXT" \
-    --disable-extensions-except="$CFG_EXT" --no-first-run --no-default-browser-check "$url" \
+    --disable-extensions-except="$CFG_EXT" --no-first-run --no-default-browser-check \
+    --kiosk --test-type "$url" \
     >/dev/null 2>&1 &
   echo "annotate: opened browser (pid $!)" >&2
 }

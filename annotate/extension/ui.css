@@ -1,15 +1,46 @@
-/* Annotate UI (tech-requirements §6.4 + REFS.md). Reasonable + clean, not pixel-perfect —
-   the user iterates on the running build. Everything is namespaced .annotate-* and the
-   container .annotate-ui so page styles and the extension don't fight. */
+/* Annotate UI (tech-requirements §6.4 + REFS.md; v2 punch-list #1/#3/#4/#7/#9).
+   Reasonable + clean, not pixel-perfect — the user iterates on the running build.
+   Everything is namespaced .annotate-* and the container .annotate-ui so page styles
+   and the extension don't fight.
+
+   THEMING (#7): the chrome is OS-themed ALWAYS via prefers-color-scheme; the views WE
+   render (Markdown / code / structured / CSV) honor it too, scoped to body.annotate-themed
+   (set by content.js only on a view we rendered — NEVER on a --as-frontend page, whose own
+   CSS we must not touch). All colors come from CSS variables with a light default + a dark
+   override, so a single media query flips the whole surface. */
 
 :root {
-  --annotate-bg: #1c1f26;
-  --annotate-fg: #e6e8ee;
-  --annotate-muted: #9aa3b2;
-  --annotate-accent: #4c8dff;
+  --annotate-bg: #eef0f4;
+  --annotate-fg: #1d2330;
+  --annotate-muted: #5a6472;
+  --annotate-accent: #2f6fed;
+  --annotate-accent-active: #1750cc; /* "brighter blue when active" (#4) */
   --annotate-accent-fg: #ffffff;
-  --annotate-line: #2a2f3a;
-  --annotate-card: #232733;
+  --annotate-line: #d2d7e0;
+  --annotate-card: #ffffff;
+  --annotate-btn-bg: #ffffff;
+  --annotate-content-bg: #ffffff;
+  --annotate-content-fg: #1d2330;
+  --annotate-code-bg: #f2f4f7;
+  --annotate-hover: rgba(47, 111, 237, 0.10);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --annotate-bg: #1c1f26;
+    --annotate-fg: #e6e8ee;
+    --annotate-muted: #9aa3b2;
+    --annotate-accent: #4c8dff;
+    --annotate-accent-active: #8ab6ff; /* lighter == brighter in dark (#4) */
+    --annotate-accent-fg: #ffffff;
+    --annotate-line: #2a2f3a;
+    --annotate-card: #232733;
+    --annotate-btn-bg: #2b3140;
+    --annotate-content-bg: #15171c;
+    --annotate-content-fg: #e6e8ee;
+    --annotate-code-bg: #1a1d24;
+    --annotate-hover: rgba(76, 141, 255, 0.14);
+  }
 }
 
 .annotate-ui,
@@ -20,7 +51,15 @@
 
 body.annotate-has-chrome {
   padding-top: 52px;
+  padding-bottom: 30px; /* clear the fixed status footer (#9) */
   margin-right: 0;
+}
+
+/* Theme ONLY the views we render (#7) — never a --as-frontend page (no .annotate-themed). */
+body.annotate-themed {
+  background: var(--annotate-content-bg);
+  color: var(--annotate-content-fg);
+  color-scheme: light dark;
 }
 
 /* ---- top "Annotate chrome" bar (REQUIRED, §6.4) ---- */
@@ -81,23 +120,33 @@ body.annotate-has-chrome {
   opacity: 0.6;
   cursor: default;
 }
+
+/* ---- status footer (#9): a fixed bottom bar, not under the top chrome ---- */
 .annotate-status {
-  position: absolute;
+  position: fixed;
   left: 0;
   right: 0;
-  top: 52px;
-  padding: 4px 14px;
+  bottom: 0;
+  padding: 5px 14px;
   font-size: 12px;
   color: var(--annotate-muted);
-  background: rgba(28, 31, 38, 0.92);
-  border-bottom: 1px solid var(--annotate-line);
+  background: var(--annotate-bg);
+  border-top: 1px solid var(--annotate-line);
+  z-index: 2147483600;
   pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
+/* ---- buttons + inline-SVG icons (#4) ---- */
 .annotate-btn {
   appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border: 1px solid var(--annotate-line);
-  background: #2b3140;
+  background: var(--annotate-btn-bg);
   color: var(--annotate-fg);
   font-size: 13px;
   padding: 6px 12px;
@@ -108,10 +157,47 @@ body.annotate-has-chrome {
 .annotate-btn:hover {
   border-color: var(--annotate-accent);
 }
+.annotate-btn-label {
+  font-size: 13px;
+  line-height: 1;
+}
+.annotate-btn-inert {
+  opacity: 0.45;
+  cursor: default;
+}
+.annotate-btn-inert:hover {
+  border-color: var(--annotate-line);
+}
 .annotate-primary {
   background: var(--annotate-accent);
   color: var(--annotate-accent-fg);
   border-color: var(--annotate-accent);
+}
+.annotate-icon-wrap {
+  display: inline-flex;
+  align-items: center;
+}
+.annotate-icon {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+/* screenshot toggle (#4): camera icon, brighter blue when active */
+.annotate-shot-toggle {
+  color: var(--annotate-muted);
+}
+.annotate-shot-toggle.annotate-active {
+  color: var(--annotate-accent-active);
+  border-color: var(--annotate-accent-active);
+}
+.annotate-shot-inert {
+  opacity: 0.5;
+}
+
+/* reading-width control (#3): the <-> icon + the current preset label */
+.annotate-width {
+  color: var(--annotate-fg);
 }
 
 /* ---- selection pill (REFS "highlight to add a comment") ---- */
@@ -137,6 +223,40 @@ body.annotate-has-chrome {
   background: var(--annotate-accent);
   color: var(--annotate-accent-fg);
   border: none;
+}
+
+/* ---- block hover affordance (#1): outline the anchorable region + a "+" bubble ---- */
+.annotate-hover-region {
+  outline: 2px solid var(--annotate-accent);
+  outline-offset: 3px;
+  background: var(--annotate-hover);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.annotate-hover-add {
+  z-index: 2147483601;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px 3px 7px;
+  background: var(--annotate-accent);
+  color: var(--annotate-accent-fg);
+  border: none;
+  border-radius: 999px;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);
+  font-size: 12px;
+  cursor: pointer;
+}
+.annotate-hover-plus {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+}
+.annotate-hover-text {
+  font-size: 11px;
+  opacity: 0.92;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
 }
 
 /* ---- composer ---- */
@@ -165,7 +285,7 @@ body.annotate-has-chrome {
 .annotate-composer textarea {
   width: 100%;
   resize: vertical;
-  background: #1a1d24;
+  background: var(--annotate-content-bg);
   color: var(--annotate-fg);
   border: 1px solid var(--annotate-line);
   border-radius: 6px;
@@ -182,11 +302,11 @@ body.annotate-has-chrome {
 /* ---- right-margin comment cards (REFS) ---- */
 .annotate-rail {
   position: fixed;
-  top: 92px;
+  top: 64px;
   right: 16px;
   width: 280px;
   max-width: 32vw;
-  max-height: calc(100vh - 110px);
+  max-height: calc(100vh - 64px - 40px); /* clear chrome (top) + status footer (bottom) */
   overflow-y: auto;
   z-index: 2147483590;
   display: flex;
@@ -230,16 +350,169 @@ body.annotate-has-chrome {
   word-break: break-word;
 }
 
+/* ---- advance warning banner (auto-advance, §6.4) ---- */
+.annotate-advance-warn {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 40px;
+  z-index: 2147483603;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--annotate-card);
+  color: var(--annotate-fg);
+  border: 1px solid var(--annotate-accent);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  font-size: 13px;
+}
+
+/* ===========================================================================
+   Rendered-view styling + theming (#7). Scoped to .annotate-render / its format
+   classes, so a --as-frontend pass-through page (no .annotate-render) is untouched.
+   =========================================================================== */
+
+.annotate-render {
+  color: var(--annotate-content-fg);
+}
+
+/* reading column (#3): max-width preset applied to the Markdown render only; the
+   preset attribute is set on <body> by content.js and persisted per-user. */
+.annotate-markdown {
+  padding: 24px 28px 72px;
+  line-height: 1.62;
+  font-size: 15px;
+  word-wrap: break-word;
+}
+body[data-annotate-width="comfortable"] .annotate-markdown {
+  max-width: 760px;
+  margin-left: auto;
+  margin-right: auto;
+}
+body[data-annotate-width="wide"] .annotate-markdown {
+  max-width: 1080px;
+  margin-left: auto;
+  margin-right: auto;
+}
+body[data-annotate-width="full"] .annotate-markdown {
+  max-width: none;
+}
+
+.annotate-markdown h1,
+.annotate-markdown h2,
+.annotate-markdown h3,
+.annotate-markdown h4,
+.annotate-markdown h5,
+.annotate-markdown h6 {
+  line-height: 1.25;
+  margin: 1.4em 0 0.55em;
+  font-weight: 650;
+}
+.annotate-markdown h1 { font-size: 1.9em; }
+.annotate-markdown h2 {
+  font-size: 1.5em;
+  border-bottom: 1px solid var(--annotate-line);
+  padding-bottom: 0.25em;
+}
+.annotate-markdown h3 { font-size: 1.25em; }
+.annotate-markdown p { margin: 0.7em 0; }
+.annotate-markdown a { color: var(--annotate-accent); }
+.annotate-markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  background: var(--annotate-code-bg);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+}
+.annotate-markdown pre {
+  background: var(--annotate-code-bg);
+  padding: 12px 14px;
+  border-radius: 8px;
+  overflow: auto;
+  border: 1px solid var(--annotate-line);
+}
+.annotate-markdown pre code {
+  background: none;
+  padding: 0;
+}
+.annotate-markdown blockquote {
+  margin: 0.8em 0;
+  padding: 0.2em 1em;
+  border-left: 3px solid var(--annotate-line);
+  color: var(--annotate-muted);
+}
+.annotate-markdown ul,
+.annotate-markdown ol {
+  padding-left: 1.6em;
+  margin: 0.6em 0;
+}
+.annotate-markdown li { margin: 0.25em 0; }
+.annotate-markdown table {
+  border-collapse: collapse;
+  margin: 0.8em 0;
+}
+.annotate-markdown th,
+.annotate-markdown td {
+  border: 1px solid var(--annotate-line);
+  padding: 6px 10px;
+}
+.annotate-markdown hr {
+  border: none;
+  border-top: 1px solid var(--annotate-line);
+  margin: 1.4em 0;
+}
+.annotate-markdown img { max-width: 100%; }
+
+/* code view (#7): theme the background/foreground; width is INERT here (full-bleed). */
+.annotate-code {
+  background: var(--annotate-code-bg);
+  color: var(--annotate-content-fg);
+  margin: 0;
+  padding: 16px 18px 64px;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  min-height: 100vh;
+}
+
+/* structured (JSON/YAML/TOML) + CSV views (#7): minimal themed readability. */
+.annotate-struct,
+.annotate-csv {
+  color: var(--annotate-content-fg);
+  padding: 16px 18px 64px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+.annotate-struct .node { padding-left: 1.1em; }
+.annotate-struct .key { color: var(--annotate-accent); }
+.annotate-struct .idx { color: var(--annotate-muted); }
+.annotate-struct .val.string { color: #2aa198; }
+.annotate-struct .val.number { color: #b58900; }
+.annotate-struct .val.boolean { color: #cb4b16; }
+.annotate-csv {
+  border-collapse: collapse;
+}
+.annotate-csv th,
+.annotate-csv td {
+  border: 1px solid var(--annotate-line);
+  padding: 4px 9px;
+  text-align: left;
+}
+.annotate-csv th {
+  background: var(--annotate-code-bg);
+  font-weight: 650;
+}
+
 /* anchored-span highlight + accepted/submitted affordances */
 .annotate-render [data-annotate-active] {
-  background: rgba(76, 141, 255, 0.18);
+  background: var(--annotate-hover);
 }
 body.annotate-submitted .annotate-send {
   opacity: 0.7;
 }
 body.annotate-accepted .annotate-chrome {
   border-bottom-color: #2ec27e;
-}
-body.annotate-expanded .annotate-render {
-  max-width: none !important;
 }
