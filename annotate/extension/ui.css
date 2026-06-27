@@ -437,6 +437,30 @@ body.annotate-themed {
   height: 14px;
 }
 
+/* ---- Fix #1: the composer keeps its TARGET visible while open ----
+   A REGION anchor (the §K lock levels) gets a persistent OUTLINE; a real TEXT SELECTION
+   (text-span anchor) gets a highlighter fill + underline over the selected WORDS. Both are
+   page-positioned by content.js (ride the content on scroll) and non-interactive so clicks /
+   re-selection pass through. content.js gates the word highlight off for the live frontend +
+   image views. Same accent + z-band as the §K selection box: above pins, below the composer. */
+.annotate-composer-target {
+  position: absolute;
+  z-index: 2147483595;
+  pointer-events: none;
+  outline: 2px solid var(--annotate-accent);
+  outline-offset: 2px;
+  background: var(--annotate-hover);
+  border-radius: 4px;
+}
+.annotate-composer-word {
+  position: absolute;
+  z-index: 2147483595;
+  pointer-events: none;
+  background: var(--annotate-hover);
+  box-shadow: inset 0 -2px 0 0 var(--annotate-accent); /* a highlighter underline so the words read as marked */
+  border-radius: 2px;
+}
+
 /* ---- composer ---- */
 .annotate-composer {
   z-index: 2147483602;
@@ -779,12 +803,15 @@ body.annotate-sidebar-open[data-sidebar-mode="overlay"] {
 
 /* reading column (#3 / §D): the Markdown root + every <section> span the FULL content width;
    the reading-width preset (set on <body> by content.js, persisted per-user) is applied to the
-   PROSE BLOCKS inside them, NOT to the container — so a TABLE (wrapped in .annotate-table-wrap,
-   deliberately left unconstrained below) breaks OUT of the reading column to the full content
-   width. The content width already reflects the §B sidebar in shrink mode (body padding-right),
-   so the table needs no extra handling. The child combinators keep the constraint to a
-   section's DIRECT block children — nested sections recurse; blocks inside a list item are not
-   double-centered; the <section> wrappers and the table wrap are excluded. */
+   BLOCKS inside them, NOT to the container. Dogfood-5 #2: the table wrap is now INCLUDED in this
+   constraint (it used to be excluded so the table broke OUT to the full content width — but then
+   its left edge sat in the prose's margin, not in line with the paragraph text). It now shares
+   the prose's max-width + centered margins, so .annotate-table-wrap STARTS at the same left edge
+   as the prose and the wide table scrolls horizontally WITHIN that reading column (overflow-x on
+   the wrap, below). The content width already reflects the §B sidebar in shrink mode (body
+   padding-right). The child combinators keep the constraint to a section's DIRECT block children
+   — nested sections recurse; blocks inside a list item are not double-centered; only the
+   <section> wrappers are excluded (they recurse). */
 .annotate-markdown {
   padding: 24px 28px 72px;
   line-height: 1.62;
@@ -805,19 +832,19 @@ body.annotate-sidebar-open[data-sidebar-mode="overlay"] {
   max-width: 100%;
   min-width: 0;
 }
-body[data-annotate-width="comfortable"] .annotate-markdown > :not(.annotate-section):not(.annotate-table-wrap),
-body[data-annotate-width="comfortable"] .annotate-markdown .annotate-section > :not(.annotate-section):not(.annotate-table-wrap) {
+body[data-annotate-width="comfortable"] .annotate-markdown > :not(.annotate-section),
+body[data-annotate-width="comfortable"] .annotate-markdown .annotate-section > :not(.annotate-section) {
   max-width: 760px;
   margin-left: auto;
   margin-right: auto;
 }
-body[data-annotate-width="wide"] .annotate-markdown > :not(.annotate-section):not(.annotate-table-wrap),
-body[data-annotate-width="wide"] .annotate-markdown .annotate-section > :not(.annotate-section):not(.annotate-table-wrap) {
+body[data-annotate-width="wide"] .annotate-markdown > :not(.annotate-section),
+body[data-annotate-width="wide"] .annotate-markdown .annotate-section > :not(.annotate-section) {
   max-width: 1080px;
   margin-left: auto;
   margin-right: auto;
 }
-/* full: prose blocks span the full content width too (no max-width) — tables already do. */
+/* full: every block (prose AND the table wrap) spans the full content width — no max-width. */
 
 .annotate-markdown h1,
 .annotate-markdown h2,
@@ -868,12 +895,15 @@ body[data-annotate-width="wide"] .annotate-markdown .annotate-section > :not(.an
   margin: 0.6em 0;
 }
 .annotate-markdown li { margin: 0.25em 0; }
-/* §D full-width scrolling tables: render.js wraps each markdown <table> in
-   .annotate-table-wrap. The wrap is a horizontal-scroll box (overflow-x:auto; max-width:100%)
-   so a wide table scrolls INSIDE its own box instead of breaking the page layout / the §B
-   sidebar. The table fills the box when narrow (min-width:100%) and grows past it when wide
-   (width:max-content), at which point the box scrolls. The wrap is excluded from the
-   reading-column constraint above, so tables span the full content width. */
+/* §D scrolling tables: render.js wraps each markdown <table> in .annotate-table-wrap. The wrap
+   is a horizontal-scroll box (overflow-x:auto) so a wide table scrolls INSIDE its own box instead
+   of breaking the page layout / the §B sidebar. The table fills the box when narrow
+   (min-width:100%) and grows past it when wide (width:max-content), at which point the box
+   scrolls. Dogfood-5 #2: the wrap now INHERITS the reading-column constraint above (max-width +
+   centered margins per width preset), so it lines up with the prose's left edge and the table
+   scrolls within that column — rather than spanning edge-to-edge in the prose margin. The
+   max-width:100% + min-width:0 here are the §H fallback (full-width preset / non-markdown) and
+   the floor that makes overflow-x:auto actually engage. */
 .annotate-table-wrap {
   overflow-x: auto;
   /* §H.1: the scroll container itself caps at its container width and may shrink below the

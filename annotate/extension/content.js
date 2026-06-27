@@ -63,6 +63,9 @@
   let feedbackSink = null;
   const drafts = []; // §5.2 items (no id; ids assigned at submit by submit.js)
   let pending = null; // { bubble, anchor, element } while a composer is open
+  // Fix #1: the composer keeps its TARGET visible while open — { nodes:[], range, element,
+  // words } or null. A region anchor gets an outline node; a text selection gets word nodes.
+  let composerTarget = null;
   let revertTarget = null; // the §5.5 revertTarget; null until the version UI (T6b) sets it
   let submitted = false;
   let lastHeadInfo = null;
@@ -748,7 +751,90 @@
   function closeComposer() {
     const c = doc.querySelector('.annotate-composer');
     if (c) c.remove();
+    clearComposerTarget(); // Fix #1: drop the target highlight when the composer closes/cancels
     pending = null;
+  }
+
+  // ---- Fix #1: keep the comment/edit TARGET visible while the composer is open --------------
+  // A REGION anchor (the §K lock levels: block / line / list / section / table) gets a persistent
+  // OUTLINE over the anchored element. A real TEXT SELECTION (text-span anchor: inline edit /
+  // text-selection comment) gets a highlighter fill over the selected WORDS — the words ARE the
+  // target. Word highlight is RENDERED-DOC ONLY: gated off for the live --as-frontend view (which
+  // keeps just the element outline) and for the image view (whose adapter owns its own region
+  // markers). The overlays are page-positioned (so they ride the content on scroll, exactly like
+  // the §K box) and torn down by closeComposer.
+  function clearComposerTarget() {
+    if (!composerTarget) return;
+    composerTarget.nodes.forEach(function (n) { if (n && n.parentNode) n.remove(); });
+    composerTarget = null;
+  }
+
+  // One page-positioned highlighter rect per client-rect of the selected range, each clipped to
+  // its scroll-container ancestors (same §H.2 clamp as the §K box, so a selection inside a
+  // scrolled table wrap stays inside it). [] when the range yields nothing drawable.
+  function composerWordNodes(range) {
+    if (!range || typeof range.getClientRects !== 'function') return [];
+    const cac = range.commonAncestorContainer;
+    const host = cac && (cac.nodeType === 1 ? cac : cac.parentElement);
+    const sx = root.scrollX || 0;
+    const sy = root.scrollY || 0;
+    const rects = range.getClientRects();
+    const nodes = [];
+    for (let i = 0; i < rects.length; i++) {
+      const c = clipRectToScrollAncestors(host, rects[i]);
+      if (c.width <= 0 || c.height <= 0) continue;
+      const w = el('div', { class: 'annotate-ui annotate-composer-word' });
+      w.style.left = (c.left + sx) + 'px';
+      w.style.top = (c.top + sy) + 'px';
+      w.style.width = c.width + 'px';
+      w.style.height = c.height + 'px';
+      nodes.push(w);
+    }
+    return nodes;
+  }
+
+  // A single page-positioned OUTLINE over the anchored element (clipped like the §K box).
+  function composerBoxNodes(element) {
+    if (!element || typeof element.getBoundingClientRect !== 'function') return [];
+    const r = clipRectToScrollAncestors(element, element.getBoundingClientRect());
+    if (r.width <= 0 || r.height <= 0) return [];
+    const sx = root.scrollX || 0;
+    const sy = root.scrollY || 0;
+    const box = el('div', { class: 'annotate-ui annotate-composer-target' });
+    box.style.left = (r.left + sx) + 'px';
+    box.style.top = (r.top + sy) + 'px';
+    box.style.width = r.width + 'px';
+    box.style.height = r.height + 'px';
+    return [box];
+  }
+
+  function showComposerTarget(opts) {
+    clearComposerTarget();
+    if (viewKind === 'image') return; // the image adapter owns its own region markers
+    const range = opts.targetRange || null;
+    const element = opts.element || null;
+    // Word highlight only for a real selection on a RENDERED doc — never the live frontend page.
+    const wantWords = !!(range && viewKind !== 'frontend');
+    let nodes = wantWords ? composerWordNodes(range) : [];
+    let words = nodes.length > 0;
+    if (!nodes.length) { nodes = composerBoxNodes(element); words = false; } // fall back to the region outline
+    if (!nodes.length) return;
+    nodes.forEach(function (n) { doc.body.appendChild(n); });
+    composerTarget = { nodes: nodes, range: range, element: element, words: words };
+  }
+
+  // Re-place the target highlight on scroll/resize (re-clips against scroll containers, like
+  // repositionLock). The composer card is page-positioned so it already rides the content; this
+  // just keeps the highlight clipped correctly. Drops it if the anchored element vanished.
+  function repositionComposerTarget() {
+    if (!composerTarget) return;
+    if (composerTarget.element && !doc.contains(composerTarget.element)) { clearComposerTarget(); return; }
+    composerTarget.nodes.forEach(function (n) { if (n && n.parentNode) n.remove(); });
+    const nodes = composerTarget.words
+      ? composerWordNodes(composerTarget.range)
+      : composerBoxNodes(composerTarget.element);
+    nodes.forEach(function (n) { doc.body.appendChild(n); });
+    composerTarget.nodes = nodes;
   }
 
   // Open the comment/edit composer for an anchor. `selectedText` seeds the edit box.
@@ -947,6 +1033,10 @@
     else positionNear(card, opts.element);
     doc.body.appendChild(card);
     renderMode();
+    // Fix #1: keep the target visible for the whole time the composer is open (region outline,
+    // or word highlight for a text selection). focus() below clears the native selection — our
+    // overlay persists independent of it, so the human keeps seeing what they're commenting on.
+    showComposerTarget(opts);
     input.focus();
   }
 
@@ -1439,14 +1529,19 @@
 
   function showSelectionIcon(sel, anchor, text, host) {
     let rect;
+    // Fix #1: clone the selection NOW (before the composer's focus() collapses it) so the
+    // composer can word-highlight exactly these words while it is open.
+    let range = null;
     try {
-      rect = sel.getRangeAt(0).getBoundingClientRect();
+      const live = sel.getRangeAt(0);
+      rect = live.getBoundingClientRect();
+      range = live.cloneRange();
     } catch (e) {
       rect = host.getBoundingClientRect();
     }
     const icon = commentAffordance('annotate-sel-affordance', 'Comment on the selected text', function (point) {
       removeSelectionIcon();
-      openComposerAt(point, { anchor: anchor, element: host, selectedText: text });
+      openComposerAt(point, { anchor: anchor, element: host, selectedText: text, targetRange: range });
     });
     icon.style.position = 'absolute';
     icon.style.top = Math.max(56, rect.top + (root.scrollY || 0) - 4) + 'px';
@@ -1656,8 +1751,11 @@
     // §B: pins are position:fixed in viewport coords and must re-track the content as it
     // scrolls / the layout reflows.
     root.addEventListener('scroll', schedulePinReposition, true);
+    // Fix #1: the composer's target highlight re-clips against scroll containers on scroll/reflow.
+    root.addEventListener('scroll', repositionComposerTarget, true);
     root.addEventListener('resize', repositionLock);
     root.addEventListener('resize', schedulePinReposition);
+    root.addEventListener('resize', repositionComposerTarget);
     // Image view (§6.4 leverage order DOM -> code -> image): the dom/code adapters return
     // null on an image (no source position), so the image adapter owns its click/drag ->
     // §5.2 spatial anchors and opens the composer directly.
