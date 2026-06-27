@@ -178,6 +178,13 @@ body.annotate-themed {
   color: var(--annotate-accent-fg);
   border-color: var(--annotate-accent);
 }
+/* §G.1: while unsent comments are staged, Accept is de-emphasized (Send becomes primary)
+   and clicking it requires an explicit confirm — so it can't be a one-click trap that
+   finalizes the round with 0 feedback. */
+.annotate-accept-guarded {
+  opacity: 0.6;
+  border-style: dashed;
+}
 .annotate-icon-wrap {
   display: inline-flex;
   align-items: center;

@@ -375,11 +375,35 @@
     // but that async storage callback must NOT be what first publishes the attribute, or a
     // reader gated on data-annotate-ready (e.g. the image-gate) can win the race and read null.
     reflectShotToggle();
+    reflectActionEmphasis(); // §G.1: initial Accept/Send emphasis (Accept primary while empty)
   }
 
   function updateSendCount() {
     const b = doc.querySelector('.annotate-send');
     if (b) b.textContent = 'Send feedback (' + drafts.length + ')';
+    reflectActionEmphasis();
+  }
+
+  // §G.1: Accept is the PRIMARY action ONLY when nothing unsent is staged. While there are
+  // unsent staged comments, Send becomes primary and Accept is de-emphasized (+ accept()
+  // requires an explicit confirm) so a stray click can't finalize the round with 0 feedback.
+  // Keyed off UNSENT drafts (`!submitted`): once sent, the drafts are no longer at risk and
+  // Accept returns to primary — so a normal Send -> Accept flow is unaffected.
+  function reflectActionEmphasis() {
+    const acc = doc.querySelector('.annotate-accept');
+    const snd = doc.querySelector('.annotate-send');
+    const guard = !submitted && drafts.length > 0;
+    if (acc) {
+      acc.classList.toggle('annotate-primary', !guard);
+      acc.classList.toggle('annotate-accept-guarded', guard);
+      acc.setAttribute(
+        'title',
+        guard
+          ? 'Accept approves as-is and discards your ' + drafts.length + ' unsent comment(s) — use Send to submit them'
+          : 'Accept this round as-is'
+      );
+    }
+    if (snd) snd.classList.toggle('annotate-primary', guard);
   }
 
   // §F: "Copy" is GONE — native browser selection (⌘C / right-click → Copy) works now that
@@ -595,12 +619,7 @@
       renderMode();
     });
 
-    const addBtn = el('button', {
-      class: 'annotate-btn annotate-primary annotate-add',
-      type: 'button',
-      text: 'Add',
-    });
-    addBtn.addEventListener('click', function () {
+    function commitDraft() {
       if (bubble.type === 'comment') bubble.setComment(input.value);
       else bubble.setReplacement(replInput.value);
       if (!bubble.isComplete()) {
@@ -613,7 +632,26 @@
       if (opts.editEntry) updateEntry(opts.editEntry, item);
       else addDraft(item);
       closeComposer();
+    }
+
+    const addBtn = el('button', {
+      class: 'annotate-btn annotate-primary annotate-add',
+      type: 'button',
+      text: 'Add',
     });
+    addBtn.addEventListener('click', commitDraft);
+
+    // §J: in the composer, Enter submits/adds the comment; Shift+Enter inserts a newline.
+    // Wired on BOTH textareas (comment + edit/replacement) so the keybinding is consistent
+    // whichever field is active. `isComposing` guards against committing mid-IME-composition.
+    function onComposerKeydown(e) {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        commitDraft();
+      }
+    }
+    input.addEventListener('keydown', onComposerKeydown);
+    replInput.addEventListener('keydown', onComposerKeydown);
 
     const cancelBtn = el('button', {
       class: 'annotate-btn annotate-cancel',
@@ -1326,10 +1364,20 @@
       setStatus('Submitted — feedback returned to the agent');
       if (bar) bar.setAttribute('data-last-submit', 'submitted');
       doc.body.classList.add('annotate-submitted');
+      reflectActionEmphasis(); // §G.1: drafts are sent now -> Accept returns to primary
     } else if (resp.httpStatus === 409 || resp.error === 'stale-head') {
-      setStatus('This round was superseded — advancing to the new round');
-      if (bar) bar.setAttribute('data-last-submit', 'stale');
-      await maybeAdvance(resp.head);
+      // §G.2: a 409 stale-head is a "newer round" ONLY when the returned head differs from
+      // the one being viewed. A 409 on the SAME head means THIS round was finalized
+      // (accepted, or already submitted) — NOT a new round; do not raise the false
+      // "newer round" banner (which trapped the staged comments + blocked Send).
+      if (resp.head && resp.head !== ctx.head) {
+        setStatus('This round was superseded — advancing to the new round');
+        if (bar) bar.setAttribute('data-last-submit', 'stale');
+        await maybeAdvance(resp.head);
+      } else {
+        setStatus('This round is already finalized — it can no longer take new comments.');
+        if (bar) bar.setAttribute('data-last-submit', 'closed');
+      }
     } else {
       setStatus('Submit error (' + (resp.httpStatus || '?') + '): ' + (resp.error || 'unknown'));
       if (bar) bar.setAttribute('data-last-submit', 'error');
@@ -1339,6 +1387,24 @@
 
   async function accept() {
     const bar = chromeBar();
+    // §G.1: Accept = approve the round AS-IS (no feedback). With UNSENT staged comments it
+    // would silently discard them — the dogfood trap (the user meant Send). Require an
+    // explicit confirm in that state; Send is the de-emphasized primary action (see
+    // reflectActionEmphasis). Already-submitted drafts are NOT "unsent" (the round is closed
+    // to them), so a normal Send -> Accept is unaffected and never prompts.
+    if (!submitted && drafts.length > 0) {
+      const n = drafts.length;
+      const noun = 'staged comment' + (n === 1 ? '' : 's');
+      const confirmFn = typeof root.confirm === 'function' ? root.confirm.bind(root) : null;
+      if (confirmFn && !confirmFn(
+        'Accept approves this round as-is and DISCARDS ' + n + ' ' + noun + ' you have not sent.\n\n' +
+        'Click Cancel to keep ' + (n === 1 ? 'it' : 'them') + ' (then use “Send feedback” to submit), or OK to discard and accept.'
+      )) {
+        setStatus(n + ' ' + noun + ' kept — use “Send feedback” to submit ' + (n === 1 ? 'it' : 'them') + '.');
+        if (bar) bar.setAttribute('data-last-accept', 'cancelled');
+        return { cancelled: true };
+      }
+    }
     setStatus('Accepting…');
     let resp;
     try {
@@ -1408,6 +1474,11 @@
   // drop it, §6.4) — surface a persistent warning + a "Discard & view new round" control
   // and remember the target; otherwise load the new round.
   function maybeAdvance(newHead, newStatus) {
+    // §G.2: a "newer round" requires a GENUINELY new head id distinct from the one being
+    // viewed. A falsy head, or a head equal to the current one (e.g. a 409 from an Accept /
+    // already-submitted of THIS round), is NOT a newer round — never advance or raise the
+    // preserve-unsent banner for it (that spuriously trapped staged comments + blocked Send).
+    if (!newHead || newHead === ctx.head) return;
     if (hasUnsentWork()) {
       deferredHead = newHead;
       warnPendingAdvance(newHead);
