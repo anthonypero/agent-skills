@@ -567,11 +567,13 @@ body.annotate-themed {
 
 /* ===========================================================================
    §B comment / edit PINS (on-canvas presence) — replaces the old right-margin rail.
-   RESTING = the icon ONLY: the type-colored, semi-transparent glyph (comment bubble for a
-   comment, pen for an edit) — NO teardrop background, NO outline. HOVER (and the navigation
-   flash) GROWS the colored pin-shaped background out of the icon into the full marker:
-   colored bg + white outline + white icon. position:fixed; content.js re-tracks it on
-   scroll/reflow (now ON the anchored words for text selections).
+   RESTING = the icon ONLY: the type-colored, semi-transparent SOLID/filled glyph (solid comment
+   bubble for a comment, the filled pen for an edit) — NO teardrop background, NO ring. HOVER (and
+   the navigation flash) GROWS the colored pin-shaped background out of the icon into the full
+   marker: colored bg + the white OUTLINED glyph on top — NO white ring around the marker ("outline"
+   ever only meant the ICON's form, never a ring). The two glyphs are stacked in the pin and toggled
+   here: solid shows at rest, the outline swaps in on hover/flash. position:fixed; content.js
+   re-tracks it (block anchors in the left gutter; text-selection pins float above the words).
    =========================================================================== */
 .annotate-comment-pin {
   position: fixed;
@@ -599,24 +601,38 @@ body.annotate-themed {
   width: 16px;
   height: 16px;
 }
-/* HOVER -> the full marker grows out of the icon: colored bg, white outline, white icon. */
+/* glyph swap: SOLID glyph at rest, white OUTLINED glyph on hover/flash. Both are stacked in the
+   pin; exactly one shows at a time so the visible one stays centered. */
+.annotate-comment-pin .annotate-pin-glyph-hover {
+  display: none;
+}
+.annotate-comment-pin:hover .annotate-pin-glyph-rest,
+.annotate-comment-pin.annotate-pin-flash .annotate-pin-glyph-rest {
+  display: none;
+}
+.annotate-comment-pin:hover .annotate-pin-glyph-hover,
+.annotate-comment-pin.annotate-pin-flash .annotate-pin-glyph-hover {
+  display: inline-flex;
+}
+/* HOVER -> the full marker grows out of the icon: colored bg + white OUTLINED icon. NO ring. */
 .annotate-comment-pin:hover {
   opacity: 1;
   transform: scale(1.1);
   background: var(--annotate-pin-comment);
   color: var(--annotate-accent-fg);
-  box-shadow: 0 0 0 2px #fff, 0 2px 8px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 .annotate-comment-pin-edit:hover {
   background: var(--annotate-pin-edit);
 }
-/* navigation flash (sidebar -> canvas): pop to the same full marker, a touch larger. */
+/* navigation flash (sidebar -> canvas): pop to the same full marker, a touch larger, with a soft
+   colored attention halo (the pulse) — still NO white ring on the marker. */
 .annotate-comment-pin.annotate-pin-flash {
   opacity: 1;
   transform: scale(1.25);
   background: var(--annotate-pin-comment);
   color: var(--annotate-accent-fg);
-  box-shadow: 0 0 0 2px #fff, 0 0 0 5px var(--annotate-hover), 0 2px 10px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 0 0 4px var(--annotate-hover), 0 2px 10px rgba(0, 0, 0, 0.4);
 }
 .annotate-comment-pin-edit.annotate-pin-flash {
   background: var(--annotate-pin-edit);

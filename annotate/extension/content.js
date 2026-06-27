@@ -107,6 +107,13 @@
   const ICON_COMMENT =
     '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
     '<path fill="currentColor" d="M152.6 443.4C150.9 447.6 140.1 474.1 120.2 522.9L206.1 493.4L217.6 489.5L228.8 494.1C256.6 505.6 287.4 512.1 320 512.1C445.7 512.1 544 417.1 544 304.1C544 191.1 445.7 96 320 96C194.3 96 96 191 96 304C96 350.6 112.5 393.8 140.7 428.7L152.6 443.4zM104.2 562.2L64 576C71.4 557.9 88.7 515.4 115.8 448.8C83.3 408.6 64 358.4 64 304C64 171.5 178.6 64 320 64C461.4 64 576 171.5 576 304C576 436.5 461.4 544 320 544C283.2 544 248.1 536.7 216.5 523.6L104.2 562.2z"/></svg>';
+  // §B (pin pass v2): the SOLID/filled speech bubble — the RESTING comment-pin glyph. Same
+  // silhouette + 640 grid as ICON_COMMENT (this is that bubble's outer contour, filled), so the
+  // resting solid glyph and the hover white-OUTLINED glyph register as the same shape. The
+  // outlined ICON_COMMENT is the hover/background glyph; this solid one is rest.
+  const ICON_COMMENT_SOLID =
+    '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
+    '<path fill="currentColor" d="M104.2 562.2L64 576C71.4 557.9 88.7 515.4 115.8 448.8C83.3 408.6 64 358.4 64 304C64 171.5 178.6 64 320 64C461.4 64 576 171.5 576 304C576 436.5 461.4 544 320 544C283.2 544 248.1 536.7 216.5 523.6L104.2 562.2z"/></svg>';
   // §F: the doc-level add-comment affordance mounted at the TOP OF THE SIDEBAR (comment-plus
   // Sharp Light) — creates a whole-document comment ({kind:'source', lineRange:[1, lastLine]}).
   const ICON_COMMENT_PLUS =
@@ -1170,17 +1177,25 @@
     return entry;
   }
 
-  // The semi-transparent, type-colored ICON pin (§B). RESTING = just the glyph (comment bubble
-  // for a comment, pen for an edit) in the type color; CSS grows the full marker on hover. The
-  // GLYPH differs by type, so updateEntry rebuilds the pin when the type changes.
+  // The semi-transparent, type-colored ICON pin (§B). RESTING = just the SOLID/filled glyph
+  // (solid comment bubble for a comment, the filled pen for an edit) in the type color; CSS grows
+  // the full colored marker on hover and swaps to the white OUTLINED glyph on top. Both glyphs are
+  // stacked in the pin and toggled by CSS (:hover / .annotate-pin-flash) — no JS hover state. The
+  // GLYPH set differs by type, so updateEntry rebuilds the pin when the type changes.
   function makePin(entry) {
     const isEdit = entry.item.type === 'edit';
+    // rest = solid; hover = outlined. Edits use the pen for both (it reads fine as the white
+    // outlined glyph on the colored background); comments swap solid-bubble -> outline-bubble.
+    const restIcon = svgIcon(isEdit ? ICON_PEN : ICON_COMMENT_SOLID);
+    restIcon.classList.add('annotate-pin-glyph', 'annotate-pin-glyph-rest');
+    const hoverIcon = svgIcon(isEdit ? ICON_PEN : ICON_COMMENT);
+    hoverIcon.classList.add('annotate-pin-glyph', 'annotate-pin-glyph-hover');
     const pin = el('div', {
       class: 'annotate-ui annotate-comment-pin annotate-comment-pin-' + entry.item.type,
       role: 'button',
       title: 'Saved ' + entry.item.type + ' — click to edit',
       'aria-label': 'Saved ' + entry.item.type + ' — click to edit',
-    }, [svgIcon(isEdit ? ICON_PEN : ICON_COMMENT)]);
+    }, [restIcon, hoverIcon]);
     setAnchorAttrs(pin, entry.item.anchor);
     // Swallow mousedown so a pin-click never collapses a selection / reaches the page.
     pin.addEventListener('mousedown', function (e) { e.preventDefault(); });
@@ -1212,8 +1227,9 @@
 
   // The viewport point where an entry's pin should sit (recomputed every reposition tick, so
   // it tracks scroll/reflow). spatial -> the normalized point over the image (box -> its
-  // top-left corner). text-anchored (a real selection) -> ON the selected WORDS, from the
-  // cloned Range's bounding-rect leading edge. other anchors -> the anchor element's rect start.
+  // top-left corner). text-anchored (a real selection) -> floats just ABOVE the selected WORDS
+  // (range leading edge, nudged up). block-level anchors (line / li / section / header /
+  // document / cell) -> OUTSIDE the block in the left gutter/margin (v2: NOT on the words).
   function anchorViewportPoint(entry) {
     const a = entry.item.anchor;
     if (a.kind === 'spatial') {
@@ -1223,13 +1239,15 @@
       const p = a.point || (a.box ? [a.box[0], a.box[1]] : [0, 0]);
       return { x: r.left + p[0] * r.width, y: r.top + p[1] * r.height };
     }
-    // Text-anchored (inline edit / text-selection comment): sit the pin ON the words, at the
-    // range's top-left (leading) edge — NOT the line's far-left gutter. The cloned range stays
-    // live as long as its nodes do; getBoundingClientRect re-reads current scroll position.
+    // Text-anchored (inline edit / text-selection comment): float the pin just ABOVE the selected
+    // words — the range's leading edge nudged up ~one pin height so it sits over the words, not on
+    // them (v2). DISPLAY-only nudge: the anchor resolution + composer highlight are untouched (the
+    // sub-line text-span anchor is a separate investigation). The cloned range stays live as long
+    // as its nodes do; getBoundingClientRect re-reads current scroll position.
     if (entry.targetRange) {
       try {
         const rr = entry.targetRange.getBoundingClientRect();
-        if (rr && (rr.width > 0 || rr.height > 0)) return { x: rr.left, y: rr.top };
+        if (rr && (rr.width > 0 || rr.height > 0)) return { x: rr.left, y: rr.top - 22 };
       } catch (e) { /* range invalidated by a DOM change -> fall back to the anchor element */ }
     }
     let elx = entry.anchorEl;
@@ -1238,10 +1256,11 @@
       entry.anchorEl = elx;
     }
     if (!elx) return null;
-    // Non-text anchor (line / list / section / document / cell): the element's rect START
-    // (its leading top-left corner) — a consistent default ON the anchored content.
+    // Block-level anchor (line / li / section / header / document / cell): pin sits OUTSIDE the
+    // block in the left gutter/margin — ~22px left of the block's leading edge, clamped to the
+    // viewport (v2 revert: NOT on/behind the words). Rides the content as it scrolls.
     const r = elx.getBoundingClientRect();
-    return { x: r.left, y: r.top };
+    return { x: Math.max(2, r.left - 22), y: r.top };
   }
 
   // Lay every pin out in viewport coords; hide a pin whose anchor scrolled under the top
