@@ -637,6 +637,20 @@ body.annotate-sidebar-open[data-sidebar-mode="overlay"] {
   line-height: 1.62;
   font-size: 15px;
   word-wrap: break-word;
+  /* §H.1: bound the markdown root + sections to their container and let them be NARROWER than
+     their intrinsic content (min-width:0). A wide table is width:max-content; without min-width:0
+     a block that is — or becomes, on a flex/grid host — an intrinsically-sized item floors at its
+     content's min-content and the table's width propagates UP the chain, widening the wrap so its
+     overflow-x:auto never engages (the §H bug). Capping every ancestor at 100% + min-width:0 traps
+     that intrinsic width inside the overflow-x:auto wrap, where it scrolls. */
+  max-width: 100%;
+  min-width: 0;
+}
+/* §H.1: the §C section wrappers sit between the markdown root and a table's .annotate-table-wrap,
+   so they carry the same container-bounded + shrinkable constraint (see .annotate-markdown). */
+.annotate-section {
+  max-width: 100%;
+  min-width: 0;
 }
 body[data-annotate-width="comfortable"] .annotate-markdown > :not(.annotate-section):not(.annotate-table-wrap),
 body[data-annotate-width="comfortable"] .annotate-markdown .annotate-section > :not(.annotate-section):not(.annotate-table-wrap) {
@@ -709,7 +723,12 @@ body[data-annotate-width="wide"] .annotate-markdown .annotate-section > :not(.an
    reading-column constraint above, so tables span the full content width. */
 .annotate-table-wrap {
   overflow-x: auto;
+  /* §H.1: the scroll container itself caps at its container width and may shrink below the
+     table's intrinsic (max-content) width — so the table scrolls INSIDE this box instead of
+     pushing the box wide. max-width:100% + min-width:0 are what make overflow-x:auto actually
+     engage rather than the box growing to fit the table. */
   max-width: 100%;
+  min-width: 0;
   margin: 0.9em 0;
 }
 .annotate-markdown table {

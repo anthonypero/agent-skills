@@ -1294,6 +1294,35 @@
     selLock = null;
   }
 
+  // §H.2: a selected level can be larger than a scroll-container it lives inside — most notably
+  // the whole-<table> stop, which (after §H.1) is content-width and scrolls horizontally INSIDE a
+  // capped .annotate-table-wrap. Drawing the selection box from the element's full
+  // getBoundingClientRect() would run the outline PAST the visible wrap (off the capped edge /
+  // off-screen). So intersect the element's viewport rect with every CLIPPING ancestor (overflow
+  // auto/scroll/hidden on that axis) up to — but not including — <body>, per axis. A level with no
+  // clipping ancestor that crops it (line / section / document, whose wrappers are overflow:visible)
+  // intersects to its own rect unchanged, so those boxes look exactly as before. This is a DRAWING
+  // clamp only — the element's real box (used to derive the table anchor) is untouched.
+  function clipRectToScrollAncestors(elx, r) {
+    let left = r.left, top = r.top, right = r.right, bottom = r.bottom;
+    let p = elx && elx.parentElement;
+    while (p && p !== doc.body && p !== doc.documentElement) {
+      let cs = null;
+      try { cs = root.getComputedStyle ? root.getComputedStyle(p) : null; } catch (e) { cs = null; }
+      if (cs) {
+        const clipX = /^(auto|scroll|hidden)$/.test(cs.overflowX);
+        const clipY = /^(auto|scroll|hidden)$/.test(cs.overflowY);
+        if (clipX || clipY) {
+          const pr = p.getBoundingClientRect();
+          if (clipX) { if (pr.left > left) left = pr.left; if (pr.right < right) right = pr.right; }
+          if (clipY) { if (pr.top > top) top = pr.top; if (pr.bottom < bottom) bottom = pr.bottom; }
+        }
+      }
+      p = p.parentElement;
+    }
+    return { left: left, top: top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+  }
+
   // Place the selection box over the current level's element (page coords, so it rides the
   // content on scroll) and keep the bubble parked at its locked page point. The element can
   // vanish on a reflow/advance — drop the lock if so.
@@ -1302,7 +1331,7 @@
     const level = selLock.levels[selLock.idx];
     const elx = level && level.el;
     if (!elx || !doc.contains(elx)) { clearLock(); return; }
-    const r = elx.getBoundingClientRect();
+    const r = clipRectToScrollAncestors(elx, elx.getBoundingClientRect());
     const sx = root.scrollX || 0;
     const sy = root.scrollY || 0;
     selLock.box.style.left = (r.left + sx) + 'px';
