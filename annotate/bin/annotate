@@ -190,6 +190,12 @@ open_browser() {
   # verify it even when the actual launch is stubbed.
   # Launch-window presentation flags (CfT 150 — verified against current Chromium source, v2.1 §E):
   #   --kiosk            true edge-to-edge fullscreen; hides the tab strip + omnibox (no URL bar).
+  #   --start-fullscreen reinforces an initial-fullscreen window state (dogfood-6 §D). On a REUSED
+  #                      profile, CfT restores the prior WINDOWED bounds and came up windowed despite
+  #                      --kiosk (3x dogfood). Pairing --start-fullscreen with --kiosk (plus the
+  #                      pre-launch profile window-state scrub below) makes the fullscreen state win
+  #                      on first paint; the two flags compose (kiosk still owns the locked, chrome-
+  #                      hidden behavior). Added on the headful/kiosk path ONLY.
   #   --test-type        suppresses the "unsupported command-line flag" bad-flags WARNING infobars
   #                      (e.g. the --load-extension / --disable-extensions-except warning).
   #   --disable-infobars removes the gray "Chrome for Testing … is only for automated testing.
@@ -203,7 +209,7 @@ open_browser() {
   #                      out), so InfoBarManager::ShouldShowInfoBar drops the buttonless banner
   #                      (crbug.com/333945848). Needs a CfT/Chromium binary (runtime browser.kind
   #                      'cft'/'chromium'); a non-honoring binary just ignores it (covered by --test-type).
-  real_cmd="\"$CFG_BROWSER_PATH\" --user-data-dir=\"$CFG_PROFILE\" --load-extension=\"$CFG_EXT\" --disable-extensions-except=\"$CFG_EXT\" --no-first-run --no-default-browser-check --kiosk --test-type --disable-infobars \"$url\""
+  real_cmd="\"$CFG_BROWSER_PATH\" --user-data-dir=\"$CFG_PROFILE\" --load-extension=\"$CFG_EXT\" --disable-extensions-except=\"$CFG_EXT\" --no-first-run --no-default-browser-check --kiosk --start-fullscreen --test-type --disable-infobars \"$url\""
   echo "annotate: browser invocation: $real_cmd" >&2
 
   if [ "$NO_OPEN" -eq 1 ]; then
@@ -220,9 +226,17 @@ open_browser() {
     echo "annotate: no usable browser in runtime.json; open $url manually" >&2
     return 0
   fi
+  # dogfood-6 §D — a REUSED profile ("$CFG_PROFILE", default ~/.annotate/chrome-profile) restores
+  # its prior WINDOWED bounds + crash-restore state, which override --kiosk so CfT opens windowed
+  # (3x dogfood). Scrub the profile's saved window placement + force a clean exit BEFORE launch so
+  # --kiosk/--start-fullscreen win. JSON editing is delegated to the Node helper (§3); best-effort,
+  # so a failure (fresh/locked profile) never blocks the launch. Reached ONLY here on the REAL
+  # headful launch — the --no-open and ANNOTATE_OPEN_CMD seams returned above — so the headless
+  # gates (which pass --no-open and launch CfT themselves) and the load probe are unaffected.
+  "$NODE" "$LAUNCH_JS" kioskreset --profile "$CFG_PROFILE" >/dev/null 2>&1 || true
   "$CFG_BROWSER_PATH" --user-data-dir="$CFG_PROFILE" --load-extension="$CFG_EXT" \
     --disable-extensions-except="$CFG_EXT" --no-first-run --no-default-browser-check \
-    --kiosk --test-type --disable-infobars "$url" \
+    --kiosk --start-fullscreen --test-type --disable-infobars "$url" \
     >/dev/null 2>&1 &
   echo "annotate: opened browser (pid $!)" >&2
 }

@@ -24,6 +24,9 @@
 //   wait     --data-dir <d> --session <s> --artifact <a> [--guid <g>] --timeout <secs> [--interval <secs>]
 //       -> blocks until the (head | --guid) round leaves `pending`, prints {source,snapshot,feedback},
 //          exit 0; on timeout exit 124 (the shell maps that to the §6.1 nudge + non-zero exit).
+//   kioskreset --profile <dir>
+//       -> scrubs a REUSED Chrome/CfT profile's saved window state so it can't override --kiosk
+//          (dogfood-6 §D — kiosk comes up windowed on a reused profile). Always exits 0; best-effort.
 
 const http = require('node:http');
 const path = require('node:path');
@@ -131,6 +134,53 @@ function cmdServerup(args) {
   req.on('error', () => process.exit(4)); // ECONNREFUSED / unreachable -> down, start one
 }
 
+// --- kioskreset: neutralize a reused profile's saved window state (dogfood-6 §D) ---
+// A reused --user-data-dir (default ~/.annotate/chrome-profile) persists the last window's
+// bounds + crash-restore state. On relaunch CfT restores those WINDOWED bounds, which override
+// --kiosk/--start-fullscreen, so the review opens windowed (the recurring 3x dogfood failure).
+// Scrub the per-profile saved placement + force a clean exit BEFORE launch so the fullscreen
+// flags win. Touched keys are NOT in Chromium's protected-pref MAC set (window_placement /
+// exit_type / exited_cleanly), so editing them does not trip the pref-tampering reset. Every
+// step is best-effort — a missing (fresh profile), locked, or corrupt file must never block the
+// launch — and the command ALWAYS exits 0 so the shell's `|| true` is belt-and-suspenders only.
+function cmdKioskReset(args) {
+  const profile = args.profile && args.profile !== true ? args.profile : null;
+  if (!profile) return; // nothing to scrub
+  // <user-data-dir>/Default/Preferences — per-profile saved window bounds + crash-restore state.
+  const prefsPath = path.join(profile, 'Default', 'Preferences');
+  if (P.exists(prefsPath)) {
+    try {
+      const prefs = P.readJSON(prefsPath);
+      let dirty = false;
+      if (prefs.browser && typeof prefs.browser === 'object' && 'window_placement' in prefs.browser) {
+        delete prefs.browser.window_placement; // saved windowed bounds — the prime override
+        dirty = true;
+      }
+      if (prefs.profile && typeof prefs.profile === 'object') {
+        // A non-clean exit_type triggers the "restore?" path / a windowed restored session.
+        if (prefs.profile.exit_type !== 'Normal') { prefs.profile.exit_type = 'Normal'; dirty = true; }
+        if (prefs.profile.exited_cleanly !== true) { prefs.profile.exited_cleanly = true; dirty = true; }
+      }
+      if (dirty) P.atomicWriteJSON(prefsPath, prefs);
+    } catch {
+      /* unreadable/locked/corrupt prefs -> skip; never block the launch */
+    }
+  }
+  // <user-data-dir>/Local State — app-window placement cache (cleared for completeness).
+  const localStatePath = path.join(profile, 'Local State');
+  if (P.exists(localStatePath)) {
+    try {
+      const ls = P.readJSON(localStatePath);
+      if (ls.browser && typeof ls.browser === 'object' && 'app_window_placement' in ls.browser) {
+        delete ls.browser.app_window_placement;
+        P.atomicWriteJSON(localStatePath, ls);
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
 // --- wait: block until a submit lands, then print {source,snapshot,feedback} --
 async function cmdWait(args) {
   const dataDir = args['data-dir'];
@@ -196,6 +246,8 @@ function main() {
       return cmdServerup(args);
     case 'wait':
       return cmdWait(args);
+    case 'kioskreset':
+      return cmdKioskReset(args);
     default:
       fail(`unknown subcommand: ${sub == null ? '(none)' : sub}`);
   }
