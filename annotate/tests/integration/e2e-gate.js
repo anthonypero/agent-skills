@@ -106,20 +106,22 @@ function addCommentExpr(text) {
   })()`;
 }
 
-// §A icon-only: HOVER a block to reveal the comment icon, then click ONLY the icon (the v1
-// click-the-line path is gone). Prefer a <p> (markdown plain block) so we avoid the §C
-// heading text-vs-section split; code views have no <p>, so fall back to the first stamped line.
+// §K click-to-select-innermost: CLICK a block -> the lock bubble parks at the click; clicking
+// its comment button opens the composer on the innermost stop (the v1 hover->floating-icon path
+// is gone). Prefer a <p> (markdown plain block) so we avoid the §C heading text-vs-section split;
+// code views have no <p>, so fall back to the first stamped line (innermost stop == its line).
 const clickLineExpr = `(() => {
   const block = document.querySelector('.annotate-render p[data-src-line]') ||
                 document.querySelector('.annotate-render [data-src-line]');
   if (!block) return { err: 'no data-src-line node' };
   const srcLine = parseInt(block.getAttribute('data-src-line'), 10);
   const r = block.getBoundingClientRect();
-  block.dispatchEvent(new MouseEvent('mousemove', { clientX: r.left + 5, clientY: r.top + 5, button: 0, bubbles: true, cancelable: true, view: window }));
-  const icon = document.querySelector('.annotate-comment-affordance');
-  if (icon) icon.click();
+  block.dispatchEvent(new MouseEvent('click', { clientX: r.left + 5, clientY: r.top + 5, button: 0, bubbles: true, cancelable: true, view: window }));
+  const bubble = document.querySelector('.annotate-lock-bubble');
+  const commentBtn = document.querySelector('.annotate-lock-comment');
+  if (commentBtn) commentBtn.click();
   const c = document.querySelector('.annotate-composer');
-  return { srcLine, iconShown: !!icon, kind: c && c.getAttribute('data-anchor-kind'), line: c && c.getAttribute('data-anchor-line') };
+  return { srcLine, lockShown: !!bubble, kind: c && c.getAttribute('data-anchor-kind'), line: c && c.getAttribute('data-anchor-line') };
 })()`;
 
 function gestureExpr(fx0, fy0, fx1, fy1) {

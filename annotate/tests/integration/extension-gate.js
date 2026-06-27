@@ -95,32 +95,34 @@ async function main() {
     ok('config injected (session/artifact/head/token)', env.cfg && env.cfg.session === round.session && env.cfg.artifact === round.artifact && env.cfg.head === round.guid && !!env.cfg.token, JSON.stringify({ ...env.cfg, token: env.cfg && env.cfg.token ? '<' + env.cfg.token.length + ' chars>' : null }));
     ok('Annotate chrome present (accept + send controls)', env.hasChrome && env.hasAccept && env.hasSend);
 
-    // GATE 3 — §A icon-only: HOVER a rendered block to reveal the comment icon, then click
-    // ONLY the icon -> the composer opens with the correct §5.2 anchor. (Clicking the line
-    // itself no longer starts a comment — the v1 click-anywhere path was removed.) Target a
-    // <p> so we exercise the plain block/line path (not the §C heading text-vs-section split).
+    // GATE 3 — §K click-to-select-innermost: CLICK a rendered block -> the lock bubble parks
+    // at the click with up/down traversal + a comment button; clicking the bubble's comment
+    // button opens the composer with the correct §5.2 anchor. (The v1 hover->floating-icon
+    // affordance was removed in §K — moving toward it was unreachable.) Target a <p> so we
+    // exercise the plain block/line path (innermost stop == its own line).
     const clicked = await cdp.evaluate(`(() => {
       const block = document.querySelector('.annotate-render p[data-src-line]') ||
                     document.querySelector('.annotate-render [data-src-line]');
       if (!block) return { err: 'no data-src-line node' };
       const srcLine = parseInt(block.getAttribute('data-src-line'), 10);
       const r = block.getBoundingClientRect();
-      block.dispatchEvent(new MouseEvent('mousemove', { clientX: r.left + 5, clientY: r.top + 5, button: 0, bubbles: true, cancelable: true, view: window }));
-      const icon = document.querySelector('.annotate-comment-affordance');
-      if (icon) icon.click(); // the ONLY click that starts a comment
+      block.dispatchEvent(new MouseEvent('click', { clientX: r.left + 5, clientY: r.top + 5, button: 0, bubbles: true, cancelable: true, view: window }));
+      const bubble = document.querySelector('.annotate-lock-bubble');
+      const commentBtn = document.querySelector('.annotate-lock-comment');
+      if (commentBtn) commentBtn.click(); // the lock bubble's comment button opens the composer
       const c = document.querySelector('.annotate-composer');
       return {
         srcLine,
-        iconShown: !!icon,
+        lockShown: !!bubble,
         composerOpened: !!c,
         anchorKind: c && c.getAttribute('data-anchor-kind'),
         anchorLine: c && c.getAttribute('data-anchor-line'),
       };
     })()`);
     ok(
-      'hover a line + click the comment icon -> source/line anchor (matches data-src-line)',
-      clicked.iconShown && clicked.composerOpened && clicked.anchorKind === 'source' && Number(clicked.anchorLine) === clicked.srcLine,
-      `line ${clicked.srcLine} -> icon=${clicked.iconShown}; anchor {kind:${clicked.anchorKind}, line:${clicked.anchorLine}}`
+      'click a line -> lock bubble -> comment -> source/line anchor (matches data-src-line)',
+      clicked.lockShown && clicked.composerOpened && clicked.anchorKind === 'source' && Number(clicked.anchorLine) === clicked.srcLine,
+      `line ${clicked.srcLine} -> lock=${clicked.lockShown}; anchor {kind:${clicked.anchorKind}, line:${clicked.anchorLine}}`
     );
 
     // compose a comment + Add (real DOM), then Send (real button)

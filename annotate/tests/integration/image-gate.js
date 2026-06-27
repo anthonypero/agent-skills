@@ -240,17 +240,19 @@ async function main() {
     ok('code view: screenshot gated OFF (data-screenshot-active=0 on a source view)',
       codeView.isCode && codeView.shotActive === '0', `isCode=${codeView.isCode}; shotActive=${codeView.shotActive}`);
 
-    // §A icon-only: hover the code line to reveal the comment icon, then click ONLY the icon
-    // (a code line is a plain block — no §C heading split). The v1 click-the-line path is gone.
+    // §K click-to-select-innermost: CLICK the code line -> the lock bubble parks at the click;
+    // clicking its comment button opens the composer on the line (a code line is a plain block —
+    // its innermost stop is its own line). The v1 hover->floating-icon path is gone.
     const codeClick = await cdp.evaluate(`(() => {
       const line = document.querySelector('.annotate-render [data-src-line]');
       if (!line) return { err: 'no line' };
       const r = line.getBoundingClientRect();
-      line.dispatchEvent(new MouseEvent('mousemove', { clientX: r.left + 5, clientY: r.top + 5, button: 0, bubbles: true, cancelable: true, view: window }));
-      const icon = document.querySelector('.annotate-comment-affordance');
-      if (icon) icon.click();
+      line.dispatchEvent(new MouseEvent('click', { clientX: r.left + 5, clientY: r.top + 5, button: 0, bubbles: true, cancelable: true, view: window }));
+      const bubble = document.querySelector('.annotate-lock-bubble');
+      const commentBtn = document.querySelector('.annotate-lock-comment');
+      if (commentBtn) commentBtn.click();
       const c = document.querySelector('.annotate-composer');
-      return { iconShown: !!icon, kind: c && c.getAttribute('data-anchor-kind'), line: c && c.getAttribute('data-anchor-line') };
+      return { lockShown: !!bubble, kind: c && c.getAttribute('data-anchor-kind'), line: c && c.getAttribute('data-anchor-line') };
     })()`);
     await cdp.evaluate(addCommentExpr('code: this line'));
     await cdp.evaluate(`document.querySelector('.annotate-send').click()`);

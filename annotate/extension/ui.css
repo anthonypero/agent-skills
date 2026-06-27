@@ -239,20 +239,103 @@ body.annotate-themed {
   height: 16px;
 }
 
-/* ---- §A/§C hover outline: the anchorable region under the pointer. Solid = a block, or
-   header-only (just the <h_>); the region itself is NOT clickable (no click-to-comment) —
-   only the icon is, so no pointer cursor here. ---- */
-.annotate-hover-region {
+/* ---- §K click-to-select + DOM-traversal (replaces the old hover→floating-icon affordance,
+   which was unreachable — moving toward the icon dropped or re-targeted the hover). A click
+   locks the innermost stop; the LIVE SELECTION BOX outlines the current traversal level and
+   the LOCK BUBBLE (parked at the click, so nothing has to be reached for) carries up/down
+   arrows + a comment button. ---- */
+
+/* The selection box outlines the CURRENT level. It is non-interactive so clicks pass through
+   to the content beneath (re-selecting elsewhere, or dismissing the lock). Page-positioned by
+   content.js so it rides the content on scroll. */
+.annotate-sel-box {
+  position: absolute;
+  z-index: 2147483595; /* above pins, below the bubble + composer */
+  pointer-events: none;
   outline: 2px solid var(--annotate-accent);
-  outline-offset: 3px;
+  outline-offset: 2px;
   background: var(--annotate-hover);
   border-radius: 4px;
 }
-/* §C whole-section hover (pointer over the heading line's empty area): a dashed box around
-   the SINGLE <section> distinguishes "whole section" from the solid header-only outline. */
-.annotate-hover-region.annotate-hover-section {
-  outline-style: dashed;
-  outline-offset: 4px;
+
+/* The lock bubble stays at the click (movement-independent — reachability solved by
+   construction). Up = broaden to the parent stop, down = narrow toward the click; the
+   speech-bubble opens the composer on the current level. */
+.annotate-lock-bubble {
+  position: absolute;
+  z-index: 2147483601; /* same band as the selection affordance, below the composer */
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  background: var(--annotate-card);
+  color: var(--annotate-fg);
+  border: 1px solid var(--annotate-line);
+  border-radius: 999px;
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.32);
+}
+.annotate-lock-bubble:focus {
+  outline: none;
+  border-color: var(--annotate-accent);
+}
+.annotate-lock-arrow {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--annotate-accent);
+  cursor: pointer;
+}
+.annotate-lock-arrow:hover {
+  background: var(--annotate-hover);
+}
+.annotate-lock-arrow .annotate-icon {
+  width: 12px;
+  height: 12px;
+}
+/* a traversal end (innermost / document) — the arrow that can't move is dimmed + inert */
+.annotate-lock-disabled,
+.annotate-lock-arrow:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.annotate-lock-disabled:hover,
+.annotate-lock-arrow:disabled:hover {
+  background: transparent;
+}
+.annotate-lock-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--annotate-accent);
+  padding: 0 4px;
+  white-space: nowrap;
+}
+.annotate-lock-comment {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--annotate-accent);
+  color: var(--annotate-accent-fg);
+  cursor: pointer;
+}
+.annotate-lock-comment:hover {
+  background: var(--annotate-accent-active);
+}
+.annotate-lock-comment .annotate-icon {
+  width: 14px;
+  height: 14px;
 }
 
 /* ---- composer ---- */

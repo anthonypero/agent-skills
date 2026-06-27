@@ -8,15 +8,19 @@
 //                config (Annotate.config), fire the one-time /loaded heartbeat (§6.6 / S0),
 //                inject the REQUIRED top "Annotate chrome" bar (accept + send + format badge +
 //                Copy + expand + reserved version slot), and start the 1s head auto-advance poll.
-//   hover     -> outline the anchorable block (a single <section> / its <h_> on a heading,
-//                §C) and float the ONE comment icon (§A) at its edge. Transient: moving off
-//                the block hides it. Clicking BODY TEXT does nothing — only the icon starts a
-//                comment (the v1 click-anywhere region handler is gone; native selection +
-//                the browser context menu are left untouched).
-//   select    -> the same comment icon appears next to the selection; transient (the icon
+//   click     -> §K click-to-select-innermost + DOM-traversal: a plain click LOCKS the
+//                innermost semantic stop under the pointer and parks a comment bubble AT the
+//                click (nothing to hover-chase — this replaces the old, unreachable
+//                hover→floating-icon block affordance). A live selection box outlines the
+//                current level; the bubble's up/down arrows (or ArrowUp/ArrowDown) traverse
+//                the DOM stop chain (line/block -> list -> section -> document; cell -> row ->
+//                table -> section -> document), re-deriving the §5.2 anchor at each level.
+//                Native selection + the browser context menu are left untouched.
+//   select    -> a comment icon appears next to a text selection; transient (the icon
 //                disappears if the selection collapses before the icon is clicked).
-//   icon click-> open the comment/edit composer AT THE ICON (openComposerAt — a reusable
-//                open-at-an-arbitrary-screen-point path) on the hovered/selected §5.2 anchor.
+//   comment   -> open the comment/edit composer (openComposerAt — a reusable
+//                open-at-an-arbitrary-screen-point path) on the locked level's / selection's
+//                §5.2 anchor.
 //   add       -> a saved draft becomes a SEMI-TRANSPARENT comment-bubble PIN at its anchor
 //                (§B; rides with the content as it scrolls) PLUS a row in the toggleable
 //                comment SIDEBAR. The old right-margin rail is gone. Pin-click edits in place
@@ -67,9 +71,11 @@
   let deferredHead = null; // a new head awaiting in-progress work to clear (preserve-unsent)
   let screenshotToggle = true; // gated screenshot on/off (chrome.storage.local, default on)
   let widthPreset = 'comfortable'; // #3 reading-width preset (chrome.storage.local)
-  let hoverEl = null; // §A the block currently hover-highlighted
-  let hoverEls = null; // §A the element(s) currently outlined (the block, or a single <section>)
-  let hoverMode = null; // §C 'block' | 'header' | 'section' — drives the anchor + outline target
+  // §K: the active click-to-select lock — { levels, idx, box, bubble, label, ... } or null.
+  // A click locks the innermost semantic stop under the pointer; the bubble's up/down arrows
+  // traverse `levels` and the `box` overlay outlines the current one. This replaces the old
+  // (unreachable) hover→floating-icon block affordance + its hoverEl/hoverEls/hoverMode state.
+  let selLock = null;
   let viewKind = null; // cached detectView().kind (the view can't change without a reload)
   // §B: every saved comment becomes an entry { item, pin, listItem, anchorEl }. The pins ride
   // the canvas; the listItems fill the sidebar; both share one bidirectional-sync registry.
@@ -113,6 +119,14 @@
     '<path fill="currentColor" d="M240 96L256 96L256 128L128 128L128 256L96 256L96 96L240 96zM96 400L96 384L128 384L128 512L256 512L256 544L96 544L96 400zM528 96L544 96L544 256L512 256L512 128L384 128L384 96L528 96zM512 400L512 384L544 384L544 544L384 544L384 512L512 512L512 400z"/></svg>';
   // current-preset -> icon (the button shows the icon for the state it is IN).
   const WIDTH_ICONS = { comfortable: ICON_COMPRESS, wide: ICON_EXPAND, full: ICON_WIDTH };
+  // §K traversal arrows on the lock bubble (chevron up/down, Sharp Light): up = broaden to the
+  // parent stop, down = narrow back toward the clicked innermost.
+  const ICON_CARET_UP =
+    '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
+    '<path fill="currentColor" d="M320 246.6L308.7 257.9L116.7 449.9L139.3 472.6L320 292L500.7 472.6L523.3 449.9L331.3 257.9L320 246.6z"/></svg>';
+  const ICON_CARET_DOWN =
+    '<svg class="annotate-icon" viewBox="0 0 640 640" aria-hidden="true" focusable="false">' +
+    '<path fill="currentColor" d="M320 393.4L331.3 382.1L523.3 190.1L500.7 167.4L320 348L139.3 167.4L116.7 190.1L308.7 382.1L320 393.4z"/></svg>';
 
   // ---------------------------------------------------------------------------
   // small DOM helpers
@@ -195,14 +209,17 @@
   }
 
   // ---------------------------------------------------------------------------
-  // anchoring granularity (#2): selection -> paragraph -> SECTION -> document
+  // §K anchoring granularity — click-to-select-innermost + DOM-traversal stop chain.
+  // A click locks the innermost SEMANTIC stop under the pointer; the lock bubble's up/down
+  // arrows broaden/narrow along the stop chain, re-deriving a line-range anchor at each:
+  //   prose:  line/block ([data-src-line]) -> list (<ul>/<ol>) -> section
+  //           (<section class="annotate-section" data-src-line-range>) -> document
+  //   table:  cell ([data-cell]) -> row (<tr>) -> table (<table>) -> section -> document
+  // Intermediate multi-line stops the renderer doesn't stamp a range on (<ul>, <tr>, <table>)
+  // derive it at traversal time as min..max of their descendant [data-src-line] (falling back
+  // to the nearest enclosing section). DECIDED: rendered-doc DOM only — live-frontend
+  // (data-as-frontend / keypath) traversal is deferred, so the lock is gated off there.
   // ---------------------------------------------------------------------------
-
-  function headingLevel(elm) {
-    if (!elm || !elm.tagName) return 0;
-    const m = /^H([1-6])$/.exec(elm.tagName);
-    return m ? parseInt(m[1], 10) : 0;
-  }
 
   // Largest stamped source line in the rendered view — the document's last line for the
   // trailing-section / whole-document range (the renderer stamps a block's FIRST line, so
@@ -217,23 +234,8 @@
     return max;
   }
 
-  // Every top-level block belonging to a heading's section: the heading itself through the
-  // block before the next same-or-higher heading (a deeper heading stays IN the section).
-  function sectionElements(h) {
-    const L = headingLevel(h);
-    const els = [h];
-    let n = h.nextElementSibling;
-    while (n) {
-      const lv = headingLevel(n);
-      if (lv && lv <= L) break;
-      els.push(n);
-      n = n.nextElementSibling;
-    }
-    return els;
-  }
-
   // §C: the section anchor derives DIRECTLY from the render.js wrapper's data-src-line-range
-  // ("N-M") rather than re-walking siblings. null if the heading isn't section-wrapped.
+  // ("N-M"). null if the element isn't a section-wrapped <section>.
   function sectionAnchorFromWrapper(section) {
     if (!section) return null;
     const m = /^(\d+)-(\d+)$/.exec(section.getAttribute('data-src-line-range') || '');
@@ -241,45 +243,116 @@
     return { kind: 'source', lineRange: [parseInt(m[1], 10), parseInt(m[2], 10)] };
   }
 
-  // §C hit-test: is the pointer over the heading's actual TEXT RUN (its glyph rects) vs the
-  // empty horizontal area of the (full-width) heading line? Over the text -> header-only;
-  // over the empty area -> the whole section. Uses the rendered text rects, so it is correct
-  // for any font/zoom and tolerates a heading that wraps to multiple lines.
-  function pointerOverTextRun(h, x, y) {
-    try {
-      const range = doc.createRange();
-      range.selectNodeContents(h);
-      const rects = range.getClientRects();
-      for (let i = 0; i < rects.length; i++) {
-        const r = rects[i];
-        if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return true;
-      }
-    } catch (e) {
-      /* fall through to "not over text" */
-    }
-    return false;
+  // ---- §K stop chain --------------------------------------------------------
+
+  // Grouping rows that exist only to bracket a table's head/body — they carry a data-src-line
+  // but aren't a level a human means to comment on, so the chain skips straight from a <tr> to
+  // its <table> (matching the spec's cell -> row -> table, not ...-> tbody -> table).
+  const SKIP_STOP_TAGS = { THEAD: 1, TBODY: 1, TFOOT: 1, COLGROUP: 1 };
+
+  // Is `node` a SEMANTIC traversal stop (a level the up/down arrows pause on)?
+  function isTraversalStop(node) {
+    if (!node || node.nodeType !== 1 || typeof node.matches !== 'function') return false;
+    if (SKIP_STOP_TAGS[node.tagName]) return false;
+    if (node.matches('section.annotate-section')) return true; // section
+    if (node.hasAttribute('data-cell')) return true; // CSV / table cell
+    if (node.hasAttribute('data-key-path')) return true; // rendered struct (JSON/YAML/TOML) node — leaf or container
+    if (node.hasAttribute('data-src-line')) return true; // md line / block / li / ul / tr / table
+    const tag = node.tagName;
+    return tag === 'UL' || tag === 'OL' || tag === 'TR' || tag === 'TABLE'; // list / row / table w/o a stamped line
   }
 
-  // A heading -> its whole section as an inclusive 1-based [start, end] line range (#2):
-  // heading line through the line BEFORE the next same-or-higher heading (or doc end).
-  // Sibling-walk FALLBACK for when the render.js <section> wrapper is absent.
-  function sectionRange(h) {
-    const start = parseInt(h.getAttribute('data-src-line'), 10) || 1;
-    const L = headingLevel(h);
-    let n = h.nextElementSibling;
-    let nextLine = null;
-    while (n) {
-      const lv = headingLevel(n);
-      if (lv && lv <= L) {
-        const v = parseInt(n.getAttribute('data-src-line'), 10);
-        if (Number.isFinite(v)) nextLine = v;
-        break;
+  // Inclusive [min,max] of `node`'s OWN + descendant data-src-line values, or null if none are
+  // present. This is the traversal-time range derivation for the intermediate stops the
+  // renderer doesn't stamp a range on (<ul>, <tr>, <table> => the whole list / row / table).
+  function lineRangeFor(node) {
+    let min = Infinity;
+    let max = -Infinity;
+    const consider = function (raw) {
+      const v = parseInt(raw, 10);
+      if (Number.isFinite(v)) {
+        if (v < min) min = v;
+        if (v > max) max = v;
       }
-      n = n.nextElementSibling;
+    };
+    if (node.hasAttribute && node.hasAttribute('data-src-line')) consider(node.getAttribute('data-src-line'));
+    if (typeof node.querySelectorAll === 'function') {
+      node.querySelectorAll('[data-src-line]').forEach(function (d) { consider(d.getAttribute('data-src-line')); });
     }
-    let end = nextLine != null ? nextLine - 1 : maxSourceLine();
-    if (!Number.isFinite(end) || end < start) end = start;
-    return [start, end];
+    if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
+    return [min, max];
+  }
+
+  // Re-derive the §5.2 anchor for one traversal stop. Sections read their stamped range; CSV
+  // cells their address; everything else a line-range from descendant lines (collapsing to a
+  // single {line} when start === end, so a leaf block stays a line anchor). Falls back to the
+  // nearest enclosing section when an element carries no derivable line; null if even that fails.
+  function anchorForLevel(node) {
+    if (typeof node.matches === 'function' && node.matches('section.annotate-section')) {
+      return sectionAnchorFromWrapper(node);
+    }
+    if (node.hasAttribute && node.hasAttribute('data-cell')) {
+      return { kind: 'source', cell: node.getAttribute('data-cell') };
+    }
+    // Rendered struct (JSON/YAML/TOML): nested data-key-path containers + leaves climb
+    // leaf -> object/array -> root ("") — the keyPath model has no line range. (Checked before
+    // the line-range path; only the LIVE --as-frontend keypath view is deferred, gated in onDocClick.)
+    if (node.hasAttribute && node.hasAttribute('data-key-path')) {
+      return { kind: 'source', keyPath: node.getAttribute('data-key-path') };
+    }
+    const range = lineRangeFor(node);
+    if (range) {
+      return range[0] === range[1]
+        ? { kind: 'source', line: range[0] }
+        : { kind: 'source', lineRange: range };
+    }
+    const section = typeof node.closest === 'function' ? node.closest('section.annotate-section') : null;
+    if (section) return sectionAnchorFromWrapper(section);
+    return null;
+  }
+
+  // A stable key for an anchor, so consecutive stops that resolve to the SAME anchor (e.g. a
+  // single-item <ul> and its lone <li>, both [10,10]) collapse to one level on the chain.
+  function anchorKey(a) {
+    if (!a) return '';
+    if (a.lineRange) return 'r' + a.lineRange[0] + '-' + a.lineRange[1];
+    if (a.line != null) return 'l' + a.line;
+    if (a.cell != null) return 'c' + a.cell;
+    if (a.keyPath != null) return 'k' + a.keyPath;
+    return a.kind || '';
+  }
+
+  // Build the ordered traversal chain for a clicked target: innermost stop first, each broader
+  // stop next, the whole document last. Each level = { el, anchor }. Stops with no derivable
+  // anchor (e.g. a CSV <tr>/<table> with no source line and no section) — and stops whose
+  // anchor duplicates the one just below — are dropped, so the arrows never land on a dead or
+  // no-op level. Empty when the click isn't inside an anchorable rendered region.
+  function traversalLevels(target) {
+    const render = doc.querySelector('.annotate-render');
+    if (!render) return [];
+    const levels = [];
+    let lastKey = null;
+    let node = target && target.nodeType === 1 ? target : (target ? target.parentElement : null);
+    while (node && node !== doc.body && node !== doc.documentElement) {
+      if (render.contains(node) && isTraversalStop(node)) {
+        const anchor = anchorForLevel(node);
+        const key = anchorKey(anchor);
+        if (anchor && key !== lastKey) {
+          levels.push({ el: node, anchor: anchor });
+          lastKey = key;
+        }
+      }
+      if (node === render) break;
+      node = node.parentElement;
+    }
+    // Whole-document stop — the same anchor as the §F "Comment on doc" action. Skipped for views
+    // with no source lines (e.g. CSV), where [1, 0] would be a meaningless range, and folded
+    // away when it duplicates a section that already spans the whole document.
+    const last = maxSourceLine();
+    if (last > 0 && anchorKey({ lineRange: [1, last] }) !== lastKey) {
+      levels.push({ el: render, anchor: { kind: 'source', lineRange: [1, last] }, whole: true });
+    }
+    return levels;
   }
 
   // ---------------------------------------------------------------------------
@@ -359,7 +432,7 @@
 
     // #9: status line is now a fixed bottom FOOTER (a body child, not under the top chrome).
     doc.body.appendChild(
-      el('div', { class: 'annotate-ui annotate-status', text: 'Ready — click a line, hover a block, or select text to annotate' })
+      el('div', { class: 'annotate-ui annotate-status', text: 'Ready — click to select a block (↑/↓ to broaden/narrow), or select text to annotate' })
     );
 
     // §B: the comment SIDEBAR (supersedes the old right-margin rail + the accordion idea).
@@ -482,7 +555,7 @@
       return;
     }
     const last = maxSourceLine() || 1;
-    clearHover();
+    clearLock();
     openComposer({ anchor: { kind: 'source', lineRange: [1, last] }, element: null, selectedText: '' });
   }
 
@@ -573,7 +646,7 @@
   // Open the comment/edit composer for an anchor. `selectedText` seeds the edit box.
   function openComposer(opts) {
     closeComposer();
-    clearHover(); // a composer supersedes the transient hover affordance (§A)
+    clearLock(); // a composer supersedes the transient §K click-to-select lock
     removeSelectionIcon(); // ...and the transient selection affordance
     const anchor = opts.anchor;
     const bubble = A.bubble.createBubble(anchor, { selectedText: opts.selectedText || '' });
@@ -959,7 +1032,7 @@
       ]),
       el('div', {
         class: 'annotate-sidebar-empty',
-        text: 'No comments yet — hover a block or select text, then click the comment icon.',
+        text: 'No comments yet — click a block to select it (↑/↓ to change scope), or select text, then comment.',
       }),
       el('div', { id: 'annotate-sidebar-list', class: 'annotate-sidebar-list' }, []),
     ]);
@@ -1131,9 +1204,9 @@
   }
 
   // ---------------------------------------------------------------------------
-  // §A interactions — the comment icon is the ONLY thing that starts a comment.
-  // Clicking body text does nothing; native selection + the browser context menu are
-  // never hijacked (no document click handler, no preventDefault on the page).
+  // §A text-selection affordance — the floating comment icon next to a SELECTION (block-level
+  // commenting moved to the §K click-to-select lock below). The browser context menu + native
+  // selection are never hijacked; onDocClick only acts on a plain (non-selecting) click.
   // ---------------------------------------------------------------------------
 
   // Build a floating comment-icon affordance (the speech bubble, ICON_COMMENT). `onOpen`
@@ -1204,105 +1277,167 @@
   }
 
   // ---------------------------------------------------------------------------
-  // §A #2 / §C block-hover affordance — outline the anchorable region and float the
-  // comment icon at its edge. On a markdown HEADING the §C gesture splits the line:
-  // pointer over the heading's TEXT RUN -> header-only ({line:N}, outline just the <h_>);
-  // pointer over the heading line's EMPTY area -> the whole section ({lineRange:[N,M]} from
-  // the render.js <section data-src-line-range>, outline the SINGLE <section>). Transient:
-  // moving off the block hides it. Driven by mousemove so the text-vs-empty split updates as
-  // the pointer slides along the same heading.
+  // §K click-to-select-innermost + DOM-traversal lock (replaces the old, unreachable
+  // hover→floating-icon block affordance). A click LOCKS the innermost stop under the
+  // pointer and parks a comment bubble right AT the click (nothing to hover-chase): a live
+  // selection box outlines the current level, and the bubble's up/down arrows (or ArrowUp/
+  // ArrowDown while it has focus) broaden/narrow along the DOM stop chain — up = parent,
+  // down = back toward the clicked innermost. The bubble's speech-bubble opens the composer
+  // on the CURRENT level's re-derived anchor. NOTE (§J): plain Enter is claimed by the
+  // composer textareas, so traverse is arrows + buttons only — never Enter.
   // ---------------------------------------------------------------------------
 
-  function clearHover() {
-    if (hoverEls) {
-      hoverEls.forEach(function (e) {
-        if (e && e.classList) e.classList.remove('annotate-hover-region', 'annotate-hover-section');
-      });
-    }
-    hoverEls = null;
-    hoverEl = null;
-    hoverMode = null;
-    const b = doc.querySelector('.annotate-hover-add');
-    if (b) b.remove();
+  function clearLock() {
+    if (!selLock) return;
+    if (selLock.box && selLock.box.parentNode) selLock.box.remove();
+    if (selLock.bubble && selLock.bubble.parentNode) selLock.bubble.remove();
+    selLock = null;
   }
 
-  // Resolve the hover target under the pointer to { mode, els, anchor }, or null if there is
-  // nothing anchorable there. `mode`: 'header' | 'section' | 'block'.
-  function resolveHoverTarget(block, x, y) {
-    if (headingLevel(block) > 0) {
-      if (pointerOverTextRun(block, x, y)) {
-        const line = parseInt(block.getAttribute('data-src-line'), 10);
-        if (!Number.isFinite(line)) return null;
-        return { mode: 'header', els: [block], anchor: { kind: 'source', line: line } };
-      }
-      const section = block.closest('.annotate-section');
-      const anchor = sectionAnchorFromWrapper(section) || { kind: 'source', lineRange: sectionRange(block) };
-      return { mode: 'section', els: [section || block], anchor: anchor };
-    }
-    const anchor = A.dom ? A.dom.anchorFromElement(block) : null;
-    if (!anchor) return null;
-    return { mode: 'block', els: [block], anchor: anchor };
+  // Place the selection box over the current level's element (page coords, so it rides the
+  // content on scroll) and keep the bubble parked at its locked page point. The element can
+  // vanish on a reflow/advance — drop the lock if so.
+  function repositionLock() {
+    if (!selLock) return;
+    const level = selLock.levels[selLock.idx];
+    const elx = level && level.el;
+    if (!elx || !doc.contains(elx)) { clearLock(); return; }
+    const r = elx.getBoundingClientRect();
+    const sx = root.scrollX || 0;
+    const sy = root.scrollY || 0;
+    selLock.box.style.left = (r.left + sx) + 'px';
+    selLock.box.style.top = (r.top + sy) + 'px';
+    selLock.box.style.width = Math.max(0, r.width) + 'px';
+    selLock.box.style.height = Math.max(0, r.height) + 'px';
+    // The bubble stays at the locked page point (clamped below the top chrome) — it never
+    // chases the region, so it is always reachable regardless of which level is selected.
+    selLock.bubble.style.left = selLock.pagePoint.x + 'px';
+    selLock.bubble.style.top = Math.max(56, selLock.pagePoint.y) + 'px';
   }
 
-  function showHover(block, target) {
-    clearHover();
-    hoverEl = block;
-    hoverMode = target.mode;
-    hoverEls = target.els;
-    target.els.forEach(function (e) {
-      e.classList.add('annotate-hover-region');
-      if (target.mode === 'section') e.classList.add('annotate-hover-section');
+  // Select level `idx` of the locked chain: update the box overlay, the label, and the
+  // arrow enabled/disabled state (top = document, bottom = clicked innermost).
+  function setLockLevel(idx) {
+    if (!selLock) return;
+    const n = selLock.levels.length;
+    if (!n) { clearLock(); return; }
+    selLock.idx = Math.max(0, Math.min(n - 1, idx));
+    const level = selLock.levels[selLock.idx];
+    selLock.label.textContent = anchorLabel(level.anchor);
+    const atTop = selLock.idx >= n - 1; // broadest (document) — can't go up
+    const atBottom = selLock.idx <= 0; // innermost clicked — can't go down
+    selLock.upBtn.disabled = atTop;
+    selLock.downBtn.disabled = atBottom;
+    selLock.upBtn.classList.toggle('annotate-lock-disabled', atTop);
+    selLock.downBtn.classList.toggle('annotate-lock-disabled', atBottom);
+    repositionLock();
+  }
+
+  // up (+1) = broaden to the parent stop; down (-1) = narrow toward the clicked innermost.
+  function stepLock(delta) {
+    if (selLock) setLockLevel(selLock.idx + delta);
+  }
+
+  // Open the composer on the currently selected level. Seeds the edit box with the element's
+  // text only for a single line/block or a cell (a multi-line range would be unwieldy).
+  function commentCurrentLevel() {
+    if (!selLock) return;
+    const level = selLock.levels[selLock.idx];
+    const anchor = level.anchor;
+    const elx = level.el;
+    const seed = (anchor.line != null || anchor.cell != null) && elx
+      ? ((elx.innerText || elx.textContent) || '').trim()
+      : '';
+    const r = selLock.bubble.getBoundingClientRect();
+    const point = { x: r.left, y: r.bottom };
+    clearLock(); // openComposer also clears, but do it before so the box is gone immediately
+    openComposerAt(point, { anchor: anchor, element: elx, selectedText: seed });
+  }
+
+  // Lock onto `levels[idx]` with the bubble parked at viewport `point`. Click-to-lock folded
+  // in: the bubble persists (movement-independent) until the human comments, traverses away,
+  // re-clicks elsewhere, presses Escape, or clicks outside the rendered content.
+  function openLock(levels, idx, point) {
+    clearLock();
+    const box = el('div', { class: 'annotate-ui annotate-sel-box' });
+    const label = el('span', { class: 'annotate-lock-label' });
+    const upBtn = el('button', {
+      class: 'annotate-lock-arrow annotate-lock-up', type: 'button',
+      title: 'Broaden selection (parent)', 'aria-label': 'Broaden selection to the parent',
+    }, [svgIcon(ICON_CARET_UP)]);
+    const downBtn = el('button', {
+      class: 'annotate-lock-arrow annotate-lock-down', type: 'button',
+      title: 'Narrow selection (child)', 'aria-label': 'Narrow selection toward the click',
+    }, [svgIcon(ICON_CARET_DOWN)]);
+    const commentBtn = el('button', {
+      class: 'annotate-lock-comment', type: 'button',
+      title: 'Comment on this selection', 'aria-label': 'Comment on this selection',
+    }, [svgIcon(ICON_COMMENT)]);
+    const bubble = el('div', {
+      class: 'annotate-ui annotate-lock-bubble', tabindex: '0', role: 'group',
+      'aria-label': 'Comment target — up/down arrows change the level',
+    }, [upBtn, downBtn, label, commentBtn]);
+    // Swallow mousedown so interacting with the bubble never collapses a selection / reaches
+    // the page; the click handlers (below) act, and onDocClick ignores .annotate-ui targets.
+    bubble.addEventListener('mousedown', function (e) { e.preventDefault(); });
+    upBtn.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); stepLock(1); });
+    downBtn.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); stepLock(-1); });
+    commentBtn.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); commentCurrentLevel(); });
+    // ArrowUp/ArrowDown traverse (NOT Enter — §J reserves it for the composer); Escape dismisses.
+    // Scoped to the bubble (it is focused on open) so the page's own arrow-key scroll is left
+    // alone the moment focus leaves the bubble.
+    bubble.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowUp') { e.preventDefault(); stepLock(1); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); stepLock(-1); }
+      else if (e.key === 'Escape') { e.preventDefault(); clearLock(); }
     });
 
-    const ref = target.els[0];
-    const rect = ref.getBoundingClientRect();
-    const title =
-      target.mode === 'header' ? 'Comment on this heading'
-      : target.mode === 'section' ? 'Comment on this section'
-      : 'Comment on this block';
-    const seedMode = target.mode; // block seeds the edit box with the block text; header/section don't
-    const anchor = target.anchor;
-    const icon = commentAffordance('annotate-hover-add', title, function (point) {
-      const seed = seedMode === 'block' ? ((block.innerText || block.textContent) || '').trim() : '';
-      clearHover();
-      openComposerAt(point, { anchor: anchor, element: block, selectedText: seed });
-    });
-    icon.style.position = 'absolute';
-    // Sit on the region's top-left edge (slightly overlapping) so the pointer can reach the
-    // icon without crossing a gap that would clear the hover.
-    icon.style.top = Math.max(56, rect.top + (root.scrollY || 0)) + 'px';
-    icon.style.left = Math.max(2, rect.left + (root.scrollX || 0) - 24) + 'px';
-    doc.body.appendChild(icon);
+    const pagePoint = { x: (point ? point.x : 0) + (root.scrollX || 0), y: (point ? point.y : 0) + (root.scrollY || 0) };
+    selLock = {
+      levels: levels, idx: idx, box: box, bubble: bubble, label: label,
+      upBtn: upBtn, downBtn: downBtn, commentBtn: commentBtn, pagePoint: pagePoint,
+    };
+    doc.body.appendChild(box);
+    doc.body.appendChild(bubble);
+    setLockLevel(idx);
+    // Focus the bubble so the arrow keys work immediately (without a prior click on it).
+    try { bubble.focus({ preventScroll: true }); } catch (e) { /* older engines: buttons still work */ }
   }
 
-  function onMouseMove(ev) {
-    if (viewKind === 'image' || viewKind === 'frontend') return; // image: own adapter; frontend: untouched
+  // §K: a click selects the innermost eligible element and locks the traversal bubble there.
+  // Skips our own UI, an in-progress text selection (the selection affordance owns that), an
+  // open composer, and the live-frontend / image views (frontend traversal is deferred this
+  // round; the image adapter owns image clicks). A click outside the rendered content — or on
+  // nothing anchorable — dismisses the lock.
+  function onDocClick(ev) {
+    if (viewKind === 'image' || viewKind === 'frontend') return;
     const t = ev.target;
-    if (inUi(t)) return; // over our own UI (incl. the comment icon): keep state
-    if (pending) { clearHover(); return; } // a composer is open
+    if (inUi(t)) return; // our chrome / composer / pins / lock bubble handle their own clicks
+    if (pending) return; // a composer is open
     const sel = root.getSelection ? root.getSelection() : null;
-    if (sel && !sel.isCollapsed && String(sel).trim()) { clearHover(); return; }
+    if (sel && !sel.isCollapsed && String(sel).trim()) return; // text selection -> onMouseUp owns it
     const render = doc.querySelector('.annotate-render');
-    if (!render || !render.contains(t)) { clearHover(); return; }
-    const block = A.dom && A.dom.nearestAnchorable(t);
-    if (!block || !render.contains(block)) { clearHover(); return; }
-    const target = resolveHoverTarget(block, ev.clientX, ev.clientY);
-    if (!target) { clearHover(); return; }
-    if (block === hoverEl && target.mode === hoverMode) return; // unchanged region + mode
-    showHover(block, target);
+    if (!render || !render.contains(t)) { clearLock(); return; }
+    const levels = traversalLevels(t);
+    if (!levels.length) { clearLock(); return; }
+    openLock(levels, 0, { x: ev.clientX, y: ev.clientY }); // 0 = the innermost stop
   }
 
   function wireInteractions() {
-    // NOTE (§A): NO document-level click handler — clicking body text must do nothing toward
-    // commenting, and the page's native selection / context menu must stay intact.
+    // §A inline text-selection commenting (UNCHANGED): the comment icon next to a selection.
     doc.addEventListener('mouseup', onMouseUp, false);
-    doc.addEventListener('mousemove', onMouseMove, false);
     doc.addEventListener('selectionchange', onSelectionChange, false);
-    // Hover positions are viewport-relative; a scroll invalidates the icon/outline.
-    root.addEventListener('scroll', clearHover, true);
+    // §K: a click locks the innermost stop + a traversable comment bubble (replaces the old
+    // hover→floating-icon block affordance). The page's native selection / context menu stay
+    // intact — onDocClick only acts on a plain (non-selecting) click on anchorable content.
+    doc.addEventListener('click', onDocClick, false);
+    // The lock's box + bubble are placed in page coords; reposition them on scroll/reflow so
+    // they keep tracking the content (the box also self-clears if its element disappears).
+    root.addEventListener('scroll', repositionLock, true);
     // §B: pins are position:fixed in viewport coords and must re-track the content as it
-    // scrolls / the layout reflows (a separate concern from clearing the hover affordance).
+    // scrolls / the layout reflows.
     root.addEventListener('scroll', schedulePinReposition, true);
+    root.addEventListener('resize', repositionLock);
     root.addEventListener('resize', schedulePinReposition);
     // Image view (§6.4 leverage order DOM -> code -> image): the dom/code adapters return
     // null on an image (no source position), so the image adapter owns its click/drag ->
