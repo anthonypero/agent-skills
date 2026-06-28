@@ -319,6 +319,38 @@ async function main() {
     ok('attach: the image file EXISTS in the round dir ON SELECT (like <guid>-screenshot.png)',
       !!atFilePath && fs.existsSync(atFilePath), `path=${atFilePath}; exists=${atFilePath && fs.existsSync(atFilePath)}`);
 
+    // v2.6 MULTI-ATTACH: pick TWO MORE images in ONE dialog (multi-select) — they must APPEND to
+    // the gallery (no overwrite), each get copied into the round dir, then per-item remove must
+    // drop the reference. Exercises the `multiple` input + the .annotate-attach-gallery.
+    const fired2 = await cdp.evaluate(`(() => {
+      const input = document.querySelector('.annotate-attach-input');
+      if (!input) return { err: 'no attach input' };
+      const mk = (name) => { const bin = atob(${JSON.stringify(TINY_PNG_B64)}); const b = new Uint8Array(bin.length); for (let i=0;i<bin.length;i++) b[i]=bin.charCodeAt(i); return new File([b], name, { type: 'image/png' }); };
+      const dt = new DataTransfer(); dt.items.add(mk('second.png')); dt.items.add(mk('third.png'));
+      input.files = dt.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      return { picked: input.files.length, multiple: !!input.multiple };
+    })()`);
+    const count3 = await waitFor('three attachments in the gallery (1 + 2 multi-selected)', async () =>
+      (await cdp.evaluate(`(() => { const el = document.querySelector('.annotate-composer'); return el && el.getAttribute('data-attachment-count'); })()`)) === '3' ? '3' : null,
+      { timeout: 15000 });
+    const names3 = ((await cdp.evaluate(`(() => { const el = document.querySelector('.annotate-composer'); return el && el.getAttribute('data-attachments'); })()`)) || '').split(',').filter(Boolean);
+    ok('attach: multi-select adds MANY in one dialog (gallery APPENDS, no overwrite)',
+      fired2.multiple === true && count3 === '3' && names3.length === 3 && names3[0] === storedName,
+      `picked=${fired2.picked}; multiple=${fired2.multiple}; count=${count3}; names=${names3.length}`);
+    const newFilesExist = names3.slice(1).every((nm) =>
+      fs.existsSync(path.join(P.artifactDir(dataDir, atRound.session, atRound.artifact), atRound.guid, nm)));
+    ok('attach: each multi-selected image is COPIED into the round dir ON SELECT', newFilesExist,
+      `newFiles=${names3.slice(1).join(',')}`);
+    const removed = await cdp.evaluate(`(() => {
+      const items = Array.from(document.querySelectorAll('.annotate-attach-item'));
+      items.slice(1).forEach((it) => { const b = it.querySelector('.annotate-attach-remove'); if (b) b.click(); }); // remove all but the first
+      const el = document.querySelector('.annotate-composer');
+      return { count: el && el.getAttribute('data-attachment-count'), names: el && el.getAttribute('data-attachments') };
+    })()`);
+    ok('attach: per-item remove drops the reference (gallery + model back to the kept one)',
+      removed.count === '1' && removed.names === storedName, `count=${removed.count}; names=${removed.names}`);
+
     // Add the comment, then Send — the attachment reference must ride the submitted feedback.
     await cdp.evaluate(addCommentExpr('see the attached illustration'));
     await cdp.evaluate(`document.querySelector('.annotate-send').click()`);
@@ -332,6 +364,9 @@ async function main() {
     ok('attach: the submitted feedback REFERENCES the attachment filename (round-trips to disk)',
       atSubmit === 'submitted' && diskAt.status === 'submitted' && refNames.includes(storedName),
       `submit=${atSubmit}; status=${diskAt.status}; ref=${refNames.join(',') || undefined}`);
+    ok('attach: REMOVED attachments do NOT ride to disk (only the kept reference persists)',
+      refNames.length === 1 && refNames[0] === storedName,
+      `refNames=[${refNames.join(',')}]`);
     // NOTE: `annotate poll` exposing the resolved on-disk attachmentPath is covered by the
     // unit gate tests/launch.test.js ("poll bundle surfaces an on-disk attachmentPath … §I"),
     // since poll is the CLI leg (not drivable from this in-page CDP harness).

@@ -142,6 +142,54 @@ async function main() {
     ok('Add -> a staged comment is pinned on the canvas (+ a sidebar row)',
       composed.pins === 1 && composed.sidebarRows === 1, `pins=${composed.pins}; rows=${composed.sidebarRows}`);
 
+    // GATE 3.5 — v2.4/v2.5 quote-based TEXT anchor. A sub-line selection inside ONE block becomes a
+    // {kind:text, quote, context} anchor (NOT source/line). onMouseUp -> a .annotate-sel-affordance
+    // icon; clicking it opens the composer. The selection is set + mouseup dispatched on the block
+    // (not in the UI), exactly as a human drag would land it.
+    const textSel = await cdp.evaluate(`(() => {
+      const p = document.querySelector('.annotate-render p[data-src-line]');
+      if (!p) return { err: 'no <p>' };
+      let tn = null;
+      const walk = document.createTreeWalker(p, NodeFilter.SHOW_TEXT, null);
+      while (walk.nextNode()) { if (walk.currentNode.nodeValue.trim().length >= 12) { tn = walk.currentNode; break; } }
+      if (!tn) return { err: 'no text node' };
+      const s = 2, e = Math.min(tn.nodeValue.length - 1, s + 8); // a STRICT sub-span of the block
+      const range = document.createRange();
+      range.setStart(tn, s); range.setEnd(tn, e);
+      const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+      const quote = String(sel).trim();
+      const rect = range.getBoundingClientRect();
+      p.dispatchEvent(new MouseEvent('mouseup', { clientX: rect.left + 2, clientY: rect.top + 2, button: 0, bubbles: true, cancelable: true, view: window }));
+      const aff = document.querySelector('.annotate-sel-affordance');
+      if (aff) aff.click();
+      const c = document.querySelector('.annotate-composer');
+      return { quote, affShown: !!aff, composerOpened: !!c, anchorKind: c && c.getAttribute('data-anchor-kind') };
+    })()`);
+    ok('sub-line text selection -> quote-based TEXT anchor (not source/line)',
+      textSel.affShown && textSel.composerOpened && textSel.anchorKind === 'text' && !!textSel.quote,
+      `aff=${textSel.affShown}; composer=${textSel.composerOpened}; kind=${textSel.anchorKind}; quote=${JSON.stringify(textSel.quote)}`);
+
+    // type + Add -> the text anchor renders as inline .annotate-mark spans (lead carries the icon),
+    // and DOES NOT add a visible floating pin (text pins are display:none; only block pins show).
+    const textMark = await cdp.evaluate(`(() => {
+      const ta = document.querySelector('.annotate-composer-input');
+      if (!ta) return { err: 'no composer input' };
+      ta.value = 'integration: inline text-span comment';
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('.annotate-add').click();
+      const pins = Array.from(document.querySelectorAll('.annotate-comment-pin'));
+      const visibleTextPins = pins.filter((p) => p.getAttribute('data-anchor-kind') === 'text' && p.offsetParent !== null).length;
+      return {
+        markCount: document.querySelectorAll('.annotate-mark').length,
+        leadCount: document.querySelectorAll('.annotate-mark--lead').length,
+        rows: document.querySelectorAll('.annotate-sidebar-item').length,
+        visibleTextPins,
+      };
+    })()`);
+    ok('text anchor renders inline .annotate-mark spans (one lead icon), NO visible pin',
+      textMark.markCount >= 1 && textMark.leadCount === 1 && textMark.visibleTextPins === 0 && textMark.rows === 2,
+      `marks=${textMark.markCount}; lead=${textMark.leadCount}; visibleTextPins=${textMark.visibleTextPins}; rows=${textMark.rows}`);
+
     // GATE 4 — Send -> the server flips the round to submitted ON DISK
     await cdp.evaluate(`document.querySelector('.annotate-send').click()`);
     const submitResult = await waitFor('submit result attr', async () => {
@@ -150,14 +198,20 @@ async function main() {
     });
     const diskAfterSubmit = JSON.parse(fs.readFileSync(roundFile, 'utf8'));
     ok(
-      'submit round-trips -> round flipped `submitted` on disk',
-      submitResult === 'submitted' && diskAfterSubmit.status === 'submitted' && diskAfterSubmit.feedback.length === 1,
+      'submit round-trips -> round flipped `submitted` on disk (both the line + text comment)',
+      submitResult === 'submitted' && diskAfterSubmit.status === 'submitted' && diskAfterSubmit.feedback.length === 2,
       `ui=${submitResult}; disk.status=${diskAfterSubmit.status}; feedback=${diskAfterSubmit.feedback.length}; anchor=${JSON.stringify(diskAfterSubmit.feedback[0] && diskAfterSubmit.feedback[0].anchor)}`
     );
     ok(
       'submitted feedback carries the §5.2 comment + id',
       diskAfterSubmit.feedback[0] && diskAfterSubmit.feedback[0].id === 'a1' && diskAfterSubmit.feedback[0].type === 'comment' && typeof diskAfterSubmit.feedback[0].comment === 'string',
       JSON.stringify(diskAfterSubmit.feedback[0])
+    );
+    const diskTextItem = diskAfterSubmit.feedback.find((f) => f.anchor && f.anchor.kind === 'text');
+    ok(
+      'the quote-based TEXT comment round-trips to disk (kind:text + non-empty quote)',
+      !!diskTextItem && typeof diskTextItem.anchor.quote === 'string' && diskTextItem.anchor.quote.length > 0 && diskTextItem.type === 'comment',
+      `anchor=${JSON.stringify(diskTextItem && diskTextItem.anchor)}`
     );
 
     // GATE 5a — Accept (head-checked, from submitted) -> accepted on disk
