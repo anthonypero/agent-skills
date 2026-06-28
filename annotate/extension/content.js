@@ -902,6 +902,7 @@
       class: 'annotate-btn annotate-toggle',
       type: 'button',
       text: 'Switch to Edit',
+      title: 'Switch between a comment and a suggested edit',
     });
     const card = el('div', {
       class: 'annotate-ui annotate-composer',
@@ -944,10 +945,16 @@
       closeComposer();
     }
 
+    // a3: the primary button reads "Save" when REOPENED for an existing registered entry
+    // (opts.editEntry — the pin / inline-mark / sidebar-Edit reopen path, which commitDraft
+    // routes through updateEntry above), and "Add" for a brand-new annotation. Click behavior is
+    // unchanged; only the label (and its hover title) is mode-aware.
+    const isEditingEntry = !!(opts && opts.editEntry);
     const addBtn = el('button', {
       class: 'annotate-btn annotate-primary annotate-add',
       type: 'button',
-      text: 'Add',
+      text: isEditingEntry ? 'Save' : 'Add',
+      title: isEditingEntry ? 'Save your changes to this annotation' : 'Add this annotation to the round',
     });
     addBtn.addEventListener('click', commitDraft);
 
@@ -967,6 +974,7 @@
       class: 'annotate-btn annotate-cancel',
       type: 'button',
       text: 'Cancel',
+      title: 'Close without saving',
       onclick: closeComposer,
     });
 
@@ -977,6 +985,7 @@
     const attachInput = el('input', {
       type: 'file',
       accept: 'image/*',
+      multiple: 'multiple', // a2: a single pick may carry MANY images (the change handler loops)
       class: 'annotate-attach-input',
     });
     const attachBtn = el('button', { class: 'annotate-btn annotate-attach-btn annotate-icon-btn', type: 'button' });
@@ -1031,38 +1040,48 @@
 
     attachBtn.addEventListener('click', function () { attachInput.click(); });
     attachInput.addEventListener('change', async function () {
-      const file = attachInput.files && attachInput.files[0];
-      if (!file) return;
-      setStatus('Attaching image…');
-      let dataUrl;
-      try {
-        dataUrl = await readFileAsDataURL(file);
-      } catch (e) {
-        setStatus('Could not read the image file');
-        attachInput.value = '';
-        return;
+      // a2: the input is `multiple`, so one pick may carry MANY files. Upload + appendAttachment
+      // EACH, in selection order (sequential so order is preserved), reusing the per-file
+      // copy-into-round-folder + dedupe flow. value is reset at the END so the SAME file(s) can be
+      // re-picked and the next change fires.
+      const files = attachInput.files ? Array.prototype.slice.call(attachInput.files) : [];
+      if (!files.length) return;
+      let ok = 0;
+      let failed = 0;
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        setStatus(files.length > 1 ? 'Attaching image ' + (i + 1) + ' of ' + files.length + '…' : 'Attaching image…');
+        let dataUrl;
+        try {
+          dataUrl = await readFileAsDataURL(file);
+        } catch (e) {
+          failed++;
+          continue;
+        }
+        const comma = dataUrl.indexOf(',');
+        const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : '';
+        let res;
+        try {
+          // ON SELECT: copy the file into the round folder now (the explicit user preference).
+          res = await A.config.uploadAttachment(
+            ctx,
+            { head: ctx.head, data: b64, mime: file.type || '', name: file.name || '' },
+            fetchImpl
+          );
+        } catch (e) {
+          res = { error: String(e && e.message) };
+        }
+        if (res && res.httpStatus === 200 && res.filename) {
+          appendAttachment(res.filename, dataUrl, file.name || res.filename);
+          ok++;
+        } else {
+          failed++;
+        }
       }
-      const comma = dataUrl.indexOf(',');
-      const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : '';
-      let res;
-      try {
-        // ON SELECT: copy the file into the round folder now (the explicit user preference).
-        res = await A.config.uploadAttachment(
-          ctx,
-          { head: ctx.head, data: b64, mime: file.type || '', name: file.name || '' },
-          fetchImpl
-        );
-      } catch (e) {
-        res = { error: String(e && e.message) };
-      }
-      if (res && res.httpStatus === 200 && res.filename) {
-        appendAttachment(res.filename, dataUrl, file.name || res.filename);
-        attachInput.value = ''; // reset so the SAME file can be re-picked and the next change fires
-        setStatus('Image attached');
-      } else {
-        attachInput.value = '';
-        setStatus('Attach failed' + (res && res.error ? ': ' + res.error : ' (' + (res && res.httpStatus) + ')'));
-      }
+      attachInput.value = ''; // reset so the SAME file(s) can be re-picked and the next change fires
+      if (ok && !failed) setStatus(ok === 1 ? 'Image attached' : ok + ' images attached');
+      else if (ok && failed) setStatus(ok + ' attached, ' + failed + ' failed');
+      else setStatus(failed === 1 ? 'Could not attach the image' : 'Could not attach ' + failed + ' images');
     });
 
     card.appendChild(el('div', { class: 'annotate-composer-head' }, [
@@ -1391,7 +1410,12 @@
     if (!range) { entry.markSpans = []; return; }
     const isEdit = entry.item.type === 'edit';
     const spans = markRange(range, isEdit ? 'annotate-mark-edit' : null);
+    // a4: inline marks reuse the SAME native-`title` affordance the block pins use (makePin),
+    // word-for-word — hovering the highlight explains it's a saved, clickable annotation. Set
+    // `title` only (NOT aria-label) so the quoted text stays the span's accessible name.
+    const markTip = 'Saved ' + entry.item.type + ' — click to edit';
     spans.forEach(function (span) {
+      span.setAttribute('title', markTip);
       // swallow mousedown so a click on the mark never collapses a selection / reaches the page.
       span.addEventListener('mousedown', function (e) { e.preventDefault(); });
       span.addEventListener('click', function (e) {
