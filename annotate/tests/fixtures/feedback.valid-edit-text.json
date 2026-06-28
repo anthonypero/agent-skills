@@ -1,0 +1,11 @@
+{
+  "id": "a5",
+  "type": "edit",
+  "anchor": {
+    "kind": "text",
+    "quote": "lorem ipsum",
+    "context": { "before": "the ", "after": " dolor" }
+  },
+  "original": "lorem ipsum",
+  "replacement": "Lorem Ipsum"
+}

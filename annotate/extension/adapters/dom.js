@@ -64,7 +64,64 @@
     return anchorFromElement(doc.elementFromPoint(x, y));
   }
 
-  const api = { ANCHORABLE_SELECTOR, nearestAnchorable, anchorFromElement, anchorFromPoint };
+  // How many times `needle` occurs in `haystack` (overlapping-tolerant: steps by 1 each hit).
+  function countOccurrences(haystack, needle) {
+    if (!needle) return 0;
+    let count = 0;
+    let from = 0;
+    let i;
+    while ((i = haystack.indexOf(needle, from)) >= 0) {
+      count++;
+      from = i + 1;
+    }
+    return count;
+  }
+
+  // v2.4 §B.5 — the DOM-FREE half of the sub-line text-anchor producer. Given a block's plain
+  // text (`blockText`, typically `block.textContent`) and the RENDERED selected text (`quote`,
+  // what content.js captures as `String(sel).trim()`), decide whether the selection is a STRICT
+  // sub-span of the block and, if so, slice the quote's surrounding context.
+  //
+  //   - returns { kind:'text', quote, context:{ before, after } } for a strict sub-span; or
+  //   - returns null to SIGNAL "keep the source anchor" (empty quote, a whole-block selection
+  //     where quote === blockText.trim(), or a quote that isn't a literal sub-span of the block).
+  //
+  // `before`/`after` are 32 chars on each side of the quote, WIDENED (in 32-char steps, capped at
+  // the block bounds) until `before + quote + after` is unique within the block — so the §C
+  // resolver can re-find the exact occurrence later. The live Range/TreeWalker work (deciding the
+  // selection stays within ONE block, cloning the range) stays in content.js (browser-only).
+  function textAnchorFromSelectionText(blockText, quote) {
+    if (blockText == null || quote == null) return null;
+    const text = String(blockText);
+    const q = String(quote).trim();
+    if (!q) return null;
+    if (q === text.trim()) return null; // whole-block selection -> keep the source anchor
+    const idx = text.indexOf(q);
+    if (idx < 0) return null; // not a literal sub-span (e.g. soft markdown mismatch) -> keep source
+    const end = idx + q.length;
+    let pad = 32;
+    let before = text.slice(Math.max(0, idx - pad), idx);
+    let after = text.slice(end, end + pad);
+    // Widen the context window until before+quote+after is UNIQUE in the block (or it already
+    // spans the whole block, which is trivially unique).
+    while (
+      countOccurrences(text, before + q + after) > 1 &&
+      (idx - pad > 0 || end + pad < text.length)
+    ) {
+      pad += 32;
+      before = text.slice(Math.max(0, idx - pad), idx);
+      after = text.slice(end, end + pad);
+    }
+    return { kind: 'text', quote: q, context: { before: before, after: after } };
+  }
+
+  const api = {
+    ANCHORABLE_SELECTOR,
+    nearestAnchorable,
+    anchorFromElement,
+    anchorFromPoint,
+    textAnchorFromSelectionText,
+  };
 
   if (typeof module === 'object' && module.exports) {
     module.exports = api; // Node (tests now)

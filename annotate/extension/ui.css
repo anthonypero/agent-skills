@@ -39,6 +39,7 @@
   --annotate-content-fg: #1d2330;
   --annotate-code-bg: #f2f4f7;
   --annotate-hover: rgba(47, 111, 237, 0.10);
+  --annotate-edit-hover: rgba(240, 160, 32, 0.14); /* §E.3 EDIT-mode composing-overlay fill (amber) */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -65,6 +66,7 @@
     --annotate-content-fg: #e6e8ee;
     --annotate-code-bg: #1a1d24;
     --annotate-hover: rgba(76, 141, 255, 0.14);
+    --annotate-edit-hover: rgba(242, 187, 77, 0.16); /* §E.3 EDIT-mode composing-overlay fill (dark amber) */
   }
 }
 
@@ -466,6 +468,17 @@ body.annotate-themed {
   background: var(--annotate-hover);
   box-shadow: inset 0 -2px 0 0 var(--annotate-accent); /* a highlighter underline so the words read as marked */
   border-radius: 2px;
+}
+/* §E.3: EDIT-mode composing overlay turns YELLOW. content.js tags each overlay node with
+   .annotate-edit when the composer is in edit mode; these overrides come AFTER the base rules
+   so they win, swapping the blue fill/underline for the edit/amber (--annotate-pin-edit). */
+.annotate-composer-word.annotate-edit {
+  box-shadow: inset 0 -2px 0 0 var(--annotate-pin-edit);
+  background: var(--annotate-edit-hover);
+}
+.annotate-composer-target.annotate-edit {
+  outline-color: var(--annotate-pin-edit);
+  background: var(--annotate-edit-hover);
 }
 
 /* ---- composer ---- */

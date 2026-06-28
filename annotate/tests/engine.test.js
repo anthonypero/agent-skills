@@ -107,6 +107,47 @@ test('serialize: non-anchorable target -> null; anchorFromPoint wraps elementFro
   assert.deepEqual(dom.anchorFromPoint(fakeDoc, 10, 10), { kind: 'source', line: 1 });
 });
 
+// v2.4 §B.5 — the DOM-free sub-line text-anchor producer. A strict sub-span of a block becomes a
+// quote-based `text` anchor (with sliced before/after context); a whole-block selection (or a
+// quote that isn't a literal sub-span) returns null, signaling content.js to keep the source anchor.
+test('text anchor: a sub-line span -> { kind:text, quote, context:{before,after} }', () => {
+  const blockText = 'the lorem ipsum dolor sit amet';
+  assert.deepEqual(dom.textAnchorFromSelectionText(blockText, 'lorem ipsum'), {
+    kind: 'text',
+    quote: 'lorem ipsum',
+    context: { before: 'the ', after: ' dolor sit amet' },
+  });
+
+  // The quote is trimmed exactly as content.js captures it (String(sel).trim()).
+  assert.deepEqual(dom.textAnchorFromSelectionText(blockText, '  lorem ipsum  '), {
+    kind: 'text',
+    quote: 'lorem ipsum',
+    context: { before: 'the ', after: ' dolor sit amet' },
+  });
+});
+
+test('text anchor: a WHOLE-block selection stays source (null); so does an absent quote', () => {
+  // quote === blockText.trim() -> the whole block -> keep the source line anchor (null).
+  assert.equal(dom.textAnchorFromSelectionText('  Just one sentence.  ', 'Just one sentence.'), null);
+  // A quote that isn't a literal sub-span (e.g. a soft markdown mismatch) -> keep source (null).
+  assert.equal(dom.textAnchorFromSelectionText('the lorem ipsum dolor', 'nonexistent phrase'), null);
+  // Empty selection -> null.
+  assert.equal(dom.textAnchorFromSelectionText('the lorem ipsum dolor', '   '), null);
+});
+
+test('text anchor: context makes before+quote+after UNIQUE for a repeated quote', () => {
+  // "cat" appears twice; the helper anchors the FIRST occurrence and slices enough context that
+  // before+quote+after locates it uniquely — the invariant §C relies on to re-find the right span.
+  const blockText = 'the black cat sat by the lazy red cat in the warm afternoon sun';
+  const a = dom.textAnchorFromSelectionText(blockText, 'cat');
+  assert.equal(a.kind, 'text');
+  assert.equal(a.quote, 'cat');
+  const window = a.context.before + a.quote + a.context.after;
+  assert.equal(blockText.indexOf(window), blockText.lastIndexOf(window), 'before+quote+after is unique');
+  assert.equal(blockText.indexOf(window) + a.context.before.length, blockText.indexOf('cat'),
+    'the window brackets the first "cat"');
+});
+
 // ===========================================================================
 // 2. Comment/edit bubble state machine
 // ===========================================================================
@@ -241,6 +282,23 @@ test('disjoint ALLOWS overlapping COMMENTs and comment-over-edit on the same ran
     edit('a1', { kind: 'source', line: 10 }),
     comment('a2', { kind: 'source', line: 10 }),
   ]).ok, true);
+});
+
+// v2.4 — inline edits now carry a quote-based `text` anchor (§B). textOverlap (submit.js:130) is
+// conservative: two text edits conflict only when their `quote` is byte-identical.
+test('disjoint REJECTS two text edits with the SAME quote; ALLOWS different quotes', () => {
+  const same = submit.checkDisjointEdits([
+    edit('a1', { kind: 'text', quote: 'lorem ipsum', context: { before: 'the ', after: ' dolor' } }),
+    edit('a2', { kind: 'text', quote: 'lorem ipsum', context: { before: 'a ', after: ' sit' } }),
+  ]);
+  assert.equal(same.ok, false, 'identical quotes conflict (textOverlap)');
+  assert.deepEqual(same.conflicts, [{ a: 'a1', b: 'a2' }]);
+
+  const diff = submit.checkDisjointEdits([
+    edit('a1', { kind: 'text', quote: 'lorem ipsum', context: { before: 'the ', after: ' dolor' } }),
+    edit('a2', { kind: 'text', quote: 'sit amet', context: { before: 'dolor ', after: '' } }),
+  ]);
+  assert.equal(diff.ok, true, 'different quotes are independent edits');
 });
 
 test('disjoint (forward-compat): spatial-box edits overlap by intersection', () => {

@@ -834,8 +834,13 @@
     let words = nodes.length > 0;
     if (!nodes.length) { nodes = composerBoxNodes(element); words = false; } // fall back to the region outline
     if (!nodes.length) return;
+    // v2.4 §E.1 — in EDIT mode the composing highlight is YELLOW: tag each overlay node with
+    // `annotate-edit` (the nodes live on doc.body, not under the card, so a card-descendant
+    // selector can't reach them; the parallel ui.css agent styles the class). mode is stashed on
+    // composerTarget so repositionComposerTarget re-applies it when it rebuilds the nodes.
+    if (opts.mode === 'edit') nodes.forEach(function (n) { n.classList.add('annotate-edit'); });
     nodes.forEach(function (n) { doc.body.appendChild(n); });
-    composerTarget = { nodes: nodes, range: range, element: element, words: words };
+    composerTarget = { nodes: nodes, range: range, element: element, words: words, mode: opts.mode || null };
   }
 
   // Re-place the target highlight on scroll/resize (re-clips against scroll containers, like
@@ -848,8 +853,23 @@
     const nodes = composerTarget.words
       ? composerWordNodes(composerTarget.range)
       : composerBoxNodes(composerTarget.element);
+    // v2.4 §E.1 — the rebuilt nodes are fresh, so re-apply the edit-mode color tag.
+    if (composerTarget.mode === 'edit') nodes.forEach(function (n) { n.classList.add('annotate-edit'); });
     nodes.forEach(function (n) { doc.body.appendChild(n); });
     composerTarget.nodes = nodes;
+  }
+
+  // v2.4 §E.2 — re-color the LIVE composer-target overlay when the composer toggles comment<->edit.
+  // The yellow look is the `annotate-edit` class on each overlay node (they sit on doc.body, not
+  // under the card, so a card-descendant CSS rule can't reach them). Also update composerTarget.mode
+  // so a later reposition keeps the right color.
+  function recolorComposerTarget(mode) {
+    if (!composerTarget) return;
+    composerTarget.mode = mode;
+    const edit = mode === 'edit';
+    composerTarget.nodes.forEach(function (n) {
+      if (n && n.classList) n.classList.toggle('annotate-edit', edit);
+    });
   }
 
   // Open the comment/edit composer for an anchor. `selectedText` seeds the edit box.
@@ -899,6 +919,7 @@
       bubble.toggle();
       if (bubble.type === 'edit') replInput.value = bubble.replacement || bubble.original || '';
       renderMode();
+      recolorComposerTarget(bubble.type); // v2.4 §E.2 — edit -> yellow overlay, comment -> blue
     });
 
     function commitDraft() {
@@ -1053,7 +1074,8 @@
     // Fix #1: keep the target visible for the whole time the composer is open (region outline,
     // or word highlight for a text selection). focus() below clears the native selection — our
     // overlay persists independent of it, so the human keeps seeing what they're commenting on.
-    showComposerTarget(opts);
+    // v2.4 §E.1 — pass the current mode so an EDIT composer opens with the yellow overlay.
+    showComposerTarget(Object.assign({}, opts, { mode: bubble.type }));
     input.focus();
   }
 
@@ -1143,6 +1165,76 @@
     }
     return null;
   }
+  // v2.4 §C.1 — re-find a `text` anchor's quote under the render root and return a live Range over
+  // it. Walk every text node (TreeWalker SHOW_TEXT), concatenate them into one string with a
+  // [node, globalStart, globalEnd] map, find every index of anchor.quote, then DISAMBIGUATE by the
+  // occurrence whose preceding text endsWith(context.before) AND following text
+  // startsWith(context.after) — falling back to the first occurrence when context is empty/missing.
+  // The chosen [start,end] is mapped back to (node, offset) pairs that may span multiple text nodes
+  // (the quote can cross inline <em>/<code>). Returns the Range, or null if the quote isn't found.
+  function rangeForTextAnchor(anchor) {
+    if (!anchor || anchor.kind !== 'text' || !anchor.quote) return null;
+    const rootEl = renderRoot();
+    if (!rootEl || typeof doc.createTreeWalker !== 'function') return null;
+    const SHOW_TEXT = (root.NodeFilter && root.NodeFilter.SHOW_TEXT) || 4;
+    const walker = doc.createTreeWalker(rootEl, SHOW_TEXT, null);
+    let full = '';
+    const map = []; // { node, start, end } per text node, in document order
+    let node;
+    while ((node = walker.nextNode())) {
+      // Only rendered content counts — skip text inside the annotate UI (composer / sidebar / pins).
+      const pe = node.parentElement;
+      if (pe && typeof pe.closest === 'function' && pe.closest('.annotate-ui')) continue;
+      const t = node.nodeValue || '';
+      if (!t) continue;
+      map.push({ node: node, start: full.length, end: full.length + t.length });
+      full += t;
+    }
+    const q = anchor.quote;
+    const ctx = anchor.context || {};
+    const before = ctx.before || '';
+    const after = ctx.after || '';
+    let chosen = -1;
+    let firstHit = -1;
+    let from = 0;
+    let i;
+    while ((i = full.indexOf(q, from)) >= 0) {
+      if (firstHit < 0) firstHit = i;
+      const preOk = !before || full.slice(0, i).endsWith(before);
+      const postOk = !after || full.slice(i + q.length).startsWith(after);
+      if (preOk && postOk) { chosen = i; break; }
+      from = i + 1;
+    }
+    if (chosen < 0) chosen = firstHit; // context didn't disambiguate -> first occurrence
+    if (chosen < 0) return null; // quote not present in the rendered content
+    const startGlobal = chosen;
+    const endGlobal = chosen + q.length;
+    let startNode = null;
+    let startOffset = 0;
+    let endNode = null;
+    let endOffset = 0;
+    for (let k = 0; k < map.length; k++) {
+      const m = map[k];
+      if (startNode === null && startGlobal >= m.start && startGlobal < m.end) {
+        startNode = m.node;
+        startOffset = startGlobal - m.start;
+      }
+      if (endGlobal > m.start && endGlobal <= m.end) {
+        endNode = m.node;
+        endOffset = endGlobal - m.start;
+      }
+    }
+    if (!startNode || !endNode) return null;
+    try {
+      const range = doc.createRange();
+      range.setStart(startNode, startOffset);
+      range.setEnd(endNode, endOffset);
+      return range;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function elementForAnchor(a) {
     if (!a) return null;
     if (a.lineRange != null) {
@@ -1156,6 +1248,14 @@
     if (a.keyPath != null) return keyPathEl(a.keyPath);
     if (a.cell != null) return doc.querySelector('.annotate-render [data-cell="' + a.cell + '"]');
     if (a.kind === 'spatial') return doc.querySelector('.annotate-image img') || renderRoot();
+    // v2.4 §C.2 — a `text` anchor resolves to the element enclosing its re-found quote (used for
+    // scroll-into-view + as the originEl fallback). null when the quote can't be re-found.
+    if (a.kind === 'text') {
+      const r = rangeForTextAnchor(a);
+      if (!r) return null;
+      const cac = r.commonAncestorContainer;
+      return cac.nodeType === 1 ? cac : cac.parentElement;
+    }
     return null;
   }
 
@@ -1165,9 +1265,17 @@
   // `targetRange` (a cloned Range from a real TEXT selection) is kept so the pin can sit ON
   // the selected words rather than the line's far-left gutter; null for block/line anchors.
   function registerComment(item, targetRange) {
-    const entry = { item: item, pin: null, listItem: null, anchorEl: null, targetRange: targetRange || null };
+    const entry = { item: item, pin: null, listItem: null, anchorEl: null, originEl: null, targetRange: targetRange || null };
     entry.anchorEl =
       item.anchor.kind === 'spatial' ? (doc.querySelector('.annotate-image img') || null) : elementForAnchor(item.anchor);
+    // v2.4 §C.4 — a `text` anchor re-finds its quote on render: resolve the range ONCE here (so a
+    // pin reopened without a live selection still sits on the words) and stash the enclosing block
+    // as originEl — the graceful-degradation fallback for the pin/box once a DOM mutation hides
+    // the quote (a live-session concern only; there is no server-side feedback hydration path).
+    if (item.anchor && item.anchor.kind === 'text') {
+      if (!entry.targetRange) entry.targetRange = rangeForTextAnchor(item.anchor);
+      entry.originEl = elementForAnchor(item.anchor);
+    }
     entry.pin = makePin(entry);
     doc.body.appendChild(entry.pin);
     entry.listItem = makeSidebarItem(entry);
@@ -1217,6 +1325,10 @@
       element: entry.anchorEl,
       editEntry: entry,
       selectedText: entry.item.type === 'edit' ? (entry.item.original || entry.item.replacement || '') : '',
+      // v2.4 §D — re-supply a targetRange so the reopened composer redraws the per-word overlay
+      // (composerWordNodes) rather than the whole-block box. For a `text` anchor with no live
+      // range cached, re-find the quote; non-text anchors yield null and keep the block box.
+      targetRange: entry.targetRange || rangeForTextAnchor(entry.item.anchor),
     });
   }
 
@@ -1239,11 +1351,30 @@
       const p = a.point || (a.box ? [a.box[0], a.box[1]] : [0, 0]);
       return { x: r.left + p[0] * r.width, y: r.top + p[1] * r.height };
     }
-    // Text-anchored (inline edit / text-selection comment): float the pin just ABOVE the selected
-    // words — the range's leading edge nudged up ~one pin height so it sits over the words, not on
-    // them (v2). DISPLAY-only nudge: the anchor resolution + composer highlight are untouched (the
-    // sub-line text-span anchor is a separate investigation). The cloned range stays live as long
-    // as its nodes do; getBoundingClientRect re-reads current scroll position.
+    // v2.4 §C.3 — a quote-based `text` anchor re-finds its quote on EVERY tick (so the pin keeps
+    // tracking even after a DOM mutation), refreshes entry.targetRange from the fresh range so the
+    // cache can't go stale, then floats the pin just ABOVE the words (leading edge nudged up ~one
+    // pin height). If the quote is (temporarily) un-findable, degrade gracefully to the enclosing
+    // block's left gutter via the originEl captured at register time — never crash.
+    if (a.kind === 'text') {
+      const fresh = rangeForTextAnchor(a);
+      if (fresh) {
+        entry.targetRange = fresh;
+        try {
+          const rr = fresh.getBoundingClientRect();
+          if (rr && (rr.width > 0 || rr.height > 0)) return { x: rr.left, y: rr.top - 22 };
+        } catch (e) { /* fall through to the block gutter */ }
+      }
+      let originEl = entry.originEl;
+      if (!originEl || !doc.contains(originEl)) originEl = elementForAnchor(a);
+      if (!originEl) return null;
+      const orr = originEl.getBoundingClientRect();
+      return { x: Math.max(2, orr.left - 22), y: orr.top };
+    }
+    // Text-anchored selection that resolved to a SOURCE anchor (whole-block select): float the pin
+    // just ABOVE the selected words — the cloned range's leading edge nudged up ~one pin height so
+    // it sits over the words, not on them (v2). DISPLAY-only nudge. The cloned range stays live as
+    // long as its nodes do; getBoundingClientRect re-reads current scroll position.
     if (entry.targetRange) {
       try {
         const rr = entry.targetRange.getBoundingClientRect();
@@ -1499,6 +1630,8 @@
       element: entry.anchorEl,
       editEntry: entry,
       selectedText: entry.item.type === 'edit' ? (entry.item.original || entry.item.replacement || '') : '',
+      // v2.4 §D — same as onPinClick: re-supply the targetRange so the per-word overlay redraws.
+      targetRange: entry.targetRange || rangeForTextAnchor(entry.item.anchor),
     });
   }
 
@@ -1554,15 +1687,34 @@
     const text = String(sel).trim();
     if (!text) return;
     clearLock(); // §M: one affordance at a time — an active text selection supersedes the §K lock
-    const node = sel.anchorNode;
-    const host = node && (node.nodeType === 1 ? node : node.parentElement);
+    let r;
+    try { r = sel.getRangeAt(0); } catch (e) { return; }
+    // v2.4 §B.1 — wrong-host fix: derive the host from the Range's REAL start text node, not
+    // sel.anchorNode. Browsers set anchorNode to the container <ul> at a block boundary, so the
+    // old host landed the line anchor + box on the wrong node (render.js stamps data-src-line on
+    // BOTH the <ul> and each <li>). The start text node's parent is the true innermost element.
+    const sc = r.startContainer;
+    const host = sc && (sc.nodeType === 3 ? sc.parentElement : sc);
     if (!host || inUi(host)) return;
-    const anchor = anchorFor(host);
+    // The enclosing anchorable block (the element anchorFor() would resolve `host` to).
+    const blockSel = (A.dom && A.dom.ANCHORABLE_SELECTOR) || '[data-src-line], [data-key-path], [data-cell]';
+    const block = typeof host.closest === 'function' ? host.closest(blockSel) : null;
+    // v2.4 §B.2 — a STRICT sub-span of ONE block becomes a quote-based `text` anchor; otherwise
+    // (whole-block, multi-block, or structural) keep the §K source anchor from anchorFor(host).
+    let anchor = null;
+    if (block && block.contains(r.endContainer) && A.dom && A.dom.textAnchorFromSelectionText) {
+      // §B.3 — before/after context comes purely from the block text (textContent already includes
+      // any inline <em>/<code> children the selection legitimately spans).
+      anchor = A.dom.textAnchorFromSelectionText(block.textContent || '', text);
+    }
+    if (!anchor) anchor = anchorFor(host); // fall back to the source line / keyPath / cell anchor
     if (!anchor) return;
-    showSelectionIcon(sel, anchor, text, host);
+    // §B.4 — element:block drives the fallback box + the pin gutter; targetRange (cloned in
+    // showSelectionIcon) drives the live word-highlight.
+    showSelectionIcon(sel, anchor, text, block || host);
   }
 
-  function showSelectionIcon(sel, anchor, text, host) {
+  function showSelectionIcon(sel, anchor, text, element) {
     let rect;
     // Fix #1: clone the selection NOW (before the composer's focus() collapses it) so the
     // composer can word-highlight exactly these words while it is open.
@@ -1572,11 +1724,11 @@
       rect = live.getBoundingClientRect();
       range = live.cloneRange();
     } catch (e) {
-      rect = host.getBoundingClientRect();
+      rect = element.getBoundingClientRect();
     }
     const icon = commentAffordance('annotate-sel-affordance', 'Comment on the selected text', function (point) {
       removeSelectionIcon();
-      openComposerAt(point, { anchor: anchor, element: host, selectedText: text, targetRange: range });
+      openComposerAt(point, { anchor: anchor, element: element, selectedText: text, targetRange: range });
     });
     icon.style.position = 'absolute';
     icon.style.top = Math.max(56, rect.top + (root.scrollY || 0) - 4) + 'px';

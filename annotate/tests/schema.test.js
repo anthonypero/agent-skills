@@ -35,6 +35,8 @@ const ACCEPT = [
   ['feedback: edit on source/line (original + replacement)', validateFeedback, 'feedback.valid-edit.json'],
   ['feedback: comment on spatial/box', validateFeedback, 'feedback.valid-spatial.json'],
   ['feedback: comment on text/quote', validateFeedback, 'feedback.valid-text.json'],
+  // v2.4 — an inline EDIT now anchors to a text/quote (quote === original); confirm the wire shape.
+  ['feedback: edit on text/quote (quote === original)', validateFeedback, 'feedback.valid-edit-text.json'],
 ];
 
 const REJECT = [
