@@ -42,6 +42,12 @@
   --annotate-edit-hover: rgba(240, 160, 32, 0.14); /* §E.3 EDIT-mode composing-overlay fill (amber) */
   --annotate-mark-rest: rgba(47, 111, 237, 0.06); /* v2.5 a4 inline-comment mark resting tint (light) */
   --annotate-mark-edit-rest: rgba(240, 160, 32, 0.09); /* v2.5 a4 inline-edit mark resting tint (light) */
+  /* v2.5 dogfood-8 a1: alpha-driven underline. Rest = faint, hover/active = strong; thickness is
+     constant, only the alpha changes (so the intensify never thickens the line). */
+  --annotate-mark-line-rest: rgba(47, 111, 237, 0.30); /* faint resting underline (light) */
+  --annotate-mark-line-hover: rgba(47, 111, 237, 0.85); /* strong hover/active underline (light) */
+  --annotate-mark-edit-line-rest: rgba(240, 160, 32, 0.38);
+  --annotate-mark-edit-line-hover: rgba(240, 160, 32, 0.95);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -71,6 +77,11 @@
     --annotate-edit-hover: rgba(242, 187, 77, 0.16); /* §E.3 EDIT-mode composing-overlay fill (dark amber) */
     --annotate-mark-rest: rgba(76, 141, 255, 0.12); /* v2.5 a4 inline-comment mark resting tint (dark) */
     --annotate-mark-edit-rest: rgba(242, 187, 77, 0.12); /* v2.5 a4 inline-edit mark resting tint (dark) */
+    /* v2.5 dogfood-8 a1: alpha-driven underline (dark) — same constant-thickness, alpha-only intensify */
+    --annotate-mark-line-rest: rgba(76, 141, 255, 0.38);
+    --annotate-mark-line-hover: rgba(76, 141, 255, 0.92);
+    --annotate-mark-edit-line-rest: rgba(242, 187, 77, 0.42);
+    --annotate-mark-edit-line-hover: rgba(242, 187, 77, 0.95);
   }
 }
 
@@ -497,7 +508,7 @@ body.annotate-themed {
    inserting a mark cannot disturb a host page's layout. */
 .annotate-mark {
   background: var(--annotate-mark-rest);
-  box-shadow: inset 0 -1px 0 0 var(--annotate-accent); /* faint resting underline */
+  box-shadow: inset 0 -2px 0 0 var(--annotate-mark-line-rest); /* faint resting underline; thickness is constant, alpha intensifies */
   color: var(--annotate-accent); /* drives the ::before icon tint (currentColor mask) */
   border-radius: 2px;
   cursor: pointer;
@@ -505,7 +516,7 @@ body.annotate-themed {
 }
 .annotate-mark-edit {
   background: var(--annotate-mark-edit-rest);
-  box-shadow: inset 0 -1px 0 0 var(--annotate-pin-edit);
+  box-shadow: inset 0 -2px 0 0 var(--annotate-mark-edit-line-rest);
   color: var(--annotate-pin-edit);
 }
 /* the inline, text-height marker icon — once per mark chain (the --lead fragment). An inline-block
@@ -522,25 +533,34 @@ body.annotate-themed {
   background-color: currentColor;
   -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 640 640'%3E%3Cpath d='M104.2 562.2L64 576C71.4 557.9 88.7 515.4 115.8 448.8C83.3 408.6 64 358.4 64 304C64 171.5 178.6 64 320 64C461.4 64 576 171.5 576 304C576 436.5 461.4 544 320 544C283.2 544 248.1 536.7 216.5 523.6L104.2 562.2z'/%3E%3C/svg%3E") center / contain no-repeat;
   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 640 640'%3E%3Cpath d='M104.2 562.2L64 576C71.4 557.9 88.7 515.4 115.8 448.8C83.3 408.6 64 358.4 64 304C64 171.5 178.6 64 320 64C461.4 64 576 171.5 576 304C576 436.5 461.4 544 320 544C283.2 544 248.1 536.7 216.5 523.6L104.2 562.2z'/%3E%3C/svg%3E") center / contain no-repeat;
-  opacity: 0.9;
+  opacity: 0.4; /* faint at rest; --hover/--active intensify it to 1 (opacity on the pseudo-element only — never the span, so the document text is never faded) */
+  transition: opacity 0.12s ease;
 }
 .annotate-mark-edit.annotate-mark--lead::before {
   -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cpath d='M362.7 19.3L314.3 67.7 444.3 197.7 492.7 149.3c25-25 25-65.5 0-90.5L453.3 19.3c-25-25-65.5-25-90.5 0zm-71 71L58.6 323.5c-10.4 10.4-18 23.3-22.2 37.4L1 481.2C-1.5 489.7 .8 498.8 7 505s15.3 8.5 23.7 6.1l120.3-35.4c14.1-4.2 27-11.8 37.4-22.2L421.7 220.3 291.7 90.3z'/%3E%3C/svg%3E");
   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cpath d='M362.7 19.3L314.3 67.7 444.3 197.7 492.7 149.3c25-25 25-65.5 0-90.5L453.3 19.3c-25-25-65.5-25-90.5 0zm-71 71L58.6 323.5c-10.4 10.4-18 23.3-22.2 37.4L1 481.2C-1.5 489.7 .8 498.8 7 505s15.3 8.5 23.7 6.1l120.3-35.4c14.1-4.2 27-11.8 37.4-22.2L421.7 220.3 291.7 90.3z'/%3E%3C/svg%3E");
 }
-/* HOVER / active (composer open) -> the full compose-style fill (matches .annotate-composer-word).
-   These overrides come AFTER the resting rules so they win. Multi-node marks intensify per
-   fragment on :hover; the --active class (JS-set while the composer is open) lights every fragment
-   of the entry at once. */
-.annotate-mark:hover,
+/* HOVER / active (composer open) -> the strong-alpha state (compose-style fill, matching
+   .annotate-composer-word). These overrides come AFTER the resting rules so they win. The intensify
+   is purely alpha: the background tint goes to its compose fill, the underline alpha jumps to
+   --*-line-hover, and the lead ::before icon goes opaque — the underline THICKNESS never changes.
+   --hover is JS-set (content.js setEntryMarkHover) on EVERY fragment of an entry when ANY fragment
+   is moused over, so a quote split across <em>/<code> lights all its fragments + the lead icon at
+   once (a CSS :hover could only reach the hovered fragment). --active is JS-set while the composer
+   is open. Both map to the same strong state. */
+.annotate-mark.annotate-mark--hover,
 .annotate-mark.annotate-mark--active {
   background: var(--annotate-hover);
-  box-shadow: inset 0 -2px 0 0 var(--annotate-accent);
+  box-shadow: inset 0 -2px 0 0 var(--annotate-mark-line-hover);
 }
-.annotate-mark-edit:hover,
+.annotate-mark-edit.annotate-mark--hover,
 .annotate-mark-edit.annotate-mark--active {
   background: var(--annotate-edit-hover);
-  box-shadow: inset 0 -2px 0 0 var(--annotate-pin-edit);
+  box-shadow: inset 0 -2px 0 0 var(--annotate-mark-edit-line-hover);
+}
+.annotate-mark--lead.annotate-mark--hover::before,
+.annotate-mark--lead.annotate-mark--active::before {
+  opacity: 1;
 }
 
 /* ---- composer ---- */

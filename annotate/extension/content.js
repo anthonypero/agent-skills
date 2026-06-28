@@ -1375,6 +1375,9 @@
         e.stopPropagation();
         openComposerForEntry(entry, markPoint(span));
       });
+      // group-hover: lighting ANY fragment intensifies ALL fragments of this entry (+ lead icon).
+      span.addEventListener('mouseenter', function () { setEntryMarkHover(entry, true); });
+      span.addEventListener('mouseleave', function () { setEntryMarkHover(entry, false); });
     });
     entry.markSpans = spans;
     // splitText invalidated the old boundary nodes — re-resolve so the cached range + the compose
@@ -1405,6 +1408,17 @@
     if (!entry || !entry.markSpans) return;
     entry.markSpans.forEach(function (span) {
       if (span && span.classList) span.classList.toggle('annotate-mark--active', !!on);
+    });
+  }
+
+  // Group-hover (dogfood-8 a1): toggle the strong-alpha --hover state on EVERY fragment of one
+  // entry — wired to mouseenter/mouseleave of any single fragment — so hovering one chunk of a
+  // quote split across <em>/<code> lights the whole mark + its lead icon (a CSS :hover can only
+  // reach the hovered fragment). Mirrors setEntryMarkActive; --hover and --active share CSS.
+  function setEntryMarkHover(entry, on) {
+    if (!entry || !entry.markSpans) return;
+    entry.markSpans.forEach(function (span) {
+      if (span && span.classList) span.classList.toggle('annotate-mark--hover', !!on);
     });
   }
 
