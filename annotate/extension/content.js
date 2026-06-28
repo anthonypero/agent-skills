@@ -589,10 +589,14 @@
     }
     drafts.length = 0;
     comments.forEach(function (entry) {
+      unwrapEntryMarks(entry); // v2.5 a4 — restore the wrapped text before dropping the entry
       if (entry.pin && entry.pin.parentNode) entry.pin.remove();
       if (entry.listItem && entry.listItem.parentNode) entry.listItem.remove();
     });
     comments.length = 0;
+    // v2.5 a3 — clear any region outline left from a pin that was hovered when Clear fired.
+    const hovered = doc.querySelectorAll('.annotate-render [data-annotate-hover]');
+    for (let i = 0; i < hovered.length; i++) hovered[i].removeAttribute('data-annotate-hover');
     // Spatial anchors also leave a persistent region marker over the image (§B addDraft).
     const markers = doc.querySelectorAll('.annotate-marker');
     for (let i = 0; i < markers.length; i++) markers[i].remove();
@@ -767,6 +771,7 @@
     const c = doc.querySelector('.annotate-composer');
     if (c) c.remove();
     clearComposerTarget(); // Fix #1: drop the target highlight when the composer closes/cancels
+    clearMarkActive(); // v2.5 a4: drop the inline-mark active highlight too
     pending = null;
   }
 
@@ -1265,7 +1270,7 @@
   // `targetRange` (a cloned Range from a real TEXT selection) is kept so the pin can sit ON
   // the selected words rather than the line's far-left gutter; null for block/line anchors.
   function registerComment(item, targetRange) {
-    const entry = { item: item, pin: null, listItem: null, anchorEl: null, originEl: null, targetRange: targetRange || null };
+    const entry = { item: item, pin: null, listItem: null, anchorEl: null, originEl: null, targetRange: targetRange || null, markSpans: [] };
     entry.anchorEl =
       item.anchor.kind === 'spatial' ? (doc.querySelector('.annotate-image img') || null) : elementForAnchor(item.anchor);
     // v2.4 §C.4 — a `text` anchor re-finds its quote on render: resolve the range ONCE here (so a
@@ -1282,7 +1287,139 @@
     appendSidebarItem(entry.listItem);
     comments.push(entry);
     schedulePinReposition();
+    // v2.5 a4 — an inline `text` anchor shows AS A MARK (not a pin): wrap its resolved range now.
+    if (item.anchor && item.anchor.kind === 'text') wrapEntryMarks(entry);
     return entry;
+  }
+
+  // ---------------------------------------------------------------------------
+  // v2.5 a4 — INLINE MARKS for `text` anchors. An inline comment/edit is shown by WRAPPING its
+  // resolved range in <span class="annotate-mark"> (+ .annotate-mark-edit for an edit) right in
+  // the rendered DOM — NOT a floating pin. The span rides the text on scroll for free, is
+  // naturally clickable, and underlines naturally. ui.css gives it a LIGHT resting tint that
+  // intensifies to the full compose-style fill on hover / when active. The range can CROSS inline
+  // nodes (e.g. a quote spanning <em>/<code>), so we wrap PER TEXT-NODE fragment
+  // (range.surroundContents would THROW on a multi-node range); only the FIRST fragment gets
+  // .annotate-mark--lead, so the ::before icon renders ONCE at the start.
+  // ---------------------------------------------------------------------------
+
+  // Wrap every text-node fragment of `range` in its own .annotate-mark span, returning the spans
+  // in document order. Splits the start/end text nodes at the offsets; skips text already inside
+  // the annotate UI or an existing mark (no nesting). `extraClass` adds the edit color variant.
+  function markRange(range, extraClass) {
+    if (!range) return [];
+    const startNode = range.startContainer;
+    const startOff = range.startOffset;
+    const endNode = range.endContainer;
+    const endOff = range.endOffset;
+    if (!startNode || !endNode || startNode.nodeType !== 3 || endNode.nodeType !== 3) return [];
+    const cac = range.commonAncestorContainer;
+    const rootEl = cac.nodeType === 1 ? cac : cac.parentElement;
+    if (!rootEl) return [];
+    // Collect the text nodes from start to end (inclusive), in document order.
+    const targets = [];
+    if (startNode === endNode) {
+      targets.push(startNode);
+    } else {
+      const SHOW_TEXT = (root.NodeFilter && root.NodeFilter.SHOW_TEXT) || 4;
+      const walker = doc.createTreeWalker(rootEl, SHOW_TEXT, null);
+      let n;
+      let on = false;
+      while ((n = walker.nextNode())) {
+        if (n === startNode) on = true;
+        if (on) targets.push(n);
+        if (n === endNode) break;
+      }
+    }
+    const spans = [];
+    for (let i = 0; i < targets.length; i++) {
+      let node = targets[i];
+      const pe = node.parentElement;
+      if (!pe || (pe.closest && (pe.closest('.annotate-ui') || pe.closest('.annotate-mark')))) continue;
+      const len = (node.nodeValue || '').length;
+      let from = node === startNode ? startOff : 0;
+      let to = node === endNode ? endOff : len;
+      if (from < 0) from = 0;
+      if (to > len) to = len;
+      if (from >= to) continue;
+      // carve out exactly [from, to): split the tail first (keeps `from` valid), then the head.
+      if (to < len) node.splitText(to);
+      if (from > 0) node = node.splitText(from);
+      const span = doc.createElement('span');
+      span.className = 'annotate-mark' + (extraClass ? ' ' + extraClass : '');
+      node.parentNode.replaceChild(span, node);
+      span.appendChild(node);
+      spans.push(span);
+    }
+    if (spans.length) spans[0].classList.add('annotate-mark--lead');
+    return spans;
+  }
+
+  // (Re)wrap an inline `text` entry's marks. Unwraps any existing spans FIRST (so marks never nest
+  // or double — e.g. after an edit that flips comment<->edit and changes the color class),
+  // re-resolves a FRESH range against the current DOM, wraps it, wires each span to reopen the
+  // composer, then refreshes entry.targetRange from the post-wrap DOM (splitText moved the boundary
+  // nodes). No-op when the quote can't be re-found. Block anchors have no marks.
+  function wrapEntryMarks(entry) {
+    if (!entry || !entry.item || !entry.item.anchor || entry.item.anchor.kind !== 'text') return;
+    unwrapEntryMarks(entry);
+    const range = rangeForTextAnchor(entry.item.anchor);
+    if (!range) { entry.markSpans = []; return; }
+    const isEdit = entry.item.type === 'edit';
+    const spans = markRange(range, isEdit ? 'annotate-mark-edit' : null);
+    spans.forEach(function (span) {
+      // swallow mousedown so a click on the mark never collapses a selection / reaches the page.
+      span.addEventListener('mousedown', function (e) { e.preventDefault(); });
+      span.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        openComposerForEntry(entry, markPoint(span));
+      });
+    });
+    entry.markSpans = spans;
+    // splitText invalidated the old boundary nodes — re-resolve so the cached range + the compose
+    // overlay redraw against the wrapped DOM.
+    entry.targetRange = rangeForTextAnchor(entry.item.anchor) || entry.targetRange;
+  }
+
+  // Unwrap an entry's mark spans: lift each span's text back out and normalize the parent so the
+  // resolver re-walks intact text. Safe with no spans.
+  function unwrapEntryMarks(entry) {
+    if (!entry) return;
+    const spans = entry.markSpans;
+    entry.markSpans = [];
+    if (!spans || !spans.length) return;
+    const parents = [];
+    spans.forEach(function (span) {
+      const parent = span.parentNode;
+      if (!parent) return;
+      while (span.firstChild) parent.insertBefore(span.firstChild, span);
+      parent.removeChild(span);
+      if (parents.indexOf(parent) < 0) parents.push(parent);
+    });
+    parents.forEach(function (p) { if (p && typeof p.normalize === 'function') p.normalize(); });
+  }
+
+  // Toggle the active (full-fill) state on every mark of one entry while its composer is open.
+  function setEntryMarkActive(entry, on) {
+    if (!entry || !entry.markSpans) return;
+    entry.markSpans.forEach(function (span) {
+      if (span && span.classList) span.classList.toggle('annotate-mark--active', !!on);
+    });
+  }
+
+  // Drop the active state from every inline mark (called when any composer closes).
+  function clearMarkActive() {
+    const rootEl = renderRoot();
+    if (!rootEl || typeof rootEl.querySelectorAll !== 'function') return;
+    const active = rootEl.querySelectorAll('.annotate-mark--active');
+    for (let i = 0; i < active.length; i++) active[i].classList.remove('annotate-mark--active');
+  }
+
+  // Viewport bottom-left of a mark span (mirrors pinPoint), where its reopened composer mounts.
+  function markPoint(node) {
+    const r = node.getBoundingClientRect();
+    return { x: r.left, y: r.bottom };
   }
 
   // The semi-transparent, type-colored ICON pin (§B). RESTING = just the SOLID/filled glyph
@@ -1305,6 +1442,11 @@
       'aria-label': 'Saved ' + entry.item.type + ' — click to edit',
     }, [restIcon, hoverIcon]);
     setAnchorAttrs(pin, entry.item.anchor);
+    // v2.5 a4 — a `text` anchor is shown by its INLINE MARK, not a floating pin: keep the pin
+    // element (so the entry's edit/flash plumbing stays uniform) but never render it. Belt-and-
+    // braces with anchorViewportPoint returning null for text (which would hide it anyway), this
+    // avoids a one-frame flash at the page origin before the first reposition tick.
+    if (entry.item.anchor && entry.item.anchor.kind === 'text') pin.style.display = 'none';
     // Swallow mousedown so a pin-click never collapses a selection / reaches the page.
     pin.addEventListener('mousedown', function (e) { e.preventDefault(); });
     pin.addEventListener('click', function (e) {
@@ -1312,6 +1454,11 @@
       e.stopPropagation();
       onPinClick(entry);
     });
+    // v2.5 a3 — hovering a BLOCK pin outlines its anchored region BEFORE you click (the
+    // composer-target overlay already shows it once clicked). Inline (text) marks show at rest +
+    // intensify on their own hover, and the image adapter owns spatial markers — both excluded.
+    pin.addEventListener('mouseenter', function () { setPinRegionHover(entry, true); });
+    pin.addEventListener('mouseleave', function () { setPinRegionHover(entry, false); });
     return pin;
   }
 
@@ -1319,17 +1466,26 @@
   // populated with its existing content, in edit mode (the same composer the sidebar "Edit"
   // button opens). Opens in place at the pin. (Previously this branched on the sidebar's
   // open/closed state and only revealed the row when open — that reveal path is retired.)
-  function onPinClick(entry) {
-    openComposerAt(pinPoint(entry.pin), {
+  // §B reopen (pin OR inline mark) — open the full composer to EDIT this annotation in place,
+  // populated with its content, at `point`. Factored out of onPinClick so the v2.5 a4 inline-mark
+  // click reuses the EXACT same path. Re-supplies a targetRange so the reopened composer redraws
+  // the per-word overlay (composerWordNodes) rather than the whole-block box; for a `text` anchor
+  // with no live range cached, re-find the quote; non-text anchors yield null and keep the box.
+  function openComposerForEntry(entry, point) {
+    openComposerAt(point, {
       anchor: entry.item.anchor,
       element: entry.anchorEl,
       editEntry: entry,
       selectedText: entry.item.type === 'edit' ? (entry.item.original || entry.item.replacement || '') : '',
-      // v2.4 §D — re-supply a targetRange so the reopened composer redraws the per-word overlay
-      // (composerWordNodes) rather than the whole-block box. For a `text` anchor with no live
-      // range cached, re-find the quote; non-text anchors yield null and keep the block box.
       targetRange: entry.targetRange || rangeForTextAnchor(entry.item.anchor),
     });
+    // v2.5 a4 — light this entry's inline marks while its composer is open (cleared by
+    // closeComposer). No-op for block anchors (they have no marks).
+    setEntryMarkActive(entry, true);
+  }
+
+  function onPinClick(entry) {
+    openComposerForEntry(entry, pinPoint(entry.pin));
   }
 
   function pinPoint(pin) {
@@ -1351,26 +1507,11 @@
       const p = a.point || (a.box ? [a.box[0], a.box[1]] : [0, 0]);
       return { x: r.left + p[0] * r.width, y: r.top + p[1] * r.height };
     }
-    // v2.4 §C.3 — a quote-based `text` anchor re-finds its quote on EVERY tick (so the pin keeps
-    // tracking even after a DOM mutation), refreshes entry.targetRange from the fresh range so the
-    // cache can't go stale, then floats the pin just ABOVE the words (leading edge nudged up ~one
-    // pin height). If the quote is (temporarily) un-findable, degrade gracefully to the enclosing
-    // block's left gutter via the originEl captured at register time — never crash.
-    if (a.kind === 'text') {
-      const fresh = rangeForTextAnchor(a);
-      if (fresh) {
-        entry.targetRange = fresh;
-        try {
-          const rr = fresh.getBoundingClientRect();
-          if (rr && (rr.width > 0 || rr.height > 0)) return { x: rr.left, y: rr.top - 22 };
-        } catch (e) { /* fall through to the block gutter */ }
-      }
-      let originEl = entry.originEl;
-      if (!originEl || !doc.contains(originEl)) originEl = elementForAnchor(a);
-      if (!originEl) return null;
-      const orr = originEl.getBoundingClientRect();
-      return { x: Math.max(2, orr.left - 22), y: orr.top };
-    }
+    // v2.5 a4 — a `text` anchor NO LONGER draws a floating pin: its on-canvas affordance + click
+    // target is the INLINE MARK (.annotate-mark, wrapped over the resolved range at register time;
+    // see wrapEntryMarks). Returning null makes repositionPins hide the pin, so an inline
+    // comment/edit reads as the mark only. (makePin also display:none's a text pin up front.)
+    if (a.kind === 'text') return null;
     // Text-anchored selection that resolved to a SOURCE anchor (whole-block select): float the pin
     // just ABOVE the selected words — the cloned range's leading edge nudged up ~one pin height so
     // it sits over the words, not on them (v2). DISPLAY-only nudge. The cloned range stays live as
@@ -1441,6 +1582,9 @@
     const fresh = makeSidebarItem(entry);
     if (entry.listItem && entry.listItem.parentNode) entry.listItem.parentNode.replaceChild(fresh, entry.listItem);
     entry.listItem = fresh;
+    // v2.5 a4 — re-wrap inline marks: the type may have flipped (comment<->edit), changing the
+    // mark color class; wrapEntryMarks unwraps the old spans first so marks never nest/double.
+    if (entry.item.anchor && entry.item.anchor.kind === 'text') wrapEntryMarks(entry);
     updateSendCount();
     setStatus('Comment updated');
     schedulePinReposition();
@@ -1644,6 +1788,18 @@
     if (!elx || !elx.classList) return;
     elx.classList.add('annotate-region-flash');
     root.setTimeout(function () { elx.classList.remove('annotate-region-flash'); }, 1600);
+  }
+
+  // v2.5 a3 — toggle a persistent region OUTLINE on the block an entry's pin anchors, while the
+  // pin is hovered (ui.css styles [data-annotate-hover]). Block anchors only: inline `text` marks
+  // carry their own at-rest highlight, and spatial anchors are owned by the image adapter.
+  function setPinRegionHover(entry, on) {
+    const a = entry.item.anchor;
+    if (!a || a.kind === 'text' || a.kind === 'spatial') return;
+    const elx = resolveAnchorEl(entry);
+    if (!elx || typeof elx.setAttribute !== 'function') return;
+    if (on) elx.setAttribute('data-annotate-hover', '1');
+    else elx.removeAttribute('data-annotate-hover');
   }
 
   // ---------------------------------------------------------------------------

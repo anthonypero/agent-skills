@@ -40,6 +40,8 @@
   --annotate-code-bg: #f2f4f7;
   --annotate-hover: rgba(47, 111, 237, 0.10);
   --annotate-edit-hover: rgba(240, 160, 32, 0.14); /* §E.3 EDIT-mode composing-overlay fill (amber) */
+  --annotate-mark-rest: rgba(47, 111, 237, 0.06); /* v2.5 a4 inline-comment mark resting tint (light) */
+  --annotate-mark-edit-rest: rgba(240, 160, 32, 0.09); /* v2.5 a4 inline-edit mark resting tint (light) */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -67,6 +69,8 @@
     --annotate-code-bg: #1a1d24;
     --annotate-hover: rgba(76, 141, 255, 0.14);
     --annotate-edit-hover: rgba(242, 187, 77, 0.16); /* §E.3 EDIT-mode composing-overlay fill (dark amber) */
+    --annotate-mark-rest: rgba(76, 141, 255, 0.12); /* v2.5 a4 inline-comment mark resting tint (dark) */
+    --annotate-mark-edit-rest: rgba(242, 187, 77, 0.12); /* v2.5 a4 inline-edit mark resting tint (dark) */
   }
 }
 
@@ -479,6 +483,64 @@ body.annotate-themed {
 .annotate-composer-target.annotate-edit {
   outline-color: var(--annotate-pin-edit);
   background: var(--annotate-edit-hover);
+}
+
+/* ===========================================================================
+   v2.5 a4 — INLINE MARKS for `text` anchors. An inline comment/edit is wrapped (in the rendered
+   DOM, per text-node fragment) in <span class="annotate-mark">; the FIRST fragment also carries
+   .annotate-mark--lead so the ::before icon renders ONCE. AT REST: a LIGHT type-tinted highlight +
+   a faint highlighter underline + a text-height inline icon — comment = blue (--annotate-accent),
+   edit = yellow (--annotate-pin-edit) — so a doc reads like tracked changes. HOVER / active
+   (composer open) intensifies to the full compose-style fill, matching .annotate-composer-word.
+   LAYOUT-SAFETY (hard constraint): pure inline flow — the icon is an inline-block em-box that
+   nudges the following text right a hair; NEVER position:absolute, no transforms, no overflow, so
+   inserting a mark cannot disturb a host page's layout. */
+.annotate-mark {
+  background: var(--annotate-mark-rest);
+  box-shadow: inset 0 -1px 0 0 var(--annotate-accent); /* faint resting underline */
+  color: var(--annotate-accent); /* drives the ::before icon tint (currentColor mask) */
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background 0.12s ease, box-shadow 0.12s ease;
+}
+.annotate-mark-edit {
+  background: var(--annotate-mark-edit-rest);
+  box-shadow: inset 0 -1px 0 0 var(--annotate-pin-edit);
+  color: var(--annotate-pin-edit);
+}
+/* the inline, text-height marker icon — once per mark chain (the --lead fragment). An inline-block
+   em-box masked to the comment-bubble glyph (the pen for an edit), tinted by the mark's color via
+   currentColor. Sized in em so it tracks the text; a small right margin shifts following text a
+   hair. Pure inline flow: NO position/transform/overflow. */
+.annotate-mark--lead::before {
+  content: "";
+  display: inline-block;
+  width: 0.82em;
+  height: 0.82em;
+  margin-right: 0.14em;
+  vertical-align: -0.1em; /* sit on the text, not above it — an offset, never absolute positioning */
+  background-color: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 640 640'%3E%3Cpath d='M104.2 562.2L64 576C71.4 557.9 88.7 515.4 115.8 448.8C83.3 408.6 64 358.4 64 304C64 171.5 178.6 64 320 64C461.4 64 576 171.5 576 304C576 436.5 461.4 544 320 544C283.2 544 248.1 536.7 216.5 523.6L104.2 562.2z'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 640 640'%3E%3Cpath d='M104.2 562.2L64 576C71.4 557.9 88.7 515.4 115.8 448.8C83.3 408.6 64 358.4 64 304C64 171.5 178.6 64 320 64C461.4 64 576 171.5 576 304C576 436.5 461.4 544 320 544C283.2 544 248.1 536.7 216.5 523.6L104.2 562.2z'/%3E%3C/svg%3E") center / contain no-repeat;
+  opacity: 0.9;
+}
+.annotate-mark-edit.annotate-mark--lead::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cpath d='M362.7 19.3L314.3 67.7 444.3 197.7 492.7 149.3c25-25 25-65.5 0-90.5L453.3 19.3c-25-25-65.5-25-90.5 0zm-71 71L58.6 323.5c-10.4 10.4-18 23.3-22.2 37.4L1 481.2C-1.5 489.7 .8 498.8 7 505s15.3 8.5 23.7 6.1l120.3-35.4c14.1-4.2 27-11.8 37.4-22.2L421.7 220.3 291.7 90.3z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Cpath d='M362.7 19.3L314.3 67.7 444.3 197.7 492.7 149.3c25-25 25-65.5 0-90.5L453.3 19.3c-25-25-65.5-25-90.5 0zm-71 71L58.6 323.5c-10.4 10.4-18 23.3-22.2 37.4L1 481.2C-1.5 489.7 .8 498.8 7 505s15.3 8.5 23.7 6.1l120.3-35.4c14.1-4.2 27-11.8 37.4-22.2L421.7 220.3 291.7 90.3z'/%3E%3C/svg%3E");
+}
+/* HOVER / active (composer open) -> the full compose-style fill (matches .annotate-composer-word).
+   These overrides come AFTER the resting rules so they win. Multi-node marks intensify per
+   fragment on :hover; the --active class (JS-set while the composer is open) lights every fragment
+   of the entry at once. */
+.annotate-mark:hover,
+.annotate-mark.annotate-mark--active {
+  background: var(--annotate-hover);
+  box-shadow: inset 0 -2px 0 0 var(--annotate-accent);
+}
+.annotate-mark-edit:hover,
+.annotate-mark-edit.annotate-mark--active {
+  background: var(--annotate-edit-hover);
+  box-shadow: inset 0 -2px 0 0 var(--annotate-pin-edit);
 }
 
 /* ---- composer ---- */
@@ -1047,6 +1109,17 @@ body[data-annotate-width="wide"] .annotate-markdown .annotate-section > :not(.an
 /* anchored-span highlight + accepted/submitted affordances */
 .annotate-render [data-annotate-active] {
   background: var(--annotate-hover);
+}
+/* v2.5 a3 — a BLOCK anchor's region outlines on HOVER of its pin (content.js toggles
+   data-annotate-hover), so you can see the commented section BEFORE clicking it — not only while
+   the composer is open (which already draws the .annotate-composer-target outline). Same look as
+   the sidebar-navigation .annotate-region-flash, but persistent for the duration of the hover.
+   Inline (text) anchors are excluded — their .annotate-mark already shows at rest. */
+.annotate-render [data-annotate-hover] {
+  outline: 2px solid var(--annotate-accent);
+  outline-offset: 3px;
+  background: var(--annotate-hover);
+  border-radius: 4px;
 }
 body.annotate-submitted .annotate-send {
   opacity: 0.7;
