@@ -44,9 +44,13 @@
       original: selected,
       replacement: '',
       elementContext: opts.elementContext || null,
-      // v2.2 §I: the stored filename of a user-attached image (copied into the round folder
-      // on select). null = no attachment. Distinct from the tool's auto-capture screenshot.
-      attachment: opts.attachment != null && opts.attachment !== '' ? String(opts.attachment) : null,
+      // v2.6 §2: the stored filenames of user-attached images (copied into the round folder
+      // on select). [] = none. Distinct from the tool's auto-capture screenshot. A comment may
+      // carry MANY attachments; a 2nd upload APPENDS (the v2.5 single-slot overwrite bug is gone).
+      // Init from a plural `opts.attachments` array, else wrap a legacy singular `opts.attachment`.
+      attachments: Array.isArray(opts.attachments)
+        ? opts.attachments.filter((n) => n != null && n !== '').map(String)
+        : (opts.attachment != null && opts.attachment !== '' ? [String(opts.attachment)] : []),
     };
 
     let api; // forward ref for chaining
@@ -73,9 +77,27 @@
     function setOriginal(s) { state.original = s == null ? '' : String(s); return api; }
     function setReplacement(s) { state.replacement = s == null ? '' : String(s); return api; }
     function setAnchor(a) { state.anchor = a; return api; }
-    // v2.2 §I: record / clear the user-image attachment (the server-stored filename). null or
-    // '' clears it. Independent of the comment/edit type — an attachment may ride either.
-    function setAttachment(name) { state.attachment = name == null || name === '' ? null : String(name); return api; }
+    // v2.6 §2: ACCUMULATE user-image attachments (the server-stored filenames). An attachment
+    // may ride either comment/edit type. addAttachment APPENDS (deduped) so a 2nd upload no longer
+    // overwrites the 1st; removeAttachment drops the reference only (the server file is untouched —
+    // orphan cleanup is out of scope). setAttachments replaces the whole list (reopen-seeding).
+    function addAttachment(name) {
+      if (name == null || name === '') return api;
+      const s = String(name);
+      if (state.attachments.indexOf(s) === -1) state.attachments.push(s);
+      return api;
+    }
+    function removeAttachment(name) {
+      const s = String(name);
+      state.attachments = state.attachments.filter((n) => n !== s);
+      return api;
+    }
+    function setAttachments(arr) {
+      state.attachments = Array.isArray(arr)
+        ? arr.filter((n) => n != null && n !== '').map(String)
+        : [];
+      return api;
+    }
 
     // A bubble is submittable when its required §5.2 fields are non-empty for its type.
     // (replacement MAY equal original — an intentional "keep as-is" edit; only emptiness
@@ -99,7 +121,8 @@
         item.replacement = state.replacement;
       }
       if (state.elementContext) item.elementContext = state.elementContext;
-      if (state.attachment) item.attachment = state.attachment; // v2.2 §I
+      // v2.6 §2: emit the plural array only when non-empty; never the deprecated singular form.
+      if (state.attachments.length) item.attachments = state.attachments.slice();
       return item;
     }
 
@@ -109,8 +132,9 @@
       get original() { return state.original; },
       get replacement() { return state.replacement; },
       get anchor() { return state.anchor; },
-      get attachment() { return state.attachment; },
-      setType, toggle, setComment, setOriginal, setReplacement, setAnchor, setAttachment,
+      get attachments() { return state.attachments.slice(); },
+      setType, toggle, setComment, setOriginal, setReplacement, setAnchor,
+      addAttachment, removeAttachment, setAttachments,
       isComplete, toFeedback,
     };
     return api;

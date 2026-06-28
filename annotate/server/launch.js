@@ -211,15 +211,18 @@ async function cmdWait(args) {
       // on first look — both mean the human acted, §5.1/§5.5).
       if (round && round.status && round.status !== 'pending') {
         const resolvedSnapshot = round.snapshot != null ? round.snapshot : guid; // snapshot ?? own_guid (§5.4)
-        // v2.2 §I: a feedback item carrying an `attachment` filename gets a resolved absolute
-        // `attachmentPath` under THIS round's dir, so the agent can read the user-attached image
-        // off disk — same spirit as the resolved `snapshot` pointer (kept off the persisted
-        // round.json; computed here for the bundle only). The attachment lives in the dir of the
-        // round being polled (`guid`), not the snapshot pointer (revert leaves it here).
+        // v2.6 §5 (was v2.2 §I): a feedback item carrying attachment filenames gets resolved
+        // absolute `attachmentPaths[]` under THIS round's dir, so the agent can read the
+        // user-attached images off disk — same spirit as the resolved `snapshot` pointer (kept off
+        // the persisted round.json; computed here for the bundle only). The attachments live in the
+        // dir of the round being polled (`guid`), not the snapshot pointer (revert leaves them here).
+        // Tolerate the legacy singular `attachment` (deprecated alias) alongside the plural array.
         const rDir = P.roundDir(dataDir, session, artifact, guid);
         const feedback = (round.feedback || []).map((f) => {
-          if (f && typeof f.attachment === 'string' && f.attachment) {
-            return Object.assign({}, f, { attachmentPath: path.join(rDir, f.attachment) });
+          const names = f && Array.isArray(f.attachments) ? f.attachments
+            : (f && typeof f.attachment === 'string' && f.attachment) ? [f.attachment] : [];
+          if (names.length) {
+            return Object.assign({}, f, { attachmentPaths: names.map((nm) => path.join(rDir, nm)) });
           }
           return f;
         });

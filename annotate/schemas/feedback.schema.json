@@ -42,8 +42,13 @@
       }
     },
     "attachment": {
-      "description": "Optional (v2.2 §I): the stored filename of a user-attached image copied into this round's folder ON SELECT (e.g. <guid>-attach-<n>.<ext>). Distinct from the tool's auto-capture <guid>-screenshot.png. The server writes the bytes (POST /<session>/<artifact>/attach) and the extension references the returned filename here; `annotate poll` resolves it to an absolute on-disk path (attachmentPath) for the agent to read. Omitted when the comment has no attached image — existing comment/edit items validate unchanged.",
+      "description": "Optional (v2.2 §I): the stored filename of a user-attached image copied into this round's folder ON SELECT (e.g. <guid>-attach-<n>.<ext>). Distinct from the tool's auto-capture <guid>-screenshot.png. The server writes the bytes (POST /<session>/<artifact>/attach) and the extension references the returned filename here; `annotate poll` resolves it to an absolute on-disk path (attachmentPath) for the agent to read. Omitted when the comment has no attached image — existing comment/edit items validate unchanged. DEPRECATED in v2.6 in favor of the plural `attachments` array (kept as a back-compat alias so old on-disk feedback still validates); new writes never emit this singular form.",
       "type": "string"
+    },
+    "attachments": {
+      "description": "Optional (v2.6): stored filenames of user-attached images copied into this round's folder ON SELECT (each <guid>-attach-<n>.<ext>). Supersedes the singular `attachment` (kept as a deprecated alias). `annotate poll` resolves each to an absolute attachmentPath. Omitted when none.",
+      "type": "array",
+      "items": { "type": "string" }
     }
   },
   "allOf": [

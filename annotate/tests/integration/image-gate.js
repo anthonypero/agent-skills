@@ -325,10 +325,13 @@ async function main() {
     const atSubmit = await waitFor('attachment round submit result', async () =>
       (await cdp.evaluate(`document.getElementById('annotate-chrome').getAttribute('data-last-submit')`)) || null);
     const diskAt = JSON.parse(fs.readFileSync(roundFileOf(atRound.session, atRound.artifact, atRound.guid), 'utf8'));
-    const refItem = diskAt.feedback.find((f) => f.attachment);
+    // v2.6: items now carry an `attachments` array (legacy singular `attachment` still tolerated).
+    const refNamesOf = (f) => Array.isArray(f.attachments) ? f.attachments : (f.attachment ? [f.attachment] : []);
+    const refItem = diskAt.feedback.find((f) => refNamesOf(f).length);
+    const refNames = refItem ? refNamesOf(refItem) : [];
     ok('attach: the submitted feedback REFERENCES the attachment filename (round-trips to disk)',
-      atSubmit === 'submitted' && diskAt.status === 'submitted' && !!refItem && refItem.attachment === storedName,
-      `submit=${atSubmit}; status=${diskAt.status}; ref=${refItem && refItem.attachment}`);
+      atSubmit === 'submitted' && diskAt.status === 'submitted' && refNames.includes(storedName),
+      `submit=${atSubmit}; status=${diskAt.status}; ref=${refNames.join(',') || undefined}`);
     // NOTE: `annotate poll` exposing the resolved on-disk attachmentPath is covered by the
     // unit gate tests/launch.test.js ("poll bundle surfaces an on-disk attachmentPath … §I"),
     // since poll is the CLI leg (not drivable from this in-page CDP harness).

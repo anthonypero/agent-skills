@@ -982,33 +982,54 @@
     const attachBtn = el('button', { class: 'annotate-btn annotate-attach-btn annotate-icon-btn', type: 'button' });
     attachBtn.appendChild(svgIcon(ICON_PAPERCLIP));
     setBtnLabel(attachBtn, 'Attach an image to this comment');
-    const attachThumb = el('img', { class: 'annotate-attach-thumb', alt: 'attachment preview' });
-    const attachName = el('span', { class: 'annotate-attach-name' });
-    const attachRemove = el('button', { class: 'annotate-btn annotate-attach-remove annotate-icon-btn', type: 'button', text: '×' });
-    setBtnLabel(attachRemove, 'Remove attachment');
-    const attachPreview = el('div', { class: 'annotate-attach-preview' }, [attachThumb, attachName, attachRemove]);
-    const attachRow = el('div', { class: 'annotate-attach-row' }, [attachBtn, attachPreview, attachInput]);
+    // v2.6 §3: a GALLERY of attachments (one `.annotate-attach-item` each) — a comment may carry
+    // MANY images. The paperclip ALWAYS adds more (never consumed by an existing attachment); each
+    // upload APPENDS a fresh item (the v2.5 single-slot overwrite bug is gone).
+    const attachGallery = el('div', { class: 'annotate-attach-gallery' });
+    const attachRow = el('div', { class: 'annotate-attach-row' }, [attachBtn, attachGallery, attachInput]);
 
-    function clearAttachment() {
-      bubble.setAttachment(null);
-      attachThumb.removeAttribute('src');
-      attachName.textContent = '';
-      attachRow.classList.remove('annotate-has-attach');
-      card.removeAttribute('data-attachment');
-      attachInput.value = '';
+    // Reflect the bubble's attachment list onto the composer for the image-gate test hooks:
+    // `data-attachments` (comma-joined) + `data-attachment-count`; `data-attachment` stays the
+    // FIRST filename for back-compat with any external reader.
+    function syncAttachData() {
+      const names = bubble.attachments;
+      attachRow.classList.toggle('annotate-has-attach', names.length > 0);
+      card.setAttribute('data-attachment-count', String(names.length));
+      if (names.length) {
+        card.setAttribute('data-attachments', names.join(','));
+        card.setAttribute('data-attachment', names[0]);
+      } else {
+        card.removeAttribute('data-attachments');
+        card.removeAttribute('data-attachment');
+      }
     }
-    function showAttachment(filename, previewSrc, label) {
-      bubble.setAttachment(filename);
-      if (previewSrc) attachThumb.src = previewSrc;
-      else attachThumb.removeAttribute('src'); // re-opened from disk: filename only, no inline bytes
-      attachName.textContent = label || filename;
-      attachRow.classList.add('annotate-has-attach');
-      attachRow.classList.toggle('annotate-attach-no-thumb', !previewSrc);
-      card.setAttribute('data-attachment', filename);
+    // APPEND one attachment: record it on the bubble and add a gallery item (thumb + ellipsized
+    // name + a `×` remove). previewSrc is the just-read dataURL on upload; on reopen-from-disk
+    // there are no inline bytes -> a filename-only `.annotate-attach-no-thumb` item.
+    function appendAttachment(filename, previewSrc, label) {
+      if (bubble.attachments.indexOf(filename) !== -1) { syncAttachData(); return; } // dedupe: model + DOM in lockstep
+      bubble.addAttachment(filename);
+      const thumb = el('img', { class: 'annotate-attach-thumb', alt: 'attachment preview' });
+      if (previewSrc) thumb.src = previewSrc;
+      else thumb.removeAttribute('src'); // re-opened from disk: filename only, no inline bytes
+      const name = el('span', { class: 'annotate-attach-name', text: label || filename });
+      const remove = el('button', { class: 'annotate-btn annotate-attach-remove annotate-icon-btn', type: 'button', text: '×' });
+      setBtnLabel(remove, 'Remove attachment');
+      const item = el('div', { class: 'annotate-attach-item' }, [thumb, name, remove]);
+      if (!previewSrc) item.classList.add('annotate-attach-no-thumb');
+      remove.addEventListener('click', function () {
+        // Per-item remove drops the REFERENCE only — it does NOT delete the server file. Orphan
+        // cleanup is out of scope: an unreferenced attachment is simply invisible to the loop
+        // (see server/server.js). The human can still re-pick to re-reference it.
+        bubble.removeAttachment(filename);
+        if (item.parentNode) item.parentNode.removeChild(item);
+        syncAttachData();
+      });
+      attachGallery.appendChild(item);
+      syncAttachData();
     }
 
     attachBtn.addEventListener('click', function () { attachInput.click(); });
-    attachRemove.addEventListener('click', clearAttachment);
     attachInput.addEventListener('change', async function () {
       const file = attachInput.files && attachInput.files[0];
       if (!file) return;
@@ -1035,7 +1056,8 @@
         res = { error: String(e && e.message) };
       }
       if (res && res.httpStatus === 200 && res.filename) {
-        showAttachment(res.filename, dataUrl, file.name || res.filename);
+        appendAttachment(res.filename, dataUrl, file.name || res.filename);
+        attachInput.value = ''; // reset so the SAME file can be re-picked and the next change fires
         setStatus('Image attached');
       } else {
         attachInput.value = '';
@@ -1064,9 +1086,11 @@
         bubble.setType('comment');
         input.value = it.comment || '';
       }
-      // §I: re-surface an existing attachment (filename only — the inline preview bytes aren't
-      // re-fetched off disk; the human can Remove + re-pick to change it).
-      if (it.attachment) showAttachment(it.attachment, null, it.attachment);
+      // §I/v2.6: re-surface existing attachments (filename only — the inline preview bytes aren't
+      // re-fetched off disk; the human can Remove + re-pick to change them). Tolerate the legacy
+      // singular `attachment` by wrapping it.
+      const seedAttachments = it.attachments || (it.attachment ? [it.attachment] : []);
+      for (const nm of seedAttachments) appendAttachment(nm, null, nm);
     }
 
     // §A: when initiated from the comment icon, the composer opens AT THE ICON

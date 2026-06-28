@@ -198,7 +198,7 @@ test('annotate poll <s>/<a>: blocks on the EXISTING head and mints NO new round'
   assert.equal(roundCount(session), 1, 'poll minted NO new round');
 });
 
-test('poll bundle surfaces an on-disk attachmentPath for an attached image (§I)', async () => {
+test('poll bundle surfaces on-disk attachmentPaths[] for MULTIPLE attached images (v2.6 §5)', async () => {
   const session = 'attach-poll';
 
   // Seed a round + server (leaves the singleton up).
@@ -208,24 +208,73 @@ test('poll bundle surfaces an on-disk attachmentPath for an attached image (§I)
   assert.ok(r, 'seed round exists');
   await waitForServer();
 
-  // Upload an attachment into the round folder ON SELECT (POST /attach), get the stored name.
+  // Upload TWO attachments into the round folder ON SELECT (POST /attach); each gets a unique name.
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64');
+  async function upload(name) {
+    const up = await fetch(`http://127.0.0.1:${port}/${r.session}/${r.artifact}/attach`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Annotate-Token': r.token },
+      body: JSON.stringify({ head: r.guid, data: png, mime: 'image/png', name }),
+    });
+    assert.equal(up.status, 200);
+    return (await up.json()).filename;
+  }
+  const stored1 = await upload('illustration-1.png');
+  const stored2 = await upload('illustration-2.png');
+  assert.match(stored1, /-attach-1\.png$/);
+  assert.match(stored2, /-attach-2\.png$/);
+
+  const rDir = path.join(P.artifactDir(dataDir, r.session, r.artifact), r.guid);
+  assert.ok(P.exists(path.join(rDir, stored1)), 'attachment 1 copied into the round dir on select');
+  assert.ok(P.exists(path.join(rDir, stored2)), 'attachment 2 copied into the round dir on select');
+
+  // Poll, then submit a comment that REFERENCES BOTH stored filenames via the plural array.
+  const h = run(['poll', `${session}/sample`, '--no-open']);
+  await waitForServer();
+  await delay(300);
+  const res = await postFeedback(r, [
+    { id: 'a1', type: 'comment', anchor: { kind: 'source', line: 3 }, comment: 'see attached', attachments: [stored1, stored2] },
+  ]);
+  assert.equal(res.status, 200);
+
+  const { code, stdout } = await h.done;
+  assert.equal(code, 0);
+  const bundle = JSON.parse(stdout);
+  assert.deepEqual(bundle.feedback[0].attachments, [stored1, stored2], 'feedback item keeps both stored filenames');
+  assert.deepEqual(
+    bundle.feedback[0].attachmentPaths,
+    [path.join(rDir, stored1), path.join(rDir, stored2)],
+    'poll resolves absolute on-disk attachmentPaths[] under the round dir, in order'
+  );
+  for (const p of bundle.feedback[0].attachmentPaths) {
+    assert.ok(P.exists(p), 'each surfaced path points at a real file');
+  }
+});
+
+test('poll still resolves a LEGACY singular attachment to attachmentPaths[] (back-compat)', async () => {
+  const session = 'attach-poll-legacy';
+
+  const seed = await run([SAMPLE, '--no-wait', '--no-open', '--session', session]).done;
+  assert.equal(seed.code, 0);
+  const r = findRound(session);
+  assert.ok(r, 'seed round exists');
+  await waitForServer();
+
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64');
   const up = await fetch(`http://127.0.0.1:${port}/${r.session}/${r.artifact}/attach`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Annotate-Token': r.token },
-    body: JSON.stringify({ head: r.guid, data: png, mime: 'image/png', name: 'illustration.png' }),
+    body: JSON.stringify({ head: r.guid, data: png, mime: 'image/png', name: 'legacy.png' }),
   });
   assert.equal(up.status, 200);
   const stored = (await up.json()).filename;
-  assert.match(stored, /-attach-1\.png$/);
 
   const rDir = path.join(P.artifactDir(dataDir, r.session, r.artifact), r.guid);
-  assert.ok(P.exists(path.join(rDir, stored)), 'attachment copied into the round dir on select');
 
-  // Poll, then submit a comment that REFERENCES the stored filename.
   const h = run(['poll', `${session}/sample`, '--no-open']);
   await waitForServer();
   await delay(300);
+  // Old client shape: singular `attachment` (deprecated alias) — must still resolve.
   const res = await postFeedback(r, [
     { id: 'a1', type: 'comment', anchor: { kind: 'source', line: 3 }, comment: 'see attached', attachment: stored },
   ]);
@@ -234,13 +283,12 @@ test('poll bundle surfaces an on-disk attachmentPath for an attached image (§I)
   const { code, stdout } = await h.done;
   assert.equal(code, 0);
   const bundle = JSON.parse(stdout);
-  assert.equal(bundle.feedback[0].attachment, stored, 'feedback item keeps the stored filename');
-  assert.equal(
-    bundle.feedback[0].attachmentPath,
-    path.join(rDir, stored),
-    'poll resolves an absolute on-disk attachmentPath under the round dir'
+  assert.deepEqual(
+    bundle.feedback[0].attachmentPaths,
+    [path.join(rDir, stored)],
+    'a legacy singular attachment resolves into the attachmentPaths[] array'
   );
-  assert.ok(P.exists(bundle.feedback[0].attachmentPath), 'the surfaced path points at a real file');
+  assert.ok(P.exists(bundle.feedback[0].attachmentPaths[0]), 'the surfaced path points at a real file');
 });
 
 test('annotate <file> --wait --timeout: times out non-zero with the hand-off nudge', async () => {

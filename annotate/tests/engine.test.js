@@ -189,31 +189,57 @@ test('bubble items validate against feedback.schema.json (comment AND edit)', ()
   assert.ok(validateFeedback(e), JSON.stringify(validateFeedback.errors));
 });
 
-// v2.2 §I — a user-image attachment rides the §5.2 item's optional `attachment` field.
-test('bubble carries a user-image attachment (§I); omitted by default; clearable', () => {
+// v2.6 §2 — user-image attachments ACCUMULATE in the §5.2 item's optional `attachments[]` array;
+// a 2nd add APPENDS (no overwrite). Field omitted by default; per-item removable.
+test('bubble accumulates user-image attachments (§2); omitted by default; appends + removes', () => {
   const plain = bubble.createBubble({ kind: 'source', line: 1 }).setComment('x').toFeedback();
-  assert.equal('attachment' in plain, false, 'no attachment field when none is set (existing items unchanged)');
+  assert.equal('attachments' in plain, false, 'no attachments field when none set (existing items unchanged)');
+  assert.equal('attachment' in plain, false, 'never emits the deprecated singular form');
 
-  const b = bubble.createBubble({ kind: 'source', line: 5 }).setComment('see image');
-  b.setAttachment('G-attach-1.png');
-  assert.equal(b.attachment, 'G-attach-1.png');
+  const b = bubble.createBubble({ kind: 'source', line: 5 }).setComment('see images');
+  b.addAttachment('G-attach-1.png');
+  b.addAttachment('G-attach-2.jpg'); // 2nd upload APPENDS — does NOT overwrite the 1st
+  assert.deepEqual(b.attachments, ['G-attach-1.png', 'G-attach-2.jpg'], 'both present, in order');
+  b.addAttachment('G-attach-1.png'); // dedupe — already present
+  assert.deepEqual(b.attachments, ['G-attach-1.png', 'G-attach-2.jpg']);
+
   const withAttach = b.toFeedback('a1');
   assert.deepEqual(withAttach, {
-    id: 'a1', type: 'comment', anchor: { kind: 'source', line: 5 }, comment: 'see image', attachment: 'G-attach-1.png',
+    id: 'a1', type: 'comment', anchor: { kind: 'source', line: 5 }, comment: 'see images',
+    attachments: ['G-attach-1.png', 'G-attach-2.jpg'],
   });
 
-  b.setAttachment(null); // removed before Add -> field drops back out
-  assert.equal(b.attachment, null);
-  assert.equal('attachment' in b.toFeedback(), false);
+  b.removeAttachment('G-attach-1.png'); // per-item remove drops just that reference
+  assert.deepEqual(b.attachments, ['G-attach-2.jpg']);
+  assert.deepEqual(b.toFeedback('a1').attachments, ['G-attach-2.jpg']);
+
+  b.removeAttachment('G-attach-2.jpg'); // empty again -> field drops back out
+  assert.deepEqual(b.attachments, []);
+  assert.equal('attachments' in b.toFeedback(), false);
 });
 
-test('bubble items WITH an attachment still validate against feedback.schema.json (comment + edit)', () => {
-  const c = bubble.createBubble({ kind: 'source', line: 1 }).setComment('x').setAttachment('g-attach-1.png').toFeedback('a1');
+test('bubble seeds attachments from opts (plural array OR legacy singular)', () => {
+  const fromArray = bubble.createBubble({ kind: 'source', line: 1 }, { attachments: ['a.png', 'b.png'] });
+  assert.deepEqual(fromArray.attachments, ['a.png', 'b.png']);
+  const fromLegacy = bubble.createBubble({ kind: 'source', line: 1 }, { attachment: 'legacy.png' });
+  assert.deepEqual(fromLegacy.attachments, ['legacy.png'], 'wraps a legacy singular opts.attachment');
+});
+
+test('feedback validates with the attachments[] array AND with a legacy singular attachment', () => {
+  // New canonical shape: plural array on a comment + on an edit.
+  const c = bubble.createBubble({ kind: 'source', line: 1 }).setComment('x')
+    .addAttachment('g-attach-1.png').addAttachment('g-attach-2.jpg').toFeedback('a1');
   const e = bubble.createBubble({ kind: 'spatial', point: [0.5, 0.5] }, { selectedText: 'o' })
-    .setType('edit').setReplacement('n').setAttachment('g-attach-2.jpg').toFeedback('a2');
+    .setType('edit').setReplacement('n').addAttachment('g-attach-3.png').toFeedback('a2');
   assert.ok(validateFeedback(c), JSON.stringify(validateFeedback.errors));
   assert.ok(validateFeedback(e), JSON.stringify(validateFeedback.errors));
-  assert.equal(c.attachment, 'g-attach-1.png');
+  assert.deepEqual(c.attachments, ['g-attach-1.png', 'g-attach-2.jpg']);
+
+  // Back-compat alias: an old on-disk item carrying the singular `attachment` STILL validates.
+  const legacy = {
+    id: 'a3', type: 'comment', anchor: { kind: 'source', line: 7 }, comment: 'old', attachment: 'g-attach-1.png',
+  };
+  assert.ok(validateFeedback(legacy), JSON.stringify(validateFeedback.errors));
 });
 
 // ===========================================================================

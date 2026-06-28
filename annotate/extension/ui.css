@@ -603,30 +603,37 @@ body.annotate-themed {
   gap: 8px;
 }
 
-/* §I per-comment USER-IMAGE attach (the `.annotate-attach-*` namespace — distinct from the
-   auto-capture `.annotate-shot-toggle`). A paperclip button + an inline thumbnail/filename
-   preview with a remove control, shown once an image has been copied into the round folder. */
+/* §I/v2.6 per-comment USER-IMAGE attach (the `.annotate-attach-*` namespace — distinct from the
+   auto-capture `.annotate-shot-toggle`). A paperclip button + a GALLERY of attachment items, one
+   per image copied into the round folder. Each item is a small thumbnail + ellipsized filename +
+   a remove control. The paperclip always adds more. */
 .annotate-attach-input {
   display: none;
 }
 .annotate-attach-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   margin-bottom: 8px;
 }
 .annotate-attach-btn {
   color: var(--annotate-muted);
+  flex: none;
 }
-.annotate-attach-preview {
-  display: none;
-  align-items: center;
-  gap: 6px;
+/* The gallery: wraps onto multiple rows when several images are attached. */
+.annotate-attach-gallery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
   min-width: 0;
   flex: 1;
 }
-.annotate-attach-row.annotate-has-attach .annotate-attach-preview {
+.annotate-attach-item {
   display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
 }
 .annotate-attach-thumb {
   width: 28px;
@@ -636,7 +643,7 @@ body.annotate-themed {
   border: 1px solid var(--annotate-line);
   flex: none;
 }
-.annotate-attach-row.annotate-attach-no-thumb .annotate-attach-thumb {
+.annotate-attach-item.annotate-attach-no-thumb .annotate-attach-thumb {
   display: none;
 }
 .annotate-attach-name {
@@ -645,7 +652,6 @@ body.annotate-themed {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1;
   min-width: 0;
 }
 .annotate-attach-remove {

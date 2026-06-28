@@ -1,0 +1,7 @@
+{
+  "id": "a1",
+  "type": "comment",
+  "anchor": { "kind": "source", "line": 12 },
+  "comment": "see both attached mockups",
+  "attachments": ["g-attach-1.png", "g-attach-2.jpg"]
+}

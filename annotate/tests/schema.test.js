@@ -37,6 +37,9 @@ const ACCEPT = [
   ['feedback: comment on text/quote', validateFeedback, 'feedback.valid-text.json'],
   // v2.4 — an inline EDIT now anchors to a text/quote (quote === original); confirm the wire shape.
   ['feedback: edit on text/quote (quote === original)', validateFeedback, 'feedback.valid-edit-text.json'],
+  // v2.6 — multiple attachments (canonical plural array) + the back-compat singular alias.
+  ['feedback: comment with attachments[] array', validateFeedback, 'feedback.valid-attachments.json'],
+  ['feedback: comment with legacy singular attachment alias', validateFeedback, 'feedback.valid-attachment-legacy.json'],
 ];
 
 const REJECT = [
