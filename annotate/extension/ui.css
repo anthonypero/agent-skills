@@ -48,6 +48,19 @@
   --annotate-mark-line-hover: rgba(47, 111, 237, 0.85); /* strong hover/active underline (light) */
   --annotate-mark-edit-line-rest: rgba(240, 160, 32, 0.38);
   --annotate-mark-edit-line-hover: rgba(240, 160, 32, 0.95);
+  /* FIX A — code-view syntax-highlight palette (hljs token colors). LIGHT default here, DARK
+     override in the media query below, so the code highlighting flips with the rest of the UI
+     (the code view honors prefers-color-scheme via body.annotate-themed; a dark-only theme would
+     be unreadable on the light #f2f4f7 code bg). Light values = atom-one-light; the dark values
+     below = atom-one-dark. Swap a whole theme by editing just these two var blocks. */
+  --annotate-hl-comment: #a0a1a7; /* comment / quote (italic) */
+  --annotate-hl-keyword: #a626a4; /* keyword / doctag — purple */
+  --annotate-hl-name: #e45649;    /* tag / section / subst — red */
+  --annotate-hl-literal: #0184bb; /* literal — cyan/blue */
+  --annotate-hl-string: #50a14f;  /* string / regexp / attribute value — green */
+  --annotate-hl-number: #986801;  /* number / attr / variable / type — orange/amber */
+  --annotate-hl-title: #4078f2;   /* function title / symbol / meta / link — blue */
+  --annotate-hl-class: #c18401;   /* built_in / class title — yellow */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -82,6 +95,15 @@
     --annotate-mark-line-hover: rgba(76, 141, 255, 0.92);
     --annotate-mark-edit-line-rest: rgba(242, 187, 77, 0.42);
     --annotate-mark-edit-line-hover: rgba(242, 187, 77, 0.95);
+    /* FIX A — DARK syntax-highlight palette = atom-one-dark, tuned to read on the #1a1d24 code bg. */
+    --annotate-hl-comment: #5c6370; /* comment / quote (italic) */
+    --annotate-hl-keyword: #c678dd; /* keyword / doctag — purple */
+    --annotate-hl-name: #e06c75;    /* tag / section / subst — red */
+    --annotate-hl-literal: #56b6c2; /* literal — cyan */
+    --annotate-hl-string: #98c379;  /* string / regexp / attribute value — green */
+    --annotate-hl-number: #d19a66;  /* number / attr / variable / type — orange */
+    --annotate-hl-title: #61afef;   /* function title / symbol / meta / link — blue */
+    --annotate-hl-class: #e6c07b;   /* built_in / class title — yellow */
   }
 }
 
@@ -1091,18 +1113,105 @@ body[data-annotate-width="wide"] .annotate-markdown .annotate-section > :not(.an
 }
 .annotate-markdown img { max-width: 100%; }
 
-/* code view (#7): theme the background/foreground; width is INERT here (full-bleed). */
+/* code view (#7): theme the background/foreground. DOGFOOD FIX B: width is NO LONGER inert here
+   — the reading-width control sets the WRAP COLUMN (see the data-annotate-width rules below).
+   Long source lines SOFT-WRAP to that column (white-space: pre-wrap reflows the line yet keeps
+   indentation + the inter-line \n breaks; overflow-wrap: break-word breaks an over-long unbroken
+   token so nothing overflows -> no horizontal scrollbar, no inserted hard line breaks). The
+   wrapping is PURELY VISUAL: each .annotate-line stays ONE element carrying exactly one
+   data-src-line, so a source line that wraps to several rows is still a single anchor. */
 .annotate-code {
   background: var(--annotate-code-bg);
   color: var(--annotate-content-fg);
   margin: 0;
   padding: 16px 18px 64px;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
   overflow-x: auto;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
   line-height: 1.55;
   min-height: 100vh;
 }
+/* FIX B: the reading-width presets set the CODE wrap column, mirroring the Markdown reading
+   column (same 760 / 1080 stops; full = full-bleed). Left-aligned (the existing left padding is
+   the gutter) — narrower preset => long lines reflow sooner. data-annotate-width is already
+   stamped on <body> by applyWidth() for every view. */
+body[data-annotate-width="comfortable"] .annotate-code {
+  max-width: 760px;
+}
+body[data-annotate-width="wide"] .annotate-code {
+  max-width: 1080px;
+}
+/* full: no max-width — the code column is full-bleed (lines wrap to the viewport width). */
+
+/* ===========================================================================
+   FIX A — syntax-highlight theme for the CODE VIEW (hljs token colors).
+   render.js already runs highlight.js and emits hljs-* token spans inside each
+   .annotate-line, but ui.css had ZERO .hljs-* color rules, so code rendered flat.
+   These map the hljs token classes onto the --annotate-hl-* palette vars (defined
+   light + dark above; based on atom-one-light / atom-one-dark) so the highlighting
+   flips with the rest of the UI. SCOPED under .annotate-code so it only colors the
+   code VIEW — never Markdown's inline/fenced code, the struct/csv views, etc. This
+   is PURELY color: it adds no box/layout properties, so it does NOT interact with
+   the FIX B wrap (white-space/max-width on .annotate-code) or the FIX C button
+   state, and touches no DOM/anchoring. To re-theme later, edit only the two
+   --annotate-hl-* var blocks above. The base (untokenized) text keeps the view's
+   own --annotate-content-fg, so no .hljs base rule is needed.
+   =========================================================================== */
+.annotate-code .hljs-comment,
+.annotate-code .hljs-quote {
+  color: var(--annotate-hl-comment);
+  font-style: italic;
+}
+.annotate-code .hljs-keyword,
+.annotate-code .hljs-doctag,
+.annotate-code .hljs-formula {
+  color: var(--annotate-hl-keyword);
+}
+.annotate-code .hljs-section,
+.annotate-code .hljs-name,
+.annotate-code .hljs-selector-tag,
+.annotate-code .hljs-deletion,
+.annotate-code .hljs-subst {
+  color: var(--annotate-hl-name);
+}
+.annotate-code .hljs-literal {
+  color: var(--annotate-hl-literal);
+}
+.annotate-code .hljs-string,
+.annotate-code .hljs-regexp,
+.annotate-code .hljs-addition,
+.annotate-code .hljs-attribute,
+.annotate-code .hljs-meta .hljs-string {
+  color: var(--annotate-hl-string);
+}
+.annotate-code .hljs-attr,
+.annotate-code .hljs-variable,
+.annotate-code .hljs-template-variable,
+.annotate-code .hljs-type,
+.annotate-code .hljs-selector-class,
+.annotate-code .hljs-selector-attr,
+.annotate-code .hljs-selector-pseudo,
+.annotate-code .hljs-number {
+  color: var(--annotate-hl-number);
+}
+.annotate-code .hljs-symbol,
+.annotate-code .hljs-bullet,
+.annotate-code .hljs-link,
+.annotate-code .hljs-meta,
+.annotate-code .hljs-selector-id,
+.annotate-code .hljs-title {
+  color: var(--annotate-hl-title);
+}
+.annotate-code .hljs-built_in,
+.annotate-code .hljs-title.class_,
+.annotate-code .hljs-class .hljs-title {
+  color: var(--annotate-hl-class);
+}
+.annotate-code .hljs-emphasis { font-style: italic; }
+.annotate-code .hljs-strong { font-weight: bold; }
+.annotate-code .hljs-link { text-decoration: underline; }
 
 /* structured (JSON/YAML/TOML) + CSV views (#7): minimal themed readability. */
 .annotate-struct,

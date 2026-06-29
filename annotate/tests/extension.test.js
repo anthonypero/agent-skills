@@ -88,6 +88,45 @@ test('resolveContext: no config -> live mode with the default annotate origin', 
 });
 
 // ---------------------------------------------------------------------------
+// per-view control gating: which chrome controls apply to which view kind.
+// These pure predicates back the chrome-bar enable/disable state that the
+// browser-bound buildChrome()/reflectShotToggle() consume (dogfood fixes B + C).
+// ---------------------------------------------------------------------------
+
+test('widthApplies: reading-width control is live on markdown AND code, inert elsewhere', () => {
+  // FIX B: the width toggle now sets the code soft-wrap column too (not markdown-only).
+  assert.equal(config.widthApplies('markdown'), true);
+  assert.equal(config.widthApplies('code'), true);
+  // full-bleed views — the control stays inert (greyed, no cycle).
+  assert.equal(config.widthApplies('image'), false);
+  assert.equal(config.widthApplies('struct'), false);
+  assert.equal(config.widthApplies('csv'), false);
+  assert.equal(config.widthApplies('frontend'), false);
+  assert.ok(config.WIDTH_VIEWS instanceof Set);
+  assert.deepEqual([...config.WIDTH_VIEWS].sort(), ['code', 'markdown']);
+});
+
+test('shouldCaptureScreenshot / VISUAL_VIEWS: the camera is disabled on source views (FIX C basis)', () => {
+  // FIX C: the camera button is ENABLED (and may show the active-blue FILL) only on a visual
+  // view; on a source view it is disabled and must NEVER capture nor read active — even with the
+  // default-ON toggle. The button state keys off VISUAL_VIEWS membership.
+  assert.equal(config.VISUAL_VIEWS.has('image'), true);
+  assert.equal(config.VISUAL_VIEWS.has('markdown'), true);
+  assert.equal(config.VISUAL_VIEWS.has('frontend'), true);
+  assert.equal(config.VISUAL_VIEWS.has('code'), false);
+  assert.equal(config.VISUAL_VIEWS.has('struct'), false);
+  assert.equal(config.VISUAL_VIEWS.has('csv'), false);
+  // default toggle ON, but a source view still never captures (the disabled camera does nothing).
+  assert.equal(config.shouldCaptureScreenshot('code', true), false);
+  assert.equal(config.shouldCaptureScreenshot('struct', true), false);
+  assert.equal(config.shouldCaptureScreenshot('csv', true), false);
+  // visual views capture when the toggle is on, and respect an explicit off.
+  assert.equal(config.shouldCaptureScreenshot('markdown', true), true);
+  assert.equal(config.shouldCaptureScreenshot('image', true), true);
+  assert.equal(config.shouldCaptureScreenshot('markdown', false), false);
+});
+
+// ---------------------------------------------------------------------------
 // makeFeedbackSink — the real /feedback POST (token in X-Annotate-Token)
 // ---------------------------------------------------------------------------
 

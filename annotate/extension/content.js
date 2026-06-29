@@ -419,17 +419,18 @@
   function buildChrome() {
     const view = detectView();
     viewKind = view.kind; // cache for the hover hot path
-    const widthApplies = view.kind === 'markdown'; // #3: reading width suits prose only
+    const widthApplies = A.config.widthApplies(view.kind); // #3: prose reading column + code wrap column
 
     // §F #3 + #4: the reading-width control is ICON-ONLY now — no "Wide" text label. It cycles
     // ALL THREE presets (compact -> wide -> full -> compact) and shows the icon for the current
-    // state (compress / expand / arrows-left-right-to-line). Inert (full-bleed) on
-    // code/image/wide-table.
+    // state (compress / expand / arrows-left-right-to-line). On MARKDOWN it sets the prose
+    // reading column; on CODE (dogfood fix) it sets the soft-wrap column. Inert (full-bleed) on
+    // image/struct/csv.
     // §L: the width control is a non-semantic interactive button — its hover-outline + active
-    // FILL use the unified blue accent. Where the width feature applies (markdown) it is a
+    // FILL use the unified blue accent. Where the width feature applies (markdown/code) it is a
     // PERSISTENTLY-engaged control (§2: "its active mode reads as a FILL; KEEP that selected-
     // state indication") so it carries .annotate-active (blue fill) and the icon shows WHICH
-    // preset; on non-prose views it is inert (full-bleed), greyed and not filled.
+    // preset; on the other views it is inert (full-bleed), greyed and not filled.
     const widthBtn = el('button', {
       class: 'annotate-btn annotate-width annotate-icon-btn' +
         (widthApplies ? ' annotate-active' : ' annotate-btn-inert'),
@@ -612,8 +613,9 @@
 
   // ---------------------------------------------------------------------------
   // §F #3 reading-width preset — an ICON-ONLY control cycling all three max-width presets
-  // over the Markdown reading column; persisted per-user (chrome.storage.local); inert on
-  // code/image/wide-table (full-bleed). The button shows the icon for the CURRENT preset.
+  // over the Markdown reading column AND (dogfood fix) the CODE soft-wrap column; persisted
+  // per-user (chrome.storage.local); inert on image/struct/csv (full-bleed). The button shows
+  // the icon for the CURRENT preset.
   // ---------------------------------------------------------------------------
 
   function widthTitle() {
@@ -627,7 +629,7 @@
     if (!btn) return;
     const wrap = btn.querySelector('.annotate-icon-wrap');
     if (wrap) wrap.innerHTML = WIDTH_ICONS[widthPreset];
-    if (detectView().kind === 'markdown') setBtnLabel(btn, widthTitle()); // §L hover label
+    if (A.config.widthApplies(detectView().kind)) setBtnLabel(btn, widthTitle()); // §L hover label
   }
 
   function applyWidth() {
@@ -664,8 +666,8 @@
   }
 
   function onCycleWidth() {
-    if (detectView().kind !== 'markdown') {
-      setStatus('Reading width applies to Markdown views only');
+    if (!A.config.widthApplies(detectView().kind)) {
+      setStatus('Reading width applies to Markdown / code views');
       return;
     }
     const i = WIDTH_PRESETS.indexOf(widthPreset);
@@ -698,15 +700,27 @@
     const btn = doc.querySelector('.annotate-shot-toggle');
     const bar = chromeBar();
     const view = detectView();
+    // A screenshot only makes sense on a VISUAL view (image/markdown/frontend). On a source
+    // view (code/struct/csv) a viewport screenshot is pointless, so the camera is DISABLED.
+    const visual = !!(A.config.VISUAL_VIEWS && A.config.VISUAL_VIEWS.has(view.kind));
     const willCapture = A.config.shouldCaptureScreenshot(view.kind, screenshotToggle);
     if (btn) {
-      // #4 + §L: camera icon stays; "on" = the unified-blue FILL (.annotate-active). Toggle
-      // classes, never textContent (that would wipe the inline SVG). The hover label reflects
-      // the on/off state.
-      btn.classList.toggle('annotate-active', !!screenshotToggle);
-      btn.classList.toggle('annotate-shot-inert', A.config.VISUAL_VIEWS && !A.config.VISUAL_VIEWS.has(view.kind));
+      // #4 + §L: camera icon stays; on a visual view "on" = the unified-blue FILL
+      // (.annotate-active). DOGFOOD FIX C: the active-blue FILL must NEVER appear on a non-visual
+      // view — the old code applied .annotate-active from screenshotToggle alone (default ON), so
+      // the camera read as the most prominent/enabled button in the code view even though it does
+      // nothing. Gate .annotate-active on `visual`; on a non-visual view show the shared
+      // disabled affordance (.annotate-btn-inert = greyed + cursor:default, same as the inert
+      // width control) + aria-disabled, and onToggleShot() no-ops. Toggle classes, never
+      // textContent (that would wipe the inline SVG).
+      btn.classList.toggle('annotate-active', visual && !!screenshotToggle);
+      btn.classList.toggle('annotate-btn-inert', !visual);
+      btn.classList.toggle('annotate-shot-inert', !visual);
+      btn.setAttribute('aria-disabled', visual ? 'false' : 'true');
       btn.setAttribute('aria-pressed', screenshotToggle ? 'true' : 'false');
-      setBtnLabel(btn, 'Screenshot on send: ' + (screenshotToggle ? 'on' : 'off'));
+      setBtnLabel(btn, visual
+        ? 'Screenshot on send: ' + (screenshotToggle ? 'on' : 'off')
+        : 'Screenshot not available for this view');
     }
     if (bar) {
       bar.setAttribute('data-screenshot', screenshotToggle ? 'on' : 'off');
@@ -732,6 +746,12 @@
   }
 
   function onToggleShot() {
+    // FIX C: the camera is DISABLED on a non-visual (source) view — a click does nothing
+    // (no toggle, no persisted change), mirroring the inert width control's onCycleWidth guard.
+    if (!(A.config.VISUAL_VIEWS && A.config.VISUAL_VIEWS.has(detectView().kind))) {
+      setStatus('Screenshot capture applies to visual views only');
+      return;
+    }
     screenshotToggle = !screenshotToggle;
     if (chromeApi && chromeApi.storage && chromeApi.storage.local) {
       try {

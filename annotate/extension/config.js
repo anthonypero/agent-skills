@@ -40,6 +40,17 @@
     return toggleOn !== false; // default-on: only an explicit false suppresses it
   }
 
+  // Views where the reading-width control applies. PROSE (markdown) gets a centered max-width
+  // reading column; CODE gets a soft-wrap column — the width sets the WRAP column, so long
+  // source lines reflow (CSS-only, no horizontal scroll, no inserted hard breaks, one
+  // data-src-line per line preserved). The structured/CSV/image views stay full-bleed (the
+  // width control is inert there). Pure + injectable so the per-view enable/disable + the
+  // onCycleWidth guard are unit-testable without a browser (mirrors shouldCaptureScreenshot).
+  const WIDTH_VIEWS = new Set(['markdown', 'code']);
+  function widthApplies(viewKind) {
+    return WIDTH_VIEWS.has(viewKind);
+  }
+
   function pickFetch(fetchImpl) {
     if (fetchImpl) return fetchImpl;
     if (typeof fetch !== 'undefined') return fetch;
@@ -214,6 +225,8 @@
     DEFAULT_ORIGIN,
     VISUAL_VIEWS,
     shouldCaptureScreenshot,
+    WIDTH_VIEWS,
+    widthApplies,
     readPageConfig,
     resolveContext,
     discoverLiveContext,

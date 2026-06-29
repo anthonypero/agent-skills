@@ -266,6 +266,15 @@ test('code: each rendered line carries its exact 1-based source line', () => {
     );
   });
 
+  // FIX B (soft-wrap) invariant: a source line that visually wraps to several rows must remain
+  // ONE anchor. The code-view wrap is CSS-only (white-space: pre-wrap on .annotate-code), so the
+  // DOM must keep EXACTLY one [data-src-line] per source line — no extra/nested anchors, no split.
+  const anchors = root.querySelectorAll('[data-src-line]');
+  assert.equal(anchors.length, 5, 'exactly one data-src-line element per source line (wrap must not split anchors)');
+  anchors.forEach((el) => {
+    assert.ok(el.classList.contains('annotate-line'), 'every code-view anchor is an .annotate-line wrapper (hljs spans carry none)');
+  });
+
   // Content lands on the right line number.
   const byLine = srcLineIndex(html);
   assert.match(byLine.get(1)[0].textContent, /const greeting/, 'line 1 = const greeting');
