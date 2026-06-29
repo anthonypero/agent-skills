@@ -328,27 +328,31 @@ test('code blocks (PHP): {} bodies nest class > function > if; () excluded; comm
   const { html } = render(fx('sample.php'));
   const ranges = codeBlockRanges(html);
 
-  // class body 2-11 ⊃ function body 4-10 ⊃ if body 6-8 — enclosing scopes (parents), nested.
-  assert.deepEqual(ranges.sort(), ['2-11', '4-10', '6-8'].sort(), 'exactly the {}-body blocks');
-  assert.deepEqual(codeBlockAncestors(html, '6-8'), ['4-10', '2-11'], 'if nests in function nests in class');
-  assert.deepEqual(codeBlockAncestors(html, '4-10'), ['2-11'], 'function nests in class');
+  // Allman style: the class `{` (lone, line 11) and function `{` (lone, line 20) pull their START
+  // up to the declaration line above (10 = `final class CartTotaler`, 19 = `public function total`).
+  // The foreach (line 22) and if (line 26) are K&R (`(...) {`) so they are NOT pulled.
+  // class body 10-32 ⊃ function body 19-31 ⊃ { foreach 22-24, if 26-28 } — enclosing scopes, nested.
+  assert.deepEqual(ranges.sort(), ['10-32', '19-31', '22-24', '26-28'].sort(), 'exactly the {}-body blocks');
+  assert.deepEqual(codeBlockAncestors(html, '26-28'), ['19-31', '10-32'], 'if nests in function nests in class');
+  assert.deepEqual(codeBlockAncestors(html, '22-24'), ['19-31', '10-32'], 'foreach nests in function nests in class');
+  assert.deepEqual(codeBlockAncestors(html, '19-31'), ['10-32'], 'function nests in class');
 
-  // The `{ ... }` inside the line-7 comment must NOT create a block (token-stream, not raw text).
-  // The single-line `private $items = [];` on line 3 must NOT create a block (no 3-3 level).
-  assert.ok(!ranges.includes('3-3'), 'single-line [] does not create a block');
+  // The `{ ... }` inside the line-27 comment must NOT create a block (token-stream, not raw text).
+  // The single-line `private array $items = [];` on line 12 must NOT create a block (no 12-12 level).
+  assert.ok(!ranges.includes('12-12'), 'single-line [] does not create a block');
   assert.equal(
-    ranges.filter((r) => r.startsWith('7')).length,
+    ranges.filter((r) => r.startsWith('27')).length,
     0,
     'comment braces create no block'
   );
 });
 
 test('code blocks: per-line [data-src-line] count is unchanged; wrappers carry no line anchor', () => {
-  const { html } = render(fx('sample.php')); // 11 source lines
+  const { html } = render(fx('sample.php')); // 32 source lines
   const root = dom(html);
   // One anchor per source line — the wrappers must only GROUP existing spans, never split/duplicate.
-  assert.equal(root.querySelectorAll('[data-src-line]').length, 11, 'one [data-src-line] per source line');
-  assert.equal(root.querySelectorAll('.annotate-line').length, 11, 'one .annotate-line per source line');
+  assert.equal(root.querySelectorAll('[data-src-line]').length, 32, 'one [data-src-line] per source line');
+  assert.equal(root.querySelectorAll('.annotate-line').length, 32, 'one .annotate-line per source line');
   root.querySelectorAll('.annotate-code-block').forEach((b) => {
     assert.equal(b.hasAttribute('data-src-line'), false, 'a code-block wrapper is NOT a [data-src-line] anchor');
     assert.ok(b.hasAttribute('data-src-line-range'), 'a code-block wrapper carries data-src-line-range (same attr as md <section>)');
@@ -396,6 +400,33 @@ test('code blocks: touching siblings (`} else {`) stay laminar (no crossing wrap
   const src = fs.readFileSync(tmp, 'utf8').replace(/\n$/, '');
   assert.equal(root.querySelectorAll('[data-src-line]').length, src.split('\n').length, 'one anchor per line');
   assert.equal(root.querySelector('pre.annotate-code').textContent, src, 'no extra whitespace');
+});
+
+test('code blocks: Allman lone-`{` pulls the block start up to the header (K&R is not pulled)', () => {
+  // (a) lone `{` pulls the start up to the declaration line; (b) a K&R `{` is NOT pulled;
+  // (c) a blank line between header and the lone `{` is skipped to reach the header.
+  const tmp = path.join(require('node:os').tmpdir(), 'annotate-pullup.js');
+  fs.writeFileSync(tmp, [
+    'function kr() {',    // 1  K&R: line trim !== "{" -> NOT pulled -> block 1-3
+    '  return 1;',        // 2
+    '}',                  // 3
+    'function allman()',  // 4  header
+    '{',                  // 5  lone `{` -> pull start up to 4 -> block 4-7
+    '  return 2;',        // 6
+    '}',                  // 7
+    'function spaced()',  // 8  header
+    '   ',                // 9  whitespace-only (blank)
+    '{',                  // 10 lone `{` -> skip blank line 9 -> pull up to 8 -> block 8-12
+    '  return 3;',        // 11
+    '}',                  // 12
+    '',
+  ].join('\n'));
+  const { html } = render(tmp);
+  const root = dom(html);
+  assert.deepEqual(codeBlockRanges(html).sort(), ['1-3', '4-7', '8-12'].sort(), 'K&R not pulled; Allman + blank-skip pulled');
+  // pull-up moves only the wrapper boundary — the source text is byte-for-byte unchanged.
+  const src = fs.readFileSync(tmp, 'utf8').replace(/\n$/, '');
+  assert.equal(root.querySelector('pre.annotate-code').textContent, src, 'pull-up adds no <pre> whitespace');
 });
 
 // ===========================================================================

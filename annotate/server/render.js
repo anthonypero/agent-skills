@@ -300,7 +300,7 @@ const BRACE_SUPPRESS = ['string', 'comment', 'regexp', 'meta', 'doctag', 'char',
 // 1-based source line, and stack-match `{`/`[`/`<tag>` openers to their closers.
 // Returns laminar (well-nested) ranges [openLine, closeLine] with openLine < closeLine
 // (single-line blocks are dropped — they add no level above the clicked line).
-function detectCodeBlocks(highlightedHtml) {
+function detectCodeBlocks(highlightedHtml, srcLines) {
   const ranges = [];
   const stack = []; // unified opener stack: {kind:'brace',expect} | {kind:'tag',name}, +line
   const classStack = []; // hljs class string of each currently-open <span>
@@ -320,6 +320,20 @@ function detectCodeBlocks(highlightedHtml) {
     return false;
   };
 
+  // Allman/BSD header pull-up: when a `{` block's opening line is a LONE brace (its
+  // source line trimmed === "{"), extend the block's START up to the nearest preceding
+  // NON-BLANK source line — the declaration/header — so e.g. `function total(...)\n{`
+  // includes the signature line, not just the bare `{`. Braces ONLY (not `[]`, not tags).
+  // Multi-line signatures pull in only the LAST header line (documented limitation). The
+  // emit's physical-start bump clamps if the pulled-up line would collide with another
+  // block's close-line, so lamination is preserved.
+  const pullUpBraceStart = (openLine) => {
+    if (!srcLines || (srcLines[openLine - 1] || '').trim() !== '{') return openLine;
+    let h = openLine - 1;
+    while (h >= 1 && (srcLines[h - 1] || '').trim() === '') h--;
+    return h >= 1 ? h : openLine;
+  };
+
   // Close `kind`-matching opener: pop down to it (discarding crossing/unclosed
   // openers above), record its range. Keeps the recorded set laminar.
   const resolve = (matchFn, closeLine) => {
@@ -327,7 +341,11 @@ function detectCodeBlocks(highlightedHtml) {
       if (matchFn(stack[k])) {
         stack.length = k + 1;
         const opener = stack.pop();
-        if (closeLine > opener.line) ranges.push([opener.line, closeLine]);
+        const startLine =
+          opener.kind === 'brace' && opener.expect === '}'
+            ? pullUpBraceStart(opener.line)
+            : opener.line;
+        if (closeLine > startLine) ranges.push([startLine, closeLine]);
         return;
       }
     }
@@ -465,7 +483,7 @@ function renderCode(content, ext) {
   }
 
   const lineSpans = wrapHighlightedLines(highlighted);
-  const ranges = detectCodeBlocks(highlighted);
+  const ranges = detectCodeBlocks(highlighted, src.split('\n'));
   const lines = emitCodeBlocks(lineSpans, ranges);
   return `<pre class="annotate-render annotate-code"><code class="hljs">${lines}</code></pre>`;
 }
