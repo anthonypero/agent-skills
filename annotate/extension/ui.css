@@ -1133,15 +1133,19 @@ body[data-annotate-width="wide"] .annotate-markdown .annotate-section > :not(.an
   line-height: 1.55;
   min-height: 100vh;
 }
-/* FIX B: the reading-width presets set the CODE wrap column, mirroring the Markdown reading
-   column (same 760 / 1080 stops; full = full-bleed). Left-aligned (the existing left padding is
-   the gutter) — narrower preset => long lines reflow sooner. data-annotate-width is already
-   stamped on <body> by applyWidth() for every view. */
+/* FIX B (+ dogfood follow-up): the reading-width presets set the CODE wrap column, mirroring the
+   Markdown reading column (same 760 / 1080 stops). comfortable/wide are CENTERED via margin auto
+   (like the prose column); only `full` is full-bleed / left-edge (no max-width). narrower preset
+   => long lines reflow sooner. data-annotate-width is already stamped on <body> by applyWidth(). */
 body[data-annotate-width="comfortable"] .annotate-code {
   max-width: 760px;
+  margin-left: auto;
+  margin-right: auto;
 }
 body[data-annotate-width="wide"] .annotate-code {
   max-width: 1080px;
+  margin-left: auto;
+  margin-right: auto;
 }
 /* full: no max-width — the code column is full-bleed (lines wrap to the viewport width). */
 
