@@ -1149,6 +1149,17 @@ body[data-annotate-width="wide"] .annotate-code {
 }
 /* full: no max-width — the code column is full-bleed (lines wrap to the viewport width). */
 
+/* v2.7 code-BLOCK wrappers: render.js nests the spanned .annotate-line spans in
+   <div class="annotate-code-block" data-src-line-range="N-M"> so the extension's
+   ancestor-climbing traversal can select enclosing scopes (brace/bracket/tag blocks).
+   These MUST be layout-neutral — display:contents removes the box entirely, so the
+   wrappers add NO whitespace, NO line break, and do NOT disturb the <pre> pre-wrap
+   reflow or the centered reading column. Traversal walks DOM ancestry (not layout),
+   so the element still participates in parentElement climbs. */
+.annotate-code-block {
+  display: contents;
+}
+
 /* ===========================================================================
    FIX A — syntax-highlight theme for the CODE VIEW (hljs token colors).
    render.js already runs highlight.js and emits hljs-* token spans inside each

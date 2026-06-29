@@ -247,6 +247,9 @@ function languageForExt(ext) {
 // that crosses newlines (multi-line strings / comments). At each line boundary we
 // close every currently-open span and re-open it on the next line, so each line is
 // independently well-formed and clickable, and carries its true source line number.
+// Returns the per-line span strings as an array (index i = source line i+1) so the
+// caller can interleave block-range wrappers between them (v2.7) without disturbing
+// the one-anchor-per-line structure.
 function wrapHighlightedLines(highlightedHtml) {
   const lines = highlightedHtml.split('\n');
   const open = []; // stack of full opening <span ...> tags currently unclosed
@@ -267,6 +270,183 @@ function wrapHighlightedLines(highlightedHtml) {
       `<span class="annotate-line" data-src-line="${i + 1}">${prefix}${line}${suffix}</span>`
     );
   }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// v2.7 — render-time code-BLOCK detection (enclosing-scope navigation)
+// ---------------------------------------------------------------------------
+//
+// The code view is otherwise a flat list of per-line spans, so the extension's
+// ancestor-climbing traversal has nothing between "this line" and "the document".
+// We scan the hljs-highlighted TOKEN STREAM (not raw text — so `{`/`<` inside
+// strings/comments are ignored) and stack-match enclosing blocks into nested
+// `[openLine, closeLine]` ranges, then wrap the spanned `.annotate-line` spans in
+// `<div class="annotate-code-block" data-src-line-range="N-M">` mirrors of the
+// markdown `<section>` emitter. `()` is excluded by decision (sub-statement,
+// over-segments); `{}`/`[]` and HTML/XML element nesting create levels.
+
+// Void / always-empty HTML elements never nest a close tag, so they do NOT open a block.
+const VOID_TAGS = new Set([
+  'br', 'img', 'hr', 'input', 'meta', 'link', 'source',
+  'area', 'base', 'col', 'embed', 'param', 'track', 'wbr',
+]);
+
+// hljs token classes whose contents are literal text (strings / comments / etc.) —
+// `{`/`[` inside them are data, not block delimiters, so brace matching is suppressed.
+const BRACE_SUPPRESS = ['string', 'comment', 'regexp', 'meta', 'doctag', 'char', 'quote'];
+
+// Walk the highlighted HTML once, maintaining the hljs span-class context and the
+// 1-based source line, and stack-match `{`/`[`/`<tag>` openers to their closers.
+// Returns laminar (well-nested) ranges [openLine, closeLine] with openLine < closeLine
+// (single-line blocks are dropped — they add no level above the clicked line).
+function detectCodeBlocks(highlightedHtml) {
+  const ranges = [];
+  const stack = []; // unified opener stack: {kind:'brace',expect} | {kind:'tag',name}, +line
+  const classStack = []; // hljs class string of each currently-open <span>
+  let line = 1;
+  let tagDepth = 0; // >0 while inside an hljs-tag span
+  let tagBuf = ''; // raw decoded-on-finalize text of the current tag
+  let tagStartLine = 0;
+
+  const bracesSuppressed = () => {
+    if (tagDepth > 0) return true;
+    for (let k = 0; k < classStack.length; k++) {
+      const c = classStack[k];
+      for (let s = 0; s < BRACE_SUPPRESS.length; s++) {
+        if (c.indexOf(BRACE_SUPPRESS[s]) !== -1) return true;
+      }
+    }
+    return false;
+  };
+
+  // Close `kind`-matching opener: pop down to it (discarding crossing/unclosed
+  // openers above), record its range. Keeps the recorded set laminar.
+  const resolve = (matchFn, closeLine) => {
+    for (let k = stack.length - 1; k >= 0; k--) {
+      if (matchFn(stack[k])) {
+        stack.length = k + 1;
+        const opener = stack.pop();
+        if (closeLine > opener.line) ranges.push([opener.line, closeLine]);
+        return;
+      }
+    }
+  };
+
+  const finalizeTag = () => {
+    const t = tagBuf.replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
+    let m;
+    if ((m = /^<\/\s*([A-Za-z][\w:-]*)/.exec(t))) {
+      const name = m[1].toLowerCase();
+      resolve((e) => e.kind === 'tag' && e.name === name, tagStartLine);
+    } else if ((m = /^<\s*([A-Za-z][\w:-]*)/.exec(t))) {
+      const name = m[1].toLowerCase();
+      const selfClosing = /\/>\s*$/.test(t);
+      if (!selfClosing && !VOID_TAGS.has(name)) {
+        stack.push({ kind: 'tag', name, line: tagStartLine });
+      }
+    }
+  };
+
+  const html = highlightedHtml;
+  for (let i = 0; i < html.length; i++) {
+    const ch = html[i];
+    if (ch === '<') {
+      // A literal `<` is always an hljs wrapper-span tag (source `<` is escaped to &lt;).
+      const end = html.indexOf('>', i);
+      const tag = html.slice(i, end + 1);
+      i = end;
+      if (tag.charAt(1) === '/') {
+        const popped = classStack.pop() || '';
+        if (popped.indexOf('tag') !== -1) {
+          tagDepth--;
+          if (tagDepth === 0) finalizeTag();
+        }
+      } else {
+        const cm = /class="([^"]*)"/.exec(tag);
+        const cls = cm ? cm[1] : '';
+        classStack.push(cls);
+        if (cls.indexOf('tag') !== -1) {
+          if (tagDepth === 0) {
+            tagBuf = '';
+            tagStartLine = line;
+          }
+          tagDepth++;
+        }
+      }
+      continue;
+    }
+    if (ch === '\n') {
+      line++;
+      continue;
+    }
+    if (tagDepth > 0) {
+      tagBuf += ch; // accumulate tag text (entities decoded at finalize)
+      continue;
+    }
+    if (bracesSuppressed()) continue;
+    if (ch === '{') stack.push({ kind: 'brace', expect: '}', line });
+    else if (ch === '[') stack.push({ kind: 'brace', expect: ']', line });
+    else if (ch === '}') resolve((e) => e.kind === 'brace' && e.expect === '}', line);
+    else if (ch === ']') resolve((e) => e.kind === 'brace' && e.expect === ']', line);
+  }
+  return ranges;
+}
+
+// Interleave `<div class="annotate-code-block" data-src-line-range="N-M">` wrappers
+// around the per-line spans, nested per the detected (laminar) ranges. The wrappers
+// are display:contents (ui.css) so they GROUP lines for DOM-ancestry traversal WITHOUT
+// adding a box or any whitespace: opens go immediately before a line's span and closes
+// immediately after, and chunks join with the SAME single '\n' the lines already used,
+// so the rendered `<pre>` whitespace is byte-for-byte unchanged.
+function emitCodeBlocks(lineSpans, ranges) {
+  if (!ranges.length) return lineSpans.join('\n');
+
+  // Dedup identical ranges (e.g. `[{ … }]` yields the same span twice).
+  const seen = new Set();
+  const uniq = [];
+  for (const r of ranges) {
+    const key = r[0] + '-' + r[1];
+    if (!seen.has(key)) { seen.add(key); uniq.push(r); }
+  }
+
+  // PHYSICAL extent vs LABEL. Two sibling blocks can TOUCH on one line (`} else {`):
+  // the closer ends block A on line L while the opener starts block B on line L. A line
+  // span can live in only one wrapper, so the opening block's physical wrap starts at the
+  // next line (its data-src-line-range LABEL still reports the true opener line). This
+  // guarantees no line is both an open-line and a close-line → strictly laminar DOM.
+  const closeLines = new Set(uniq.map((r) => r[1]));
+  const blocks = uniq.map((r) => {
+    let start = r[0];
+    while (start < r[1] && closeLines.has(start)) start++;
+    return { label: r, start, end: r[1] };
+  });
+
+  const opensAt = new Map();
+  const closesAt = new Map();
+  for (const b of blocks) {
+    (opensAt.get(b.start) || opensAt.set(b.start, []).get(b.start)).push(b);
+    (closesAt.get(b.end) || closesAt.set(b.end, []).get(b.end)).push(b);
+  }
+  // Outermost opens first (largest physical end); innermost closes first (largest start).
+  for (const arr of opensAt.values()) arr.sort((a, b) => b.end - a.end || a.start - b.start);
+  for (const arr of closesAt.values()) arr.sort((a, b) => b.start - a.start || a.end - b.end);
+
+  const out = [];
+  for (let i = 0; i < lineSpans.length; i++) {
+    const ln = i + 1;
+    let chunk = '';
+    const opens = opensAt.get(ln);
+    if (opens) {
+      for (const b of opens) {
+        chunk += `<div class="annotate-code-block" data-src-line-range="${b.label[0]}-${b.label[1]}">`;
+      }
+    }
+    chunk += lineSpans[i];
+    const closes = closesAt.get(ln);
+    if (closes) chunk += '</div>'.repeat(closes.length);
+    out.push(chunk);
+  }
   return out.join('\n');
 }
 
@@ -284,7 +464,9 @@ function renderCode(content, ext) {
     highlighted = hljs.highlightAuto(src).value;
   }
 
-  const lines = wrapHighlightedLines(highlighted);
+  const lineSpans = wrapHighlightedLines(highlighted);
+  const ranges = detectCodeBlocks(highlighted);
+  const lines = emitCodeBlocks(lineSpans, ranges);
   return `<pre class="annotate-render annotate-code"><code class="hljs">${lines}</code></pre>`;
 }
 
@@ -484,4 +666,5 @@ module.exports = {
   detectFormat,
   columnLetter,
   parseDelimited,
+  detectCodeBlocks,
 };

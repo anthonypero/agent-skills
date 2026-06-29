@@ -291,8 +291,10 @@
     return max;
   }
 
-  // §C: the section anchor derives DIRECTLY from the render.js wrapper's data-src-line-range
-  // ("N-M"). null if the element isn't a section-wrapped <section>.
+  // §C / v2.7: the range anchor derives DIRECTLY from a render.js wrapper's data-src-line-range
+  // ("N-M") — a markdown <section class="annotate-section"> OR a code-view
+  // <div class="annotate-code-block">; both carry the same attribute and are treated
+  // identically. null if the element carries no well-formed data-src-line-range.
   function sectionAnchorFromWrapper(section) {
     if (!section) return null;
     const m = /^(\d+)-(\d+)$/.exec(section.getAttribute('data-src-line-range') || '');
@@ -311,7 +313,7 @@
   function isTraversalStop(node) {
     if (!node || node.nodeType !== 1 || typeof node.matches !== 'function') return false;
     if (SKIP_STOP_TAGS[node.tagName]) return false;
-    if (node.matches('section.annotate-section')) return true; // section
+    if (node.hasAttribute('data-src-line-range')) return true; // range wrapper: md <section> OR code-block <div>
     if (node.hasAttribute('data-cell')) return true; // CSV / table cell
     if (node.hasAttribute('data-key-path')) return true; // rendered struct (JSON/YAML/TOML) node — leaf or container
     if (node.hasAttribute('data-src-line')) return true; // md line / block / li / ul / tr / table
@@ -345,7 +347,9 @@
   // single {line} when start === end, so a leaf block stays a line anchor). Falls back to the
   // nearest enclosing section when an element carries no derivable line; null if even that fails.
   function anchorForLevel(node) {
-    if (typeof node.matches === 'function' && node.matches('section.annotate-section')) {
+    // A range wrapper (md <section> or code-block <div>) reports its DECLARED
+    // data-src-line-range LABEL, not a descendant-derived extent.
+    if (node.hasAttribute && node.hasAttribute('data-src-line-range')) {
       return sectionAnchorFromWrapper(node);
     }
     if (node.hasAttribute && node.hasAttribute('data-cell')) {
@@ -363,7 +367,7 @@
         ? { kind: 'source', line: range[0] }
         : { kind: 'source', lineRange: range };
     }
-    const section = typeof node.closest === 'function' ? node.closest('section.annotate-section') : null;
+    const section = typeof node.closest === 'function' ? node.closest('[data-src-line-range]') : null;
     if (section) return sectionAnchorFromWrapper(section);
     return null;
   }
@@ -836,7 +840,9 @@
   // A single page-positioned OUTLINE over the anchored element (clipped like the §K box).
   function composerBoxNodes(element) {
     if (!element || typeof element.getBoundingClientRect !== 'function') return [];
-    const r = clipRectToScrollAncestors(element, element.getBoundingClientRect());
+    // visualRectFor: a re-opened lineRange anchor can resolve (via elementForAnchor) to a
+    // display:contents code-block wrapper — union its line spans rather than collapse to 0×0.
+    const r = clipRectToScrollAncestors(element, visualRectFor(element));
     if (r.width <= 0 || r.height <= 0) return [];
     const sx = root.scrollX || 0;
     const sy = root.scrollY || 0;
@@ -1306,9 +1312,10 @@
   function elementForAnchor(a) {
     if (!a) return null;
     if (a.lineRange != null) {
-      // §C section wrapper first (data-src-line-range), else the heading at the start line.
+      // §C / v2.7: any range wrapper first (md <section> OR code-block <div>, both carry
+      // data-src-line-range), else the line/heading at the start line.
       return (
-        doc.querySelector('.annotate-section[data-src-line-range="' + a.lineRange[0] + '-' + a.lineRange[1] + '"]') ||
+        doc.querySelector('[data-src-line-range="' + a.lineRange[0] + '-' + a.lineRange[1] + '"]') ||
         lineEl(a.lineRange[0])
       );
     }
@@ -1613,7 +1620,10 @@
     // Block-level anchor (line / li / section / header / document / cell): pin sits OUTSIDE the
     // block in the left gutter/margin — ~22px left of the block's leading edge, clamped to the
     // viewport (v2 revert: NOT on/behind the words). Rides the content as it scrolls.
-    const r = elx.getBoundingClientRect();
+    // visualRectFor: a code-block (lineRange) anchor is display:contents — use its line-span
+    // union so the gutter pin sits at the block's top-left, not at the page origin.
+    const r = visualRectFor(elx);
+    if (!r) return null;
     return { x: Math.max(2, r.left - 22), y: r.top };
   }
 
@@ -2000,6 +2010,39 @@
     selLock = null;
   }
 
+  // v2.7 fix: the on-screen rectangle to draw a visual (selection box / composer outline / pin
+  // gutter) from a level's / anchor's element. Normally this is just el.getBoundingClientRect().
+  // BUT a code-BLOCK wrapper (`.annotate-code-block`) is `display:contents` — it is layout-neutral
+  // by design (it must not disturb the <pre> pre-wrap reflow), so it generates NO box and its own
+  // getBoundingClientRect() collapses to a 0×0 rect at the page origin (0,0). Drawing an overlay
+  // from that rect produced the ~1px blue square at the top-left corner. For such a boxless
+  // element, synthesize the rect from the UNION of its descendant `.annotate-line` spans (which DO
+  // have boxes): top of the first line through the bottom of the last, left..right spanning the
+  // line column exactly like a single-line / section selection. Pure: depends only on `elx`, so it
+  // takes any object exposing getBoundingClientRect() + querySelectorAll('.annotate-line').
+  function visualRectFor(elx) {
+    if (!elx || typeof elx.getBoundingClientRect !== 'function') return null;
+    const r = elx.getBoundingClientRect();
+    // A `display:contents` element (code-block wrapper) — detected by the known class OR a
+    // collapsed 0×0 rect — has no box of its own; fall back to the union of its line spans.
+    const boxless =
+      (elx.classList && elx.classList.contains('annotate-code-block')) ||
+      (r.width <= 0 && r.height <= 0);
+    if (!boxless || typeof elx.querySelectorAll !== 'function') return r;
+    const lines = elx.querySelectorAll('.annotate-line');
+    let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+    for (let i = 0; i < lines.length; i++) {
+      const lr = lines[i].getBoundingClientRect();
+      if (lr.width <= 0 && lr.height <= 0) continue; // skip a line that itself has no box
+      if (lr.left < left) left = lr.left;
+      if (lr.top < top) top = lr.top;
+      if (lr.right > right) right = lr.right;
+      if (lr.bottom > bottom) bottom = lr.bottom;
+    }
+    if (!Number.isFinite(left)) return r; // no usable descendant lines -> the original rect
+    return { left: left, top: top, right: right, bottom: bottom, width: right - left, height: bottom - top };
+  }
+
   // §H.2: a selected level can be larger than a scroll-container it lives inside — most notably
   // the whole-<table> stop, which (after §H.1) is content-width and scrolls horizontally INSIDE a
   // capped .annotate-table-wrap. Drawing the selection box from the element's full
@@ -2037,7 +2080,8 @@
     const level = selLock.levels[selLock.idx];
     const elx = level && level.el;
     if (!elx || !doc.contains(elx)) { clearLock(); return; }
-    const r = clipRectToScrollAncestors(elx, elx.getBoundingClientRect());
+    // visualRectFor: a code-block level is display:contents (no box) — union its line spans.
+    const r = clipRectToScrollAncestors(elx, visualRectFor(elx));
     const sx = root.scrollX || 0;
     const sy = root.scrollY || 0;
     selLock.box.style.left = (r.left + sx) + 'px';

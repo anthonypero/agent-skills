@@ -300,6 +300,105 @@ test('code: multi-line string keeps hljs spans balanced across lines', () => {
 });
 
 // ===========================================================================
+// Code BLOCK detection (v2.7) — nested .annotate-code-block wrappers
+// ===========================================================================
+
+// Ranges of every .annotate-code-block, in document order.
+function codeBlockRanges(html) {
+  return [...dom(html).querySelectorAll('.annotate-code-block')].map((b) =>
+    b.getAttribute('data-src-line-range')
+  );
+}
+
+// The enclosing .annotate-code-block ranges of the wrapper with `range`, innermost-first.
+function codeBlockAncestors(html, range) {
+  const b = dom(html).querySelector('.annotate-code-block[data-src-line-range="' + range + '"]');
+  const out = [];
+  let p = b && b.parentElement;
+  while (p) {
+    if (p.classList && p.classList.contains('annotate-code-block')) {
+      out.push(p.getAttribute('data-src-line-range'));
+    }
+    p = p.parentElement;
+  }
+  return out;
+}
+
+test('code blocks (PHP): {} bodies nest class > function > if; () excluded; comment braces ignored', () => {
+  const { html } = render(fx('sample.php'));
+  const ranges = codeBlockRanges(html);
+
+  // class body 2-11 ⊃ function body 4-10 ⊃ if body 6-8 — enclosing scopes (parents), nested.
+  assert.deepEqual(ranges.sort(), ['2-11', '4-10', '6-8'].sort(), 'exactly the {}-body blocks');
+  assert.deepEqual(codeBlockAncestors(html, '6-8'), ['4-10', '2-11'], 'if nests in function nests in class');
+  assert.deepEqual(codeBlockAncestors(html, '4-10'), ['2-11'], 'function nests in class');
+
+  // The `{ ... }` inside the line-7 comment must NOT create a block (token-stream, not raw text).
+  // The single-line `private $items = [];` on line 3 must NOT create a block (no 3-3 level).
+  assert.ok(!ranges.includes('3-3'), 'single-line [] does not create a block');
+  assert.equal(
+    ranges.filter((r) => r.startsWith('7')).length,
+    0,
+    'comment braces create no block'
+  );
+});
+
+test('code blocks: per-line [data-src-line] count is unchanged; wrappers carry no line anchor', () => {
+  const { html } = render(fx('sample.php')); // 11 source lines
+  const root = dom(html);
+  // One anchor per source line — the wrappers must only GROUP existing spans, never split/duplicate.
+  assert.equal(root.querySelectorAll('[data-src-line]').length, 11, 'one [data-src-line] per source line');
+  assert.equal(root.querySelectorAll('.annotate-line').length, 11, 'one .annotate-line per source line');
+  root.querySelectorAll('.annotate-code-block').forEach((b) => {
+    assert.equal(b.hasAttribute('data-src-line'), false, 'a code-block wrapper is NOT a [data-src-line] anchor');
+    assert.ok(b.hasAttribute('data-src-line-range'), 'a code-block wrapper carries data-src-line-range (same attr as md <section>)');
+  });
+  // The <pre> text is byte-for-byte the source (display:contents wrappers add no whitespace).
+  const src = fs.readFileSync(fx('sample.php'), 'utf8').replace(/\n$/, '');
+  assert.equal(root.querySelector('pre.annotate-code').textContent, src, 'wrappers add no <pre> whitespace');
+});
+
+test('code blocks (JS): [] arrays nest inside {} objects; string/comment delimiters ignored', () => {
+  const { html } = render(fx('blocks.js'));
+  const ranges = codeBlockRanges(html);
+  // { object } 1-8 ⊃ [ array ] 2-5.
+  assert.deepEqual(ranges.sort(), ['1-8', '2-5'].sort(), 'object + array blocks');
+  assert.deepEqual(codeBlockAncestors(html, '2-5'), ['1-8'], 'array nests in object');
+  // The `}`/`]` inside the line-6 string and the `{`/`[` inside the line-7 comment create no blocks.
+  assert.ok(!ranges.some((r) => r.startsWith('6')), 'string delimiters create no block');
+  assert.ok(!ranges.some((r) => r.startsWith('7')), 'comment delimiters create no block');
+});
+
+test('code blocks (HTML/XML): element nesting climbs; void + self-closing tags do NOT nest', () => {
+  const { html } = render(fx('sample.html'));
+  const ranges = codeBlockRanges(html);
+  // <div> 1-8 ⊃ <ul> 2-5. <li>one</li> is single-line (no level); <img> is void; <br/> self-closing.
+  assert.deepEqual(ranges.sort(), ['1-8', '2-5'].sort(), 'div + ul element blocks only');
+  assert.deepEqual(codeBlockAncestors(html, '2-5'), ['1-8'], 'ul nests in div');
+  assert.ok(!ranges.includes('3-3') && !ranges.includes('4-4'), 'single-line <li> creates no block');
+  assert.ok(!ranges.some((r) => r.startsWith('6') || r.startsWith('7')), 'void/self-closing tags do not open a block');
+});
+
+test('code blocks: touching siblings (`} else {`) stay laminar (no crossing wrappers)', () => {
+  // hljs-token detection + the physical-start bump must keep the DOM strictly nested even when a
+  // block closes and a sibling opens on the SAME line. We assert valid nesting via parse, not text.
+  const tmp = path.join(require('node:os').tmpdir(), 'annotate-elsecase.php');
+  fs.writeFileSync(
+    tmp,
+    ['<?php', 'function f() {', '  if (a) {', '    x();', '  } else {', '    y();', '  }', '}', ''].join('\n')
+  );
+  const { html } = render(tmp);
+  const root = dom(html);
+  // The if-body and else-body are SIBLINGS, each nested only in the function body — never each other.
+  assert.deepEqual(codeBlockAncestors(html, '3-5'), ['2-8'], 'if body nests only in function');
+  assert.deepEqual(codeBlockAncestors(html, '5-7'), ['2-8'], 'else body nests only in function (sibling of if)');
+  // Per-line anchors intact + no extra <pre> whitespace despite the wrappers.
+  const src = fs.readFileSync(tmp, 'utf8').replace(/\n$/, '');
+  assert.equal(root.querySelectorAll('[data-src-line]').length, src.split('\n').length, 'one anchor per line');
+  assert.equal(root.querySelector('pre.annotate-code').textContent, src, 'no extra whitespace');
+});
+
+// ===========================================================================
 // Structured (JSON / YAML / TOML) — data-key-path on every value node
 // ===========================================================================
 
