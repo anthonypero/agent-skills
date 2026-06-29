@@ -1124,7 +1124,10 @@ body[data-annotate-width="wide"] .annotate-markdown .annotate-section > :not(.an
   background: var(--annotate-code-bg);
   color: var(--annotate-content-fg);
   margin: 0;
+  /* left padding holds the line-number gutter (base 18px + gutter width); see
+     .annotate-line::before below. top/right/bottom unchanged. */
   padding: 16px 18px 64px;
+  padding-left: calc(18px + var(--annotate-gutter));
   white-space: pre-wrap;
   overflow-wrap: break-word;
   overflow-x: auto;
@@ -1132,6 +1135,8 @@ body[data-annotate-width="wide"] .annotate-markdown .annotate-section > :not(.an
   font-size: 13px;
   line-height: 1.55;
   min-height: 100vh;
+  /* gutter = number box + gap; keep in sync with .annotate-line::before width+margin-right. */
+  --annotate-gutter: 3.4em;
 }
 /* FIX B (+ dogfood follow-up): the reading-width presets set the CODE wrap column, mirroring the
    Markdown reading column (same 760 / 1080 stops). comfortable/wide are CENTERED via margin auto
@@ -1160,8 +1165,33 @@ body[data-annotate-width="wide"] .annotate-code {
   display: contents;
 }
 
-/* ===========================================================================
-   FIX A — syntax-highlight theme for the CODE VIEW (hljs token colors).
+/* Line-number gutter (CODE view only). Each source line is already
+   <span class="annotate-line" data-src-line="N">; a ::before pseudo prints N so it adds
+   ZERO text (generated content never enters textContent → pre.textContent stays === source).
+   The line spans stay INLINE (separated by the source `\n` text nodes that produce the line
+   breaks under white-space:pre-wrap), so this does NOT switch them to display:block and there
+   is NO extra blank line / double-spacing. The number appears ONCE per logical line (a ::before
+   renders only at the element's start, never on soft-wrapped continuation rows).
+   HANGING INDENT: .annotate-code adds `--annotate-gutter` of left padding, and the number is
+   pulled back into that padding via a negative left margin; soft-wrapped continuation rows wrap
+   to the (padded) content edge, so they align under the CODE column, not under the number.
+   user-select:none keeps the number out of text selections / `text` quote anchors. The number
+   is generated content of .annotate-line, so a click on it still targets that line (anchoring
+   unaffected); and it sits inside the line box, so the block-selection outline (which unions
+   .annotate-line rects) naturally includes it. */
+.annotate-code .annotate-line::before {
+  content: attr(data-src-line);
+  display: inline-block;
+  width: 2.6em;
+  margin-left: calc(-1 * var(--annotate-gutter));
+  margin-right: 0.8em;
+  text-align: right;
+  color: var(--annotate-muted);
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  -webkit-user-select: none;
+}
    render.js already runs highlight.js and emits hljs-* token spans inside each
    .annotate-line, but ui.css had ZERO .hljs-* color rules, so code rendered flat.
    These map the hljs token classes onto the --annotate-hl-* palette vars (defined
