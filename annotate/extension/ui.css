@@ -980,22 +980,37 @@ body.annotate-sidebar-open[data-sidebar-mode="overlay"] {
   color: var(--annotate-content-fg);
 }
 
-/* reading column (#3 / §D): the Markdown root + every <section> span the FULL content width;
-   the reading-width preset (set on <body> by content.js, persisted per-user) is applied to the
-   BLOCKS inside them, NOT to the container. Dogfood-5 #2: the table wrap is now INCLUDED in this
-   constraint (it used to be excluded so the table broke OUT to the full content width — but then
-   its left edge sat in the prose's margin, not in line with the paragraph text). It now shares
-   the prose's max-width + centered margins, so .annotate-table-wrap STARTS at the same left edge
-   as the prose and the wide table scrolls horizontally WITHIN that reading column (overflow-x on
-   the wrap, below). The content width already reflects the §B sidebar in shrink mode (body
-   padding-right). The child combinators keep the constraint to a section's DIRECT block children
-   — nested sections recurse; blocks inside a list item are not double-centered; only the
-   <section> wrappers are excluded (they recurse). */
+/* RENDERED-MARKDOWN "document card" (#3 / §D): the markdown view reads as a centered, contained
+   page floating on a neutral backdrop — the same outlined-page feel as the code view. The
+   .annotate-markdown ROOT is itself the page-card: per-preset max-width + auto side-margins center
+   it (comfortable/wide = a fixed-width page; full = full-bleed), and it carries the content
+   background, a subtle outline, rounded corners and a soft shadow (see the preset rules below).
+   The card max-width matches the CODE view (760 / 1080) so the two rendered views read as sibling
+   pages. The inner blocks (prose, lists, the §C <section> wrappers, the table wrap) simply FILL the
+   card — the CARD does the centering, so there is NO per-block max-width left to fight it. A wide
+   table still scrolls horizontally WITHIN the card (overflow-x on .annotate-table-wrap, below). The
+   card width already reflects the §B sidebar in shrink mode (body padding-right). */
+
+/* The BACKDROP behind the card: paint the BODY the neutral panel tone (--annotate-bg, the same as
+   the chrome + footer) so the content-bg card stands out as a page on a desk, in light AND dark.
+   This rule is DOUBLY gated off a --as-frontend page: (a) body.annotate-themed is added ONLY on a
+   view WE rendered (content.js line ~519), never a live frontend; (b) :has(.annotate-markdown)
+   needs the .annotate-render.annotate-markdown markup our server emits, which a frontend page never
+   carries. Either gate alone already excludes a frontend page. min-height + border-box let the
+   backdrop fill the viewport for a SHORT doc without adding a scrollbar. The code/struct/csv views
+   keep the default content-bg backdrop (they contain no .annotate-markdown). */
+body.annotate-themed:has(.annotate-markdown) {
+  background: var(--annotate-bg);
+  min-height: 100vh;
+  box-sizing: border-box;
+}
 .annotate-markdown {
-  padding: 24px 28px 72px;
+  padding: 28px 32px 72px;
   line-height: 1.62;
   font-size: 15px;
   word-wrap: break-word;
+  /* the card carries the page colour (content-bg); the body paints the neutral backdrop above. */
+  background: var(--annotate-content-bg);
   /* §H.1: bound the markdown root + sections to their container and let them be NARROWER than
      their intrinsic content (min-width:0). A wide table is width:max-content; without min-width:0
      a block that is — or becomes, on a flex/grid host — an intrinsically-sized item floors at its
@@ -1011,19 +1026,24 @@ body.annotate-sidebar-open[data-sidebar-mode="overlay"] {
   max-width: 100%;
   min-width: 0;
 }
-body[data-annotate-width="comfortable"] .annotate-markdown > :not(.annotate-section),
-body[data-annotate-width="comfortable"] .annotate-markdown .annotate-section > :not(.annotate-section) {
-  max-width: 760px;
-  margin-left: auto;
-  margin-right: auto;
+/* comfortable + wide: the markdown ROOT is the centered document card — a fixed-width page that
+   carries the content background, a subtle outline, rounded corners and a soft shadow, with
+   top/bottom breathing room so it floats on the neutral backdrop. margin auto centers it; the
+   inner blocks just fill it (no per-block centering). The max-width matches the CODE card (760 /
+   1080) so the two rendered views read as sibling pages. The shadow is intentionally soft (it is
+   barely visible on the dark backdrop, where the 1px border carries the definition). */
+body[data-annotate-width="comfortable"] .annotate-markdown,
+body[data-annotate-width="wide"] .annotate-markdown {
+  margin: 24px auto 44px;
+  border: 1px solid var(--annotate-line);
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 10px 30px rgba(0, 0, 0, 0.08);
 }
-body[data-annotate-width="wide"] .annotate-markdown > :not(.annotate-section),
-body[data-annotate-width="wide"] .annotate-markdown .annotate-section > :not(.annotate-section) {
-  max-width: 1080px;
-  margin-left: auto;
-  margin-right: auto;
-}
-/* full: every block (prose AND the table wrap) spans the full content width — no max-width. */
+body[data-annotate-width="comfortable"] .annotate-markdown { max-width: 760px; }
+body[data-annotate-width="wide"] .annotate-markdown { max-width: 1080px; }
+/* full: NO card — .annotate-markdown keeps its base rule (max-width:100%, no margin/border/radius/
+   shadow) so the prose spans the full content width edge-to-edge, exactly as the `full` preset did
+   before. The blocks (prose AND the table wrap) inherit that full width. */
 
 .annotate-markdown h1,
 .annotate-markdown h2,
@@ -1078,11 +1098,11 @@ body[data-annotate-width="wide"] .annotate-markdown .annotate-section > :not(.an
    is a horizontal-scroll box (overflow-x:auto) so a wide table scrolls INSIDE its own box instead
    of breaking the page layout / the §B sidebar. The table fills the box when narrow
    (min-width:100%) and grows past it when wide (width:max-content), at which point the box
-   scrolls. Dogfood-5 #2: the wrap now INHERITS the reading-column constraint above (max-width +
-   centered margins per width preset), so it lines up with the prose's left edge and the table
-   scrolls within that column — rather than spanning edge-to-edge in the prose margin. The
-   max-width:100% + min-width:0 here are the §H fallback (full-width preset / non-markdown) and
-   the floor that makes overflow-x:auto actually engage. */
+   scrolls. The wrap is a plain block child of the markdown card, so it FILLS the card's content
+   column (the card itself sets the reading width per preset, above) and the wide table scrolls
+   within that column — rather than spanning edge-to-edge in the prose margin. The max-width:100% +
+   min-width:0 here cap it at the card width and are the floor that makes overflow-x:auto actually
+   engage (rather than the box growing to fit the table). */
 .annotate-table-wrap {
   overflow-x: auto;
   /* §H.1: the scroll container itself caps at its container width and may shrink below the
