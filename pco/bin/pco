@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""
+pco — Planning Center API CLI. Layer 0: generic authenticated verbs against
+any PCO product endpoint, with pagination and rate-limit handling built in.
+
+Usage:
+    pco get <path> [--all]              GET; --all follows pagination and
+                                        prints a JSON array of every item
+    pco post <path> --data <json>       POST (--data also accepts @file or
+    pco patch <path> --data <json>       '-' for stdin)
+    pco delete <path>
+    pco whoami                          identity + credential-source check
+
+    Global: --profile <name>            pick a ~/.config/pco/credentials.md
+                                        profile (default: $PCO_PROFILE or
+                                        the nearest project's secrets file —
+                                        see lib/pco_api.py for the order)
+
+Paths include the product prefix: /services/v2/songs, /people/v2/people, ...
+Output is pretty-printed JSON on stdout; exit 1 on API errors.
+"""
+
+import argparse
+import json
+import os
+import sys
+
+# Resolve through symlinks so an installed ~/.local/bin/pco still finds lib/.
+_HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "lib"))
+from pco_api import PCOClient
+
+
+def load_data(arg: str) -> dict:
+    if arg == "-":
+        return json.loads(sys.stdin.read())
+    if arg.startswith("@"):
+        with open(arg[1:], "r", encoding="utf-8") as f:
+            return json.loads(f.read())
+    return json.loads(arg)
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pco", description="Planning Center API CLI (generic verbs).")
+    parser.add_argument("--profile", "-P", default=None,
+                        help="Credentials profile in ~/.config/pco/credentials.md")
+    parser.add_argument("verb", choices=["get", "post", "patch", "delete", "whoami"])
+    parser.add_argument("path", nargs="?",
+                        help="API path incl. product prefix, e.g. /services/v2/songs")
+    parser.add_argument("--data", "-d",
+                        help="JSON body for post/patch (literal, @file, or '-').")
+    parser.add_argument("--all", action="store_true",
+                        help="get: follow pagination, print every item as one array.")
+    args = parser.parse_args(argv[1:])
+
+    if args.verb != "whoami" and not args.path:
+        parser.error(f"'{args.verb}' requires a path")
+    if args.verb in ("post", "patch") and not args.data:
+        parser.error(f"'{args.verb}' requires --data")
+
+    try:
+        client = PCOClient(profile=args.profile)
+        if args.verb == "whoami":
+            me = client.get("/people/v2/me")["data"]
+            a = me["attributes"]
+            result = {"id": me["id"], "name": a.get("name"),
+                      "credentials": client.credential_source}
+        elif args.verb == "get" and args.all:
+            result = list(client.get_all(args.path))
+        elif args.verb == "get":
+            result = client.get(args.path)
+        elif args.verb == "delete":
+            result = client.delete(args.path) or {"deleted": args.path}
+        else:
+            result = getattr(client, args.verb)(args.path, load_data(args.data))
+    except (RuntimeError, json.JSONDecodeError, OSError) as e:
+        print(f"pco: {e}", file=sys.stderr)
+        return 1
+
+    json.dump(result, sys.stdout, indent=2)
+    print()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
