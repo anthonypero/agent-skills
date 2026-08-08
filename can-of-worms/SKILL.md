@@ -23,7 +23,28 @@ Do all four, in order:
 
 ## Resolving the backlog file
 
-The file is portable across repo types. Pick its location in this order:
+### First decide scope: local or global
+
+Decide by **what the item is about, not where you happen to be working.**
+
+- **Local (the default, almost always).** The item concerns the repo/project in front of you.
+  Resolve a local file with the repo rules below.
+- **Global (rare).** The item is a **machine-level, cross-project, or cross-machine** concern with
+  **no single repo home** — e.g. "migrate all the persistent `cc-*` sessions to the Linux box," "the
+  Mac's backup cron is broken," a workflow preference that spans every project. These go to the
+  global backlog:
+  - **Location:** `~/.claude/can-of-worms.md` (alongside the global `CLAUDE.md` — the cross-project
+    home). It is the one exception to "in-repo."
+  - **Check it:** `ls ~/.claude/can-of-worms.md`; create it with the header template if missing
+    (title it `global (cross-project)`).
+
+**Write global only when the item has no natural project home.** If it belongs to a *specific* other
+project, prefer that project's `can-of-worms.md` (log it to the tier it actually concerns) over
+global — global is for genuinely homeless cross-cutting items, not "I'm not sure where this goes."
+When torn between global and a plausible project home, pick the project and note the cross-cutting
+angle in the *why*, or ask.
+
+### Local: pick the in-repo location, in this order
 
 1. **Existing file wins.** If a `can-of-worms.md` already exists in the active working context
    (the current tier, then the repo root), append to it.
@@ -35,7 +56,8 @@ The file is portable across repo types. Pick its location in this order:
      work use `.agents/can-of-worms.md`. (Same tier rule the `session` flow uses for notes.)
    - **Plain repo with an `.agents/` dir:** use `.agents/can-of-worms.md`.
    - **Plain repo, no `.agents/`:** use `can-of-worms.md` at the repo root.
-   - **No repo / loose directory:** use `can-of-worms.md` in the working directory.
+   - **No repo / loose directory:** use `can-of-worms.md` in the working directory. (This is a
+     *loose-directory* fallback, **not** the global backlog — don't use it for machine-wide items.)
 4. **Create it if missing**, with the header template below.
 
 Mark an item that belongs to a different tier than the current one as *cross-tier* in its *why*,
@@ -74,3 +96,8 @@ now. Tracked here, in the repo, rather than in the harness task list.
 When the user asks what's in the can of worms, or to triage it, read the resolved file and
 summarize the `## Open` items. Promote an item to active work only when the user decides to — at
 which point it leaves the backlog for the live thread (restart.md / notes / the task at hand).
+
+Also check the **global** backlog (`~/.claude/can-of-worms.md`) when: the user asks about "global"
+or machine-wide items, you're not inside a project repo, or they ask broadly ("what's in the can of
+worms?") without naming a project. When both a local and the global file exist and the ask is broad,
+summarize each under its own heading so it's clear which scope an item lives in.
