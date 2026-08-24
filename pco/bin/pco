@@ -16,7 +16,22 @@ Usage:
                                         from a template (chmod 600)
 
   Services (layer 1 — named operations; <type> is an id or name substring):
+    pco services tags                   tag groups + tags (song/arrangement/person/media)
+    pco services songs export [--out library.json] [--include-hidden]
+                                        full library: songs, tags, arrangements, keys
+    pco services songs tag <song id|title> [--arrangement <id|name>]
+        [--add TAG ...] [--remove TAG ...] [--dry-run]
+                                        tag names may be qualified "Group:Tag";
+                                        single-select groups swap automatically
+    pco services songs apply-tags --csv file [--dry-run]
+                                        bulk: columns song, arrangement (optional),
+                                        add, remove (";"-separated tag names)
+    pco services songs audit --from library.json [--group NAME]
+                                        songs/arrangements with no tag from a group
     pco services types
+    pco services song-usage <type> --after D [--before D] [--csv out.csv]
+                                        every song item in the range: date,
+                                        section, title, arrangement, key
     pco services templates <type>
     pco services plans <type> [--after YYYY-MM-DD] [--before YYYY-MM-DD]
     pco services extend <type> --through YYYY-MM-DD --template <name|id>
@@ -90,6 +105,21 @@ def services_main(argv: list[str], profile: str | None) -> int:
                                      description="Planning Center Services operations.")
     sub = parser.add_subparsers(dest="op", required=True)
     sub.add_parser("types", help="list service types")
+    sub.add_parser("tags", help="list tag groups and tags")
+    p = sub.add_parser("songs", help="song library operations")
+    p.add_argument("songs_op", choices=["export", "tag", "apply-tags", "audit"])
+    p.add_argument("ref", nargs="?", help="tag: song id or exact title")
+    p.add_argument("--out", help="export: write JSON here (default stdout)")
+    p.add_argument("--include-hidden", action="store_true")
+    p.add_argument("--arrangement", help="tag: arrangement id|name (tags the arrangement, not the song)")
+    p.add_argument("--add", action="append", default=[]); p.add_argument("--remove", action="append", default=[])
+    p.add_argument("--csv", help="apply-tags: bulk CSV")
+    p.add_argument("--from", dest="from_json", help="audit: library.json from export")
+    p.add_argument("--group", help="audit: only this tag group")
+    p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("song-usage", help="song items across plans in a date range")
+    p.add_argument("type"); p.add_argument("--after", type=_date, required=True)
+    p.add_argument("--before", type=_date); p.add_argument("--csv", help="write CSV here (default: stdout)")
     p = sub.add_parser("templates", help="list plan templates"); p.add_argument("type")
     p = sub.add_parser("plans", help="list plans"); p.add_argument("type")
     p.add_argument("--after", type=_date); p.add_argument("--before", type=_date)
@@ -134,12 +164,78 @@ def services_main(argv: list[str], profile: str | None) -> int:
     args = parser.parse_args(argv)
 
     client = PCOClient(profile=profile)
+    if args.op == "tags":
+        import pco_services as SV
+        for g in SV.get_tag_groups(client):
+            print(f"{g['id']:>8}  {g['name']:<20} for={g['tags_for']:<12} "
+                  f"multiple={'yes' if g['allow_multiple'] else 'no '}  "
+                  + ", ".join(t["name"] for t in g["tags"]))
+        return 0
+    if args.op == "songs":
+        import pco_services as SV
+        if args.songs_op == "export":
+            lib = SV.export_library(client, args.include_hidden,
+                                    log=lambda m: print(m, file=sys.stderr))
+            out = open(args.out, "w", encoding="utf-8") if args.out else sys.stdout
+            json.dump(lib, out, indent=2); out.write("\n")
+            print(f"{len(lib)} songs exported", file=sys.stderr)
+            return 0
+        if args.songs_op == "audit":
+            if not args.from_json:
+                raise RuntimeError("audit needs --from library.json (see songs export)")
+            with open(args.from_json, encoding="utf-8") as f:
+                lib = json.load(f)
+            for group, gaps in SV.audit_library(lib, SV.get_tag_groups(client)).items():
+                if args.group and group.lower() != args.group.lower():
+                    continue
+                print(f"## {group}: {len(gaps)} missing")
+                for g in gaps:
+                    print(f"  {g}")
+            return 0
+        index = SV.TagIndex(client)
+
+        def do(song_ref, arr_ref, add, remove):
+            song = SV.find_song(client, song_ref)
+            if arr_ref:
+                arr = SV.find_arrangement(client, song["id"], arr_ref)
+                path, scope = SV.arrangement_path(song["id"], arr["id"]), "arrangement"
+                label = f"{song['attributes']['title']} / {arr['attributes']['name']}"
+            else:
+                path, scope, label = SV.song_path(song["id"]), "song", song["attributes"]["title"]
+            before, after = SV.retag(client, index, path, scope, add, remove, args.dry_run)
+            mark = "  [dry-run]" if args.dry_run else ("" if before != after else "  (no change)")
+            print(f"{label}: {before} -> {after}{mark}")
+
+        if args.songs_op == "tag":
+            if not args.ref:
+                raise RuntimeError("tag needs a song id or title")
+            do(args.ref, args.arrangement, args.add, args.remove)
+            return 0
+        if args.songs_op == "apply-tags":
+            import csv
+            if not args.csv:
+                raise RuntimeError("apply-tags needs --csv")
+            with open(args.csv, newline="", encoding="utf-8") as f:
+                for r in csv.DictReader(f):
+                    split = lambda v: [x.strip() for x in (v or "").split(";") if x.strip()]
+                    do(r["song"], (r.get("arrangement") or None), split(r.get("add")), split(r.get("remove")))
+            return 0
     if args.op == "types":
         for t in P.get_service_types(client):
             a = t["attributes"]
             print(f"{t['id']:>8}  {a['name']:<40} {a.get('frequency') or ''}")
         return 0
     st = P.resolve_service_type(client, args.type)
+    if args.op == "song-usage":
+        import csv
+        rows = P.song_usage(client, st["id"], args.after, args.before or dt.date.today(),
+                            log=lambda m: print(m, file=sys.stderr))
+        out = open(args.csv, "w", newline="", encoding="utf-8") if args.csv else sys.stdout
+        w = csv.DictWriter(out, fieldnames=["date", "plan_id", "sequence", "section", "title",
+                                            "song_id", "arrangement", "key", "length"])
+        w.writeheader(); w.writerows(rows)
+        print(f"{len(rows)} song items across the range", file=sys.stderr)
+        return 0
     if args.op == "templates":
         for t in P.get_plan_templates(client, st["id"]):
             a = t["attributes"]

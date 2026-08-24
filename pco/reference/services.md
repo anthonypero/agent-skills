@@ -74,3 +74,21 @@ PCO's knockoff-ChordPro, NOT standard ChordPro:
   a request per song.
 - **DELETE** returns an empty body (204) — don't try to parse JSON from it.
 - Errors return JSON with a `detail`; truncate when logging, they can be long.
+
+## Tags (songs and arrangements)
+
+- Tag groups: `GET /tag_groups?include=tags` — each has `tags_for` (song | arrangement |
+  person | media) and `allow_multiple_selections`.
+- Read: `GET /songs/<id>/tags`, `GET /songs/<id>/arrangements/<id>/tags`. **Listing endpoints
+  ignore `include=tags`** (and `include=arrangements`); only
+  `/songs/<id>/arrangements?include=keys` sideloads. A full library export is therefore ~3
+  calls per song (+1 per arrangement) — minutes, rate-limited.
+- Write: `POST <song|arrangement>/assign_tags` with
+  `{"data":{"type":"TagAssignment","attributes":{},"relationships":{"tags":{"data":[{"type":"Tag","id":..},..]}}}}`.
+  It **replaces the entire set** (so read-modify-write); unknown ids are silently ignored;
+  the response body is `{}`.
+- Song attrs worth knowing: `last_scheduled_at`, `themes` (free text from CCLI), `hidden`.
+  Arrangement: `bpm`, `length`, `meter`, `chord_chart_key`, `sequence`; keys via
+  `.../keys` (`starting_key`, `ending_key`).
+- Plan items link songs: `.../plans/<id>/items?include=song,arrangement,key` → item
+  `relationships.song/arrangement/key`; `key_name` attr is the display key.

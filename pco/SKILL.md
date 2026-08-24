@@ -57,6 +57,12 @@ Product subcommands wrap the generic client with real-world knowledge (see
 `reference/`). Currently:
 
 ```
+pco services tags                                   # tag groups (song/arrangement/person/media)
+pco services songs export --out library.json        # whole library w/ tags, arrangements, keys
+pco services songs tag <id|title> [--arrangement A] --add "Group:Tag" --remove Tag
+pco services songs apply-tags --csv retag.csv       # bulk (song, arrangement, add, remove)
+pco services songs audit --from library.json        # what lacks a tag per group
+pco services song-usage <type> --after D --csv u.csv # songs used per plan: section, arrangement, key
 pco services types                                  # service types
 pco services templates <type>                       # plan templates
 pco services plans <type> [--after D] [--before D]  # plans by date
@@ -80,6 +86,10 @@ that position's roster (honorifics stripped) — guests not on the roster stay
 blank, filled positions are skipped, status U, no notification. `--other-of`
 schedules the pair member NOT named (the non-preaching pastor hosts) unless
 the row's text marks them absent ("Melissa @ Reynolds", "Justin at ...").
+Song tagging: `assign_tags` replaces the whole set, so `tag`/`apply-tags` read
+current tags first, apply add/remove by name, and enforce single-select
+groups. Always `--dry-run` a bulk CSV. Tag taxonomies are per church —
+keep them in the church's project, not here.
 `remove-item` deletes items by exact title from templates (`--template`,
 repeatable, or `--all-templates`) and/or plans (`--dates`, `--after/--before`).
 `fill`/`set` write plan title + series and the "Scripture Reading" item's

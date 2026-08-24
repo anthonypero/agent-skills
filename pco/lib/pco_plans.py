@@ -423,3 +423,41 @@ def counterpart_name(preacher: str, pair: tuple[str, str], row_text: str,
         log(f"  {when}  {other} marked absent in sheet — host left blank")
         return None
     return other
+
+
+# --- Song usage across plans -------------------------------------------------------
+
+def song_usage(client: PCOClient, service_type_id: str, after: dt.date, before: dt.date,
+               log=None) -> list[dict]:
+    """One row per song item in every plan of the range: date, plan id,
+    sequence, song id/title, arrangement, key, length. Header items give the
+    section the song sits in (`section`)."""
+    rows = []
+    plans = get_plans(client, service_type_id, after, before)
+    for n, plan in enumerate(plans, 1):
+        if log and n % 10 == 0:
+            log(f"  ...{n}/{len(plans)} plans")
+        page = client.get(f"{V2}/service_types/{service_type_id}/plans/{plan['id']}"
+                          f"/items?include=song,arrangement,key&per_page=100")
+        inc = {(i["type"], i["id"]): i for i in page.get("included", [])}
+        section = None
+        for it in page["data"]:
+            a = it["attributes"]
+            if a["item_type"] == "header":
+                section = a["title"]
+                continue
+            if a["item_type"] != "song":
+                continue
+            r = it.get("relationships", {})
+            song = r.get("song", {}).get("data")
+            arr = r.get("arrangement", {}).get("data")
+            key = r.get("key", {}).get("data")
+            rows.append({
+                "date": plan_date(plan).isoformat(), "plan_id": plan["id"],
+                "sequence": a["sequence"], "section": section, "title": a["title"],
+                "song_id": song["id"] if song else None,
+                "arrangement": inc[("Arrangement", arr["id"])]["attributes"]["name"] if arr else None,
+                "key": inc[("Key", key["id"])]["attributes"]["starting_key"] if key else a.get("key_name"),
+                "length": a.get("length"),
+            })
+    return rows
