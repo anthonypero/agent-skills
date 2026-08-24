@@ -70,9 +70,13 @@ pco services fill <type> --csv worship.csv [--after D] [--before D] \
 pco services set <type> 2026-10-18 --title T --series S --scripture "Mark 10:46-52"
 ```
 
+pco services schedule <type> --csv worship.csv --position Speaker [--name-col Preacher] [--dry-run]
 pco services remove-item <type> "Countdown" --all-templates --after 2026-08-24 [--dry-run]
 ```
 
+`schedule` fills a team position from a name column, matching only against
+that position's roster (honorifics stripped) — guests not on the roster stay
+blank, filled positions are skipped, status U, no notification.
 `remove-item` deletes items by exact title from templates (`--template`,
 repeatable, or `--all-templates`) and/or plans (`--dates`, `--after/--before`).
 `fill`/`set` write plan title + series and the "Scripture Reading" item's

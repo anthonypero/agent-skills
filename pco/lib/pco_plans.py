@@ -303,3 +303,96 @@ def remove_item(client: PCOClient, service_type_id: str, title: str,
                 client.delete(f"{base}/items/{it['id']}")
             n += 1
     return n
+
+
+# --- Schedule: put a named person into a team position from a sheet column --------
+
+def get_teams(client: PCOClient, service_type_id: str) -> list[dict]:
+    return list(client.get_all(f"{V2}/service_types/{service_type_id}/teams"))
+
+
+def get_position_roster(client: PCOClient, service_type_id: str, position: str
+                        ) -> tuple[dict, dict[str, str]]:
+    """Find the team owning `position` (case-insensitive) and return
+    (team, {person_id: full_name}) for everyone assigned to that position."""
+    for team in get_teams(client, service_type_id):
+        rows = client.get(f"{V2}/service_types/{service_type_id}/teams/{team['id']}"
+                          f"/person_team_position_assignments?include=person,team_position&per_page=100")
+        inc = {(i["type"], i["id"]): i for i in rows.get("included", [])}
+        roster = {}
+        for a in rows["data"]:
+            r = a["relationships"]
+            tp = inc[("TeamPosition", r["team_position"]["data"]["id"])]["attributes"]["name"]
+            if tp.strip().lower() == position.strip().lower():
+                p = inc[("Person", r["person"]["data"]["id"])]
+                roster[p["id"]] = p["attributes"]["full_name"]
+        if roster:
+            return team, roster
+    raise RuntimeError(f"No team position {position!r} with assigned people in this service type")
+
+
+_NAME_PREFIXES = {"rev", "rev.", "dr", "dr.", "pastor", "bishop", "guest", "guest:", "the"}
+
+
+def _name_tokens(name: str) -> list[str]:
+    toks = [t.strip(",.:").lower() for t in name.replace("/", " ").split()]
+    return [t for t in toks if t and t not in _NAME_PREFIXES and t != "-"]
+
+
+def match_person(name: str, roster: dict[str, str]) -> str | None:
+    """Person id whose roster full name contains every token of `name`
+    (after stripping honorifics), if exactly one does."""
+    want = _name_tokens(name)
+    if not want:
+        return None
+    hits = [pid for pid, full in roster.items()
+            if all(t in _name_tokens(full) for t in want)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def get_team_members(client: PCOClient, service_type_id: str, plan_id: str) -> list[dict]:
+    return list(client.get_all(f"{V2}/service_types/{service_type_id}/plans/{plan_id}/team_members"))
+
+
+def schedule_person(client: PCOClient, service_type_id: str, plan_id: str, team_id: str,
+                    person_id: str, position: str, status: str = "U") -> dict:
+    body = {"data": {"type": "PlanPerson",
+                     "attributes": {"team_position_name": position, "status": status},
+                     "relationships": {"person": {"data": {"type": "Person", "id": person_id}},
+                                       "team": {"data": {"type": "Team", "id": team_id}}}}}
+    return client.post(f"{V2}/service_types/{service_type_id}/plans/{plan_id}/team_members",
+                       body)["data"]
+
+
+def schedule_from_rows(client: PCOClient, service_type_id: str, rows: list[dict],
+                       position: str, status: str = "U", dry_run: bool = False,
+                       log=print) -> int:
+    """rows: [{date, name}]. For each plan on a row's date whose `position`
+    is unfilled, schedule the roster person matching `name`. Names that don't
+    match the roster (guests) are skipped. Returns count scheduled."""
+    team, roster = get_position_roster(client, service_type_id, position)
+    log(f"{position} roster ({team['attributes']['name']}): "
+        + ", ".join(sorted(roster.values())))
+    by_date = {r["date"]: r for r in rows if r.get("date") and (r.get("name") or "").strip()}
+    if not by_date:
+        return 0
+    n = 0
+    for plan in get_plans(client, service_type_id, min(by_date), max(by_date)):
+        d = plan_date(plan)
+        row = by_date.get(d)
+        if not row:
+            continue
+        current = [m for m in get_team_members(client, service_type_id, plan["id"])
+                   if m["attributes"]["team_position_name"].lower() == position.lower()]
+        if current:
+            log(f"  {d}  {position} already {current[0]['attributes']['name']!r} — skip")
+            continue
+        pid = match_person(row["name"], roster)
+        if not pid:
+            log(f"  {d}  {row['name']!r} not on roster — left blank")
+            continue
+        log(f"  {d}  {position} <- {roster[pid]} ({status})" + ("  [dry-run]" if dry_run else ""))
+        if not dry_run:
+            schedule_person(client, service_type_id, plan["id"], team["id"], pid, position, status)
+        n += 1
+    return n

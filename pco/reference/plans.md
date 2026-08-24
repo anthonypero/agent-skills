@@ -43,7 +43,18 @@ ServiceType                 name, frequency ("Weekly", "Daily", None)
 - Items need `?include=item_notes` to see notes; note categories per service type at
   `/service_types/<st>/item_note_categories`.
 
+- **Scheduling a person**: `POST .../plans/<id>/team_members` with type `PlanPerson`,
+  attributes `{team_position_name, status: "U"|"C"}`, relationships `person` + `team`. No email
+  goes out unless `prepare_notification` is used. Existing assignments: `.../team_members`
+  (`team_position_name`, `name`, `status`).
+- **Roster of a position**: `/service_types/<st>/teams/<team>/person_team_position_assignments
+  ?include=person,team_position`. Use this, not name search, to resolve people: the Services
+  `/services/v2/people?where[search_name]` filter is silently ignored (People API's works).
+
 ## FUMC specifics (profile `fumc`)
+
+- Preacher = Leadership team (5752974) → **Speaker** position. Justin Lowe 111128205, Melissa
+  Lowe 111128292. Guests stay unscheduled.
 
 - Source of truth for sermons: ".Worship - Global Spreadsheet" (Google Sheet, owner
   JLowe@wnccumc.net), one tab per liturgical year; 2025-26 tab columns `d`, `Sermon Series`,

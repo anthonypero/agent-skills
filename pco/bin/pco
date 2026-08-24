@@ -33,6 +33,12 @@ Usage:
         description. Empty cells skipped; filled fields kept unless --overwrite.
     pco services set <type> <date> [--title T] [--series S] [--scripture REF]
         Same, for one plan, values on the command line.
+    pco services schedule <type> --csv <file> --position Speaker [--name-col Preacher]
+        [--date-col d] [--after D] [--before D] [--status U|C] [--dry-run]
+        Schedules the person named in each row into that team position on
+        the plan for that date, matching against the position's roster
+        (honorifics stripped). Unmatched names (guests) and already-filled
+        positions are skipped. No notification is sent.
     pco services remove-item <type> "<item title>" [--template NAME|ID ...]
         [--all-templates] [--dates D,D,...] [--after D] [--before D] [--dry-run]
         Deletes items with that title from the named templates and/or the
@@ -107,6 +113,12 @@ def services_main(argv: list[str], profile: str | None) -> int:
     p.add_argument("--title"); p.add_argument("--series"); p.add_argument("--scripture")
     p.add_argument("--scripture-item", default="Scripture Reading")
     p.add_argument("--overwrite", action="store_true"); p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("schedule", help="schedule people into a position from a CSV")
+    p.add_argument("type"); p.add_argument("--csv", required=True)
+    p.add_argument("--position", required=True); p.add_argument("--name-col", default="Preacher")
+    p.add_argument("--date-col", default="d")
+    p.add_argument("--after", type=_date); p.add_argument("--before", type=_date)
+    p.add_argument("--status", default="U", choices=["U", "C"]); p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("remove-item", help="delete an item by title from templates/plans")
     p.add_argument("type"); p.add_argument("title")
     p.add_argument("--template", action="append", default=[], help="repeatable")
@@ -172,6 +184,23 @@ def services_main(argv: list[str], profile: str | None) -> int:
         n = P.fill_plans(client, st["id"], rows, args.scripture_item, args.overwrite,
                          args.dry_run, log=lambda m: print(m, file=sys.stderr))
         print(f"{n} plan(s) {'would be ' if args.dry_run else ''}updated")
+        return 0
+    if args.op == "schedule":
+        import csv
+        with open(args.csv, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for c in (args.date_col, args.name_col):
+                if c not in reader.fieldnames:
+                    raise RuntimeError(f"CSV lacks column {c!r}; has {reader.fieldnames}")
+            rows = []
+            for r in reader:
+                d = P.parse_sheet_date(r[args.date_col] or "")
+                if not d or (args.after and d < args.after) or (args.before and d > args.before):
+                    continue
+                rows.append({"date": d, "name": r[args.name_col]})
+        n = P.schedule_from_rows(client, st["id"], rows, args.position, args.status,
+                                 args.dry_run, log=lambda m: print(m, file=sys.stderr))
+        print(f"{n} person(s) {'would be ' if args.dry_run else ''}scheduled")
         return 0
     if args.op == "remove-item":
         tids = ([t["id"] for t in P.get_plan_templates(client, st["id"])] if args.all_templates
