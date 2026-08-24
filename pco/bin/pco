@@ -33,6 +33,10 @@ Usage:
         description. Empty cells skipped; filled fields kept unless --overwrite.
     pco services set <type> <date> [--title T] [--series S] [--scripture REF]
         Same, for one plan, values on the command line.
+    pco services remove-item <type> "<item title>" [--template NAME|ID ...]
+        [--all-templates] [--dates D,D,...] [--after D] [--before D] [--dry-run]
+        Deletes items with that title from the named templates and/or the
+        plans on those dates (e.g. drop Children's Moment from communion).
 
     Global: --profile <name>            pick a ~/.config/pco/credentials.md
                                         profile (default: $PCO_PROFILE or
@@ -103,6 +107,13 @@ def services_main(argv: list[str], profile: str | None) -> int:
     p.add_argument("--title"); p.add_argument("--series"); p.add_argument("--scripture")
     p.add_argument("--scripture-item", default="Scripture Reading")
     p.add_argument("--overwrite", action="store_true"); p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("remove-item", help="delete an item by title from templates/plans")
+    p.add_argument("type"); p.add_argument("title")
+    p.add_argument("--template", action="append", default=[], help="repeatable")
+    p.add_argument("--all-templates", action="store_true")
+    p.add_argument("--dates", default="", help="comma-separated YYYY-MM-DD")
+    p.add_argument("--after", type=_date); p.add_argument("--before", type=_date)
+    p.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
     client = PCOClient(profile=profile)
@@ -161,6 +172,16 @@ def services_main(argv: list[str], profile: str | None) -> int:
         n = P.fill_plans(client, st["id"], rows, args.scripture_item, args.overwrite,
                          args.dry_run, log=lambda m: print(m, file=sys.stderr))
         print(f"{n} plan(s) {'would be ' if args.dry_run else ''}updated")
+        return 0
+    if args.op == "remove-item":
+        tids = ([t["id"] for t in P.get_plan_templates(client, st["id"])] if args.all_templates
+                else [P.resolve_template(client, st["id"], t)["id"] for t in args.template])
+        dates = [_date(x) for x in args.dates.split(",") if x]
+        if not tids and not dates and not (args.after or args.before):
+            raise RuntimeError("give --template/--all-templates, --dates, or --after/--before")
+        n = P.remove_item(client, st["id"], args.title, tids, dates, args.after, args.before,
+                          args.dry_run, log=lambda m: print(m, file=sys.stderr))
+        print(f"{n} item(s) {'would be ' if args.dry_run else ''}deleted")
         return 0
     return 1
 

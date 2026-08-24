@@ -70,6 +70,11 @@ pco services fill <type> --csv worship.csv [--after D] [--before D] \
 pco services set <type> 2026-10-18 --title T --series S --scripture "Mark 10:46-52"
 ```
 
+pco services remove-item <type> "Countdown" --all-templates --after 2026-08-24 [--dry-run]
+```
+
+`remove-item` deletes items by exact title from templates (`--template`,
+repeatable, or `--all-templates`) and/or plans (`--dates`, `--after/--before`).
 `fill`/`set` write plan title + series and the "Scripture Reading" item's
 description (the FUMC convention; `--scripture-item` to change). CSV column
 defaults match the FUMC worship spreadsheet exported as CSV.

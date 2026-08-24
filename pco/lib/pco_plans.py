@@ -259,3 +259,47 @@ def fill_plans(client: PCOClient, service_type_id: str, rows: list[dict],
             update_item(client, service_type_id, plan["id"], item_change[0],
                         description=item_change[1])
     return changed
+
+
+# --- Remove an item by title from templates / plans -----------------------------
+
+def get_template_items(client: PCOClient, service_type_id: str, template_id: str) -> list[dict]:
+    return list(client.get_all(
+        f"{V2}/service_types/{service_type_id}/plan_templates/{template_id}/items"))
+
+
+def remove_item(client: PCOClient, service_type_id: str, title: str,
+                template_ids: list[str] = (), dates: list[dt.date] = (),
+                after: dt.date | None = None, before: dt.date | None = None,
+                dry_run: bool = False, log=print) -> int:
+    """Delete every item whose title matches (case-insensitive) from the
+    given templates and from the plans on the given dates and/or in the
+    after..before range. Returns count."""
+    targets = []  # (label, base_path, items)
+    for tid in template_ids:
+        base = f"{V2}/service_types/{service_type_id}/plan_templates/{tid}"
+        targets.append((f"template {tid}", base, get_template_items(client, service_type_id, tid)))
+    plans = {}
+    if dates:
+        for plan in get_plans(client, service_type_id, min(dates), max(dates)):
+            if plan_date(plan) in set(dates):
+                plans[plan["id"]] = plan
+    if after or before:
+        for plan in get_plans(client, service_type_id, after, before):
+            plans[plan["id"]] = plan
+    for plan in sorted(plans.values(), key=plan_date):
+        base = f"{V2}/service_types/{service_type_id}/plans/{plan['id']}"
+        targets.append((f"plan {plan_date(plan)}", base,
+                        get_plan_items(client, service_type_id, plan["id"])))
+    n = 0
+    for label, base, items in targets:
+        hits = [i for i in items if i["attributes"]["title"].strip().lower() == title.lower()]
+        if not hits:
+            log(f"  {label}: no item titled {title!r}")
+        for it in hits:
+            log(f"  {label}: delete item {it['id']} seq {it['attributes']['sequence']} "
+                f"{it['attributes']['title']!r}" + ("  [dry-run]" if dry_run else ""))
+            if not dry_run:
+                client.delete(f"{base}/items/{it['id']}")
+            n += 1
+    return n

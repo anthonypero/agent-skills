@@ -38,6 +38,8 @@ ServiceType                 name, frequency ("Weekly", "Daily", None)
   `series_title` = series, and the **"Scripture Reading" item's `description`** = sermon
   scripture (`PATCH .../plans/<id>/items/<id>` with `{"description": "Galatians 6:2"}`).
   "Message" item carries only a Person note ("Pastor"). No plan-level notes are used.
+- **Template items are editable in place**: `/service_types/<st>/plan_templates/<id>/items/<item>`
+  accepts DELETE (templates are NOT reachable at `/plans/<template id>` — 404).
 - Items need `?include=item_notes` to see notes; note categories per service type at
   `/service_types/<st>/item_note_categories`.
 
