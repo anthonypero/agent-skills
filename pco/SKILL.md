@@ -1,6 +1,6 @@
 ---
 name: pco
-description: "Personal Planning Center (PCO) API toolkit: an authenticated CLI (`pco get|post|patch|delete <path>` + `pco whoami`) and an importable stdlib-Python client library. Use whenever a task reads or writes Planning Center data from any project — Services songs/arrangements/keys/attachments/plans, People, Check-Ins, Giving, or any other PCO product. Handles credential resolution (per-project PROJECT_SECRETS.md, env vars, or ~/.config/pco profiles), rate-limit retry, and pagination. reference/ holds hard-won PCO API knowledge — read it before writing to a product."
+description: "Planning Center (PCO) API toolkit: Use whenever a task reads or writes Planning Center data from any project — Services songs/arrangements/keys/attachments/plans, People, Check-Ins, Giving, or any other PCO product. Handles credential resolution (per-project PROJECT_SECRETS.md, env vars, or ~/.config/pco profiles), rate-limit retry, and pagination. reference/ holds hard-won PCO API knowledge — read it before writing to a product."
 ---
 
 # pco — Planning Center API toolkit
@@ -11,7 +11,7 @@ One implementation, two surfaces:
   non-Python scripts. Any endpoint of any PCO product works; no domain code
   needs to exist first.
 - **Python lib** (`lib/`) — `pco_api.py` (generic client) + per-product
-  helper modules (`pco_services.py`, ...). Python projects import these
+  helper modules (`pco_services.py` songs, `pco_plans.py` plans/templates, ...). Python projects import these
   instead of shelling out.
 
 Both are stdlib-only python3 — nothing to install.
@@ -51,6 +51,26 @@ pco -P grace get /people/v2/people        # pick a church explicitly
 pco init                                  # first-time credentials template
 ```
 
+## Layer-1 named operations
+
+Product subcommands wrap the generic client with real-world knowledge (see
+`reference/`). Currently:
+
+```
+pco services types                                  # service types
+pco services templates <type>                       # plan templates
+pco services plans <type> [--after D] [--before D]  # plans by date
+pco services extend <type> --through 2026-10-31 --template Modern \
+    --communion-template "Modern - Communion" [--communion-dates D,D] \
+    [--no-communion-rule] [--dry-run]
+```
+
+`extend` creates weekly plans after the latest existing one (times copied
+from it in the org's local zone, template imported; communion template on
+first Sundays or listed dates). `<type>` is an id or unique name substring.
+Always `--dry-run` first. **Prefer adding a named operation here over
+one-off API calls in a session** — the CLI is the deliverable.
+
 ## New machine setup
 
 ```
@@ -80,6 +100,9 @@ secrets file regardless of cwd (see song-library's
   hierarchy, where attachments belong, the `.mp3`-streamable rule, the
   chord_chart dialect (`TRANSPOSE KEY +n`, `PAGE_BREAK`, ALL-CAPS sections),
   rate limits, pagination/sideloading.
+- `reference/plans.md` — Services plans: no date attribute (PlanTimes
+  derive it), import_template after create, DST-safe time copying, date
+  filtering, template quirks, FUMC ids.
 - `reference/products.md` — map of every product's path prefix, universal
   conventions (discovery, pagination, filtering, rate limits, write envelope),
   and the rule for adding a product's notes.

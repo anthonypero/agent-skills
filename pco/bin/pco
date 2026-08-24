@@ -15,6 +15,17 @@ Usage:
     pco init                            create ~/.config/pco/credentials.md
                                         from a template (chmod 600)
 
+  Services (layer 1 — named operations; <type> is an id or name substring):
+    pco services types
+    pco services templates <type>
+    pco services plans <type> [--after YYYY-MM-DD] [--before YYYY-MM-DD]
+    pco services extend <type> --through YYYY-MM-DD --template <name|id>
+        [--communion-template <name|id>] [--communion-dates D,D,...]
+        [--no-communion-rule] [--dry-run]
+        Creates weekly plans after the latest existing one: plan + plan
+        times copied from that plan, then imports the template (the
+        communion template on first Sundays / listed dates).
+
     Global: --profile <name>            pick a ~/.config/pco/credentials.md
                                         profile (default: $PCO_PROFILE or
                                         the nearest project's secrets file —
@@ -32,6 +43,8 @@ import sys
 # Resolve through symlinks so an installed ~/.local/bin/pco still finds lib/.
 _HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "lib"))
+import datetime as dt
+
 from pco_api import (CONFIG_PATH, PCOClient, init_credentials, list_profiles,
                      resolve_credentials)
 
@@ -45,7 +58,77 @@ def load_data(arg: str) -> dict:
     return json.loads(arg)
 
 
+def _date(s: str) -> dt.date:
+    return dt.date.fromisoformat(s)
+
+
+def services_main(argv: list[str], profile: str | None) -> int:
+    import pco_plans as P
+    parser = argparse.ArgumentParser(prog="pco services",
+                                     description="Planning Center Services operations.")
+    sub = parser.add_subparsers(dest="op", required=True)
+    sub.add_parser("types", help="list service types")
+    p = sub.add_parser("templates", help="list plan templates"); p.add_argument("type")
+    p = sub.add_parser("plans", help="list plans"); p.add_argument("type")
+    p.add_argument("--after", type=_date); p.add_argument("--before", type=_date)
+    p = sub.add_parser("extend", help="create weekly plans through a date")
+    p.add_argument("type"); p.add_argument("--through", type=_date, required=True)
+    p.add_argument("--template", required=True, help="regular-week template name|id")
+    p.add_argument("--communion-template", help="template for communion Sundays")
+    p.add_argument("--communion-dates", default="",
+                   help="comma-separated YYYY-MM-DD dates that are communion")
+    p.add_argument("--no-communion-rule", action="store_true",
+                   help="disable the first-Sunday-of-month default")
+    p.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+
+    client = PCOClient(profile=profile)
+    if args.op == "types":
+        for t in P.get_service_types(client):
+            a = t["attributes"]
+            print(f"{t['id']:>8}  {a['name']:<40} {a.get('frequency') or ''}")
+        return 0
+    st = P.resolve_service_type(client, args.type)
+    if args.op == "templates":
+        for t in P.get_plan_templates(client, st["id"]):
+            a = t["attributes"]
+            print(f"{t['id']:>8}  {a['name']:<30} items={a.get('item_count')} "
+                  f"teams={a.get('team_count')} updated={a.get('updated_at','')[:10]}")
+        return 0
+    if args.op == "plans":
+        after = args.after or dt.date.today()
+        for pl in P.get_plans(client, st["id"], after, args.before):
+            a = pl["attributes"]
+            print(f"{pl['id']:>9}  {a['sort_date'][:10]}  items={a['items_count']:<3} "
+                  f"title={a.get('title') or '-'} | series={a.get('series_title') or '-'}")
+        return 0
+    if args.op == "extend":
+        tpl = P.resolve_template(client, st["id"], args.template)["id"]
+        ctpl = (P.resolve_template(client, st["id"], args.communion_template)["id"]
+                if args.communion_template else None)
+        dates = {_date(x) for x in args.communion_dates.split(",") if x}
+        rule = (lambda d: False) if args.no_communion_rule else P.first_sunday_of_month
+        created = P.extend_plans(client, st["id"], args.through, tpl, ctpl, rule, dates,
+                                 dry_run=args.dry_run, log=lambda m: print(m, file=sys.stderr))
+        for pl in created:
+            print(pl["attributes"].get("planning_center_url") or pl["id"])
+        return 0
+    return 1
+
+
 def main(argv: list[str]) -> int:
+    # Product subcommands get their own parser (argparse can't mix a flat
+    # verb list with nested subcommands cleanly).
+    profile = None
+    rest = argv[1:]
+    if rest[:1] in (["--profile"], ["-P"]) and len(rest) > 1:
+        profile, rest = rest[1], rest[2:]
+    if rest[:1] == ["services"]:
+        try:
+            return services_main(rest[1:], profile)
+        except (RuntimeError, OSError) as e:
+            print(f"pco: {e}", file=sys.stderr)
+            return 1
     parser = argparse.ArgumentParser(
         prog="pco", description="Planning Center API CLI (generic verbs).")
     parser.add_argument("--profile", "-P", default=None,
