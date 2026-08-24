@@ -35,10 +35,32 @@ import urllib.error
 import urllib.request
 
 API_ROOT = "https://api.planningcenteronline.com"
+CONFIG_PATH = os.path.expanduser("~/.config/pco/credentials.md")
+
+CREDENTIALS_TEMPLATE = """\
+# Planning Center credentials
+
+One `## <profile>` section per PCO account (church). Select with
+`pco --profile <name>`, `$PCO_PROFILE`, or `PCOClient(profile=...)`.
+Personal Access Tokens: https://api.planningcenteronline.com/oauth/applications
+
+## default
+
+- **PCO_APP_ID** = ``
+- **PCO_SECRET** = ``
+
+<!--
+## second-church
+
+- **PCO_APP_ID** = ``
+- **PCO_SECRET** = ``
+-->
+"""
 
 _SECRET_LINE_RE = re.compile(r"^\s*-\s*\*\*([A-Za-z0-9_]+)\*\*\s*=\s*`([^`]*)`",
                              re.MULTILINE)
 _PROFILE_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
 
 def _parse_secret_lines(text: str) -> dict[str, str]:
@@ -48,7 +70,9 @@ def _parse_secret_lines(text: str) -> dict[str, str]:
 def _parse_profiles(text: str) -> dict[str, dict[str, str]]:
     """Split a credentials file into {profile_name: {NAME: value}}. Content
     before the first `## heading` (or the whole file if there are none) is
-    the 'default' profile."""
+    the 'default' profile. HTML comments are ignored, so a commented-out
+    section (as in the template) is not a profile."""
+    text = _HTML_COMMENT_RE.sub("", text)
     profiles: dict[str, dict[str, str]] = {}
     matches = list(_PROFILE_HEADING_RE.finditer(text))
     head = text[: matches[0].start()] if matches else text
@@ -93,7 +117,7 @@ def resolve_credentials(app_id: str | None = None, secret: str | None = None,
         if vals.get("PCO_APP_ID") and vals.get("PCO_SECRET"):
             return vals["PCO_APP_ID"], vals["PCO_SECRET"], project_secrets
 
-    config_path = os.path.expanduser("~/.config/pco/credentials.md")
+    config_path = CONFIG_PATH
     wanted = (profile or os.environ.get("PCO_PROFILE") or "default").lower()
     if os.path.isfile(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
@@ -112,6 +136,29 @@ def resolve_credentials(app_id: str | None = None, secret: str | None = None,
         f"{project_secrets or '.agents/PROJECT_SECRETS.md above ' + os.getcwd()}; "
         f"{config_path} (profile '{wanted}'). "
         "Tokens: https://api.planningcenteronline.com/oauth/applications")
+
+
+def list_profiles(config_path: str = CONFIG_PATH) -> dict[str, bool]:
+    """{profile_name: is_complete} for every section in the credentials file
+    (complete = both PCO_APP_ID and PCO_SECRET non-empty). {} if no file."""
+    if not os.path.isfile(config_path):
+        return {}
+    with open(config_path, "r", encoding="utf-8") as f:
+        profiles = _parse_profiles(f.read())
+    return {name: bool(v.get("PCO_APP_ID") and v.get("PCO_SECRET"))
+            for name, v in profiles.items()}
+
+
+def init_credentials(config_path: str = CONFIG_PATH) -> bool:
+    """Write the credentials template (mode 600) if the file doesn't exist.
+    Returns True if it was created, False if it already existed."""
+    if os.path.exists(config_path):
+        return False
+    os.makedirs(os.path.dirname(config_path), mode=0o700, exist_ok=True)
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write(CREDENTIALS_TEMPLATE)
+    os.chmod(config_path, 0o600)
+    return True
 
 
 class PCOClient:

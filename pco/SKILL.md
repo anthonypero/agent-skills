@@ -31,6 +31,12 @@ Secrets lines use the standard convention: ``- **PCO_APP_ID** = `value` ``.
 `pco whoami` verifies auth and reports which source was used. NEVER commit
 credentials into this (public) skills repo.
 
+**Multiple churches**: `pco init` writes a template `~/.config/pco/credentials.md`
+(mode 600) — one `## <church>` section per account. `pco profiles` lists them
+and shows which source is in effect for the current cwd/profile. Working in a
+project for one church? Put that church's token in the project's
+`PROJECT_SECRETS.md` and no `--profile` is ever needed there.
+
 ## CLI usage
 
 ```
@@ -39,11 +45,19 @@ pco get /services/v2/songs/123?include=arrangements
 pco post /services/v2/songs --data '{"data":{"type":"Song","attributes":{"title":"X"}}}'
 pco patch <path> --data @body.json        # or --data - for stdin
 pco delete <path>
-pco whoami
+pco whoami                                # who am I, which credentials
+pco profiles                              # configured churches + source in effect
+pco -P grace get /people/v2/people        # pick a church explicitly
+pco init                                  # first-time credentials template
 ```
 
-Install globally (optional): `sh install.sh` symlinks `bin/pco` into
-`~/.local/bin`.
+## New machine setup
+
+```
+sh install.sh          # symlinks bin/pco into ~/.local/bin (stdlib python3 only)
+pco init               # then paste each church's PAT into ~/.config/pco/credentials.md
+pco profiles           # confirm; pco -P <church> whoami to verify auth
+```
 
 ## Consuming the lib from a project
 
@@ -66,9 +80,12 @@ secrets file regardless of cwd (see song-library's
   hierarchy, where attachments belong, the `.mp3`-streamable rule, the
   chord_chart dialect (`TRANSPOSE KEY +n`, `PAGE_BREAK`, ALL-CAPS sections),
   rate limits, pagination/sideloading.
-- Other products (People, etc.): no reference written yet — consult
-  https://developer.planning.center/docs/ and add a reference file when
-  lessons accumulate.
+- `reference/products.md` — map of every product's path prefix, universal
+  conventions (discovery, pagination, filtering, rate limits, write envelope),
+  and the rule for adding a product's notes.
+- Other products (People, etc.): no field notes yet — start with
+  `pco get /<product>/v2` for discovery and the official docs, and add
+  `reference/<product>.md` when lessons accumulate.
 
 ## Growing the toolkit
 

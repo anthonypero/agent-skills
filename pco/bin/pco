@@ -10,6 +10,10 @@ Usage:
     pco patch <path> --data <json>       '-' for stdin)
     pco delete <path>
     pco whoami                          identity + credential-source check
+    pco profiles                        list ~/.config/pco/credentials.md
+                                        profiles and the source in effect
+    pco init                            create ~/.config/pco/credentials.md
+                                        from a template (chmod 600)
 
     Global: --profile <name>            pick a ~/.config/pco/credentials.md
                                         profile (default: $PCO_PROFILE or
@@ -28,7 +32,8 @@ import sys
 # Resolve through symlinks so an installed ~/.local/bin/pco still finds lib/.
 _HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "lib"))
-from pco_api import PCOClient
+from pco_api import (CONFIG_PATH, PCOClient, init_credentials, list_profiles,
+                     resolve_credentials)
 
 
 def load_data(arg: str) -> dict:
@@ -45,7 +50,7 @@ def main(argv: list[str]) -> int:
         prog="pco", description="Planning Center API CLI (generic verbs).")
     parser.add_argument("--profile", "-P", default=None,
                         help="Credentials profile in ~/.config/pco/credentials.md")
-    parser.add_argument("verb", choices=["get", "post", "patch", "delete", "whoami"])
+    parser.add_argument("verb", choices=["get", "post", "patch", "delete", "whoami", "profiles", "init"])
     parser.add_argument("path", nargs="?",
                         help="API path incl. product prefix, e.g. /services/v2/songs")
     parser.add_argument("--data", "-d",
@@ -54,7 +59,24 @@ def main(argv: list[str]) -> int:
                         help="get: follow pagination, print every item as one array.")
     args = parser.parse_args(argv[1:])
 
-    if args.verb != "whoami" and not args.path:
+    if args.verb == "init":
+        created = init_credentials()
+        print(("Created" if created else "Already exists:") + f" {CONFIG_PATH}"
+              + (" — fill in your tokens." if created else ""))
+        return 0
+    if args.verb == "profiles":
+        profiles = list_profiles()
+        if not profiles:
+            print(f"No profiles: {CONFIG_PATH} missing or empty (run `pco init`).")
+        for name, ok in sorted(profiles.items()):
+            print(f"  {name:<20} {'ok' if ok else 'INCOMPLETE'}")
+        try:
+            _, _, source = resolve_credentials(profile=args.profile)
+            print(f"In effect: {source}")
+        except RuntimeError as e:
+            print(f"In effect: none ({e})")
+        return 0
+    if args.verb not in ("whoami",) and not args.path:
         parser.error(f"'{args.verb}' requires a path")
     if args.verb in ("post", "patch") and not args.data:
         parser.error(f"'{args.verb}' requires --data")
