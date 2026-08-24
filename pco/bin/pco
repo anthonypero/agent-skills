@@ -27,6 +27,9 @@ Usage:
     pco services songs apply-tags --csv file [--dry-run]
                                         bulk: columns song, arrangement (optional),
                                         add, remove (";"-separated tag names)
+    pco services songs chart <song id|title> [--arrangement <id|name>]
+        [--file chart.txt] [--key E] [--dry-run]   read (no --file) or replace an arrangement's
+                                        Lyrics & Chords chart (PCO dialect, see reference/services.md)
     pco services songs audit --from library.json [--group NAME]
                                         songs/arrangements with no tag from a group
     pco services types
@@ -108,7 +111,7 @@ def services_main(argv: list[str], profile: str | None) -> int:
     sub.add_parser("types", help="list service types")
     sub.add_parser("tags", help="list tag groups and tags")
     p = sub.add_parser("songs", help="song library operations")
-    p.add_argument("songs_op", choices=["export", "tag", "apply-tags", "audit"])
+    p.add_argument("songs_op", choices=["export", "tag", "apply-tags", "audit", "chart"])
     p.add_argument("ref", nargs="?", help="tag: song id or exact title")
     p.add_argument("--out", help="export: write JSON here (default stdout)")
     p.add_argument("--include-hidden", action="store_true")
@@ -118,6 +121,8 @@ def services_main(argv: list[str], profile: str | None) -> int:
     p.add_argument("--csv", help="apply-tags: bulk CSV")
     p.add_argument("--from", dest="from_json", help="audit: library.json from export")
     p.add_argument("--group", help="audit: only this tag group")
+    p.add_argument("--file", help="chart: Lyrics & Chords text to write (omit to print the current chart)")
+    p.add_argument("--key", help="chart: also set chord_chart_key (e.g. E)")
     p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("song-usage", help="song items across plans in a date range")
     p.add_argument("type"); p.add_argument("--after", type=_date, required=True)
@@ -194,6 +199,35 @@ def services_main(argv: list[str], profile: str | None) -> int:
                 print(f"## {group}: {len(gaps)} missing")
                 for g in gaps:
                     print(f"  {g}")
+            return 0
+        if args.songs_op == "chart":
+            if not args.ref:
+                raise RuntimeError("chart needs a song id or title")
+            song = SV.find_song(client, args.ref)
+            arrs = SV.get_arrangements(client, song["id"])
+            if args.arrangement:
+                arr = SV.find_arrangement(client, song["id"], args.arrangement)
+            elif len(arrs) == 1:
+                arr = arrs[0]
+            else:
+                raise RuntimeError("song has %d arrangements; pick one with --arrangement: %s"
+                                   % (len(arrs), ", ".join(a["attributes"]["name"] for a in arrs)))
+            label = f"{song['attributes']['title']} / {arr['attributes']['name']} (song {song['id']}, arr {arr['id']})"
+            if not args.file:
+                print(SV.get_arrangement(client, song["id"], arr["id"])["attributes"].get("chord_chart") or "")
+                return 0
+            with open(args.file, encoding="utf-8") as f:
+                text = f.read()
+            attrs = {"chord_chart": text}
+            if args.key:
+                attrs["chord_chart_key"] = args.key
+            had = bool(arr["attributes"].get("chord_chart"))
+            if args.dry_run:
+                print(f"{label}: would {'REPLACE existing' if had else 'set'} chart "
+                      f"({len(text.splitlines())} lines{', key ' + args.key if args.key else ''})  [dry-run]")
+                return 0
+            SV.update_arrangement(client, song["id"], arr["id"], attrs)
+            print(f"{label}: chart {'replaced' if had else 'set'} ({len(text.splitlines())} lines)")
             return 0
         index = SV.TagIndex(client)
 

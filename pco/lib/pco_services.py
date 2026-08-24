@@ -87,6 +87,13 @@ def update_chord_chart(client: PCOClient, song_id: str, arrangement_id: str,
     return client.patch(arrangement_path(song_id, arrangement_id), body)
 
 
+def update_arrangement(client: PCOClient, song_id: str, arrangement_id: str,
+                       attrs: dict) -> dict:
+    """PATCH arbitrary Arrangement attributes (chord_chart, chord_chart_key, bpm, ...)."""
+    body = {"data": {"type": "Arrangement", "attributes": attrs}}
+    return client.patch(arrangement_path(song_id, arrangement_id), body)
+
+
 def get_keys(client: PCOClient, song_id: str, arrangement_id: str) -> list[dict]:
     """All Key resources of an arrangement."""
     return client.get(f"{arrangement_path(song_id, arrangement_id)}/keys")["data"]

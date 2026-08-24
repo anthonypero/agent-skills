@@ -62,6 +62,7 @@ pco services songs export --out library.json        # whole library w/ tags, arr
 pco services songs tag <id|title> [--arrangement A] --add "Group:Tag" --remove Tag
 pco services songs apply-tags --csv retag.csv       # bulk (song, arrangement, add, remove)
 pco services songs audit --from library.json        # what lacks a tag per group
+pco services songs chart <id|title> [--arrangement A] [--file chart.txt --key E]  # read / replace Lyrics & Chords
 pco services song-usage <type> --after D --csv u.csv # songs used per plan: section, arrangement, key
 pco services types                                  # service types
 pco services templates <type>                       # plan templates
