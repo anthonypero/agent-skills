@@ -64,6 +64,9 @@ pco services songs apply-tags --csv retag.csv       # bulk (song, arrangement, a
 pco services songs audit --from library.json        # what lacks a tag per group
 pco services songs chart <id|title> [--arrangement A] [--file chart.txt --key E]  # read / replace Lyrics & Chords
 pco services song-usage <type> --after D --csv u.csv # songs used per plan: section, arrangement, key
+pco services songs mix --usage all.csv --from library.json --after D [--before D] [--target 40/40/20] [--new-threshold 4] [--exclude RE] [--exclude-tags Christmas,Easter,Patriotic] [--keep-advent] [--songs]  # offline: slots bucketed ccli/historical/new vs target
+pco services songs flag --ids 1,2 | --csv list.csv [--tag Worklist:Flagged] [--note "why"] [--clear] [--dry-run]  # scratch tag = exactly this list; prior list unflagged from local state
+pco services songs lifecycle --usage all.csv --from library.json [--out lifecycle.csv] [--as-of D] [--new-threshold 4] [--dormant-months 24] [--intro-weeks 8] [--seasonal-tags Christmas,Easter,Patriotic] [--skip-intro-arr-tags "Modernized Hymn"] [--current-tag Current]  # offline: Queued/Introducing/Rotation/Dormant/Retired per song from usage -> retag CSV
 pco services types                                  # service types
 pco services templates <type>                       # plan templates
 pco services plans <type> [--after D] [--before D]  # plans by date

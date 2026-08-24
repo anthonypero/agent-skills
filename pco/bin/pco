@@ -32,6 +32,12 @@ Usage:
                                         Lyrics & Chords chart (PCO dialect, see reference/services.md)
     pco services songs audit --from library.json [--group NAME]
                                         songs/arrangements with no tag from a group
+    pco services songs lifecycle --usage all.csv --from library.json [--out lifecycle.csv]
+        [--as-of D] [--new-threshold 4] [--dormant-months 24]
+        [--seasonal-tags Christmas,Easter,Patriotic] [--current-tag Current]
+                                        offline: each song's Lifecycle state (Queued /
+                                        Introducing / Rotation / Dormant / Retired) from
+                                        its usage history -> retag CSV + summary
     pco services types
     pco services song-usage <type> --after D [--before D] [--csv out.csv]
                                         every song item in the range: date,
@@ -111,7 +117,8 @@ def services_main(argv: list[str], profile: str | None) -> int:
     sub.add_parser("types", help="list service types")
     sub.add_parser("tags", help="list tag groups and tags")
     p = sub.add_parser("songs", help="song library operations")
-    p.add_argument("songs_op", choices=["export", "tag", "apply-tags", "audit", "chart"])
+    p.add_argument("songs_op", choices=["export", "tag", "apply-tags", "audit", "chart", "mix",
+                                        "lifecycle", "flag"])
     p.add_argument("ref", nargs="?", help="tag: song id or exact title")
     p.add_argument("--out", help="export: write JSON here (default stdout)")
     p.add_argument("--include-hidden", action="store_true")
@@ -123,6 +130,32 @@ def services_main(argv: list[str], profile: str | None) -> int:
     p.add_argument("--group", help="audit: only this tag group")
     p.add_argument("--file", help="chart: Lyrics & Chords text to write (omit to print the current chart)")
     p.add_argument("--key", help="chart: also set chord_chart_key (e.g. E)")
+    p.add_argument("--usage", help="mix: full-history song-usage CSV (all dates)")
+    p.add_argument("--after", type=_date, help="mix: window start"); p.add_argument("--before", type=_date, help="mix: window end (default today)")
+    p.add_argument("--target", default="40/40/20", help="mix: ccli/historical/new percentages")
+    p.add_argument("--new-threshold", type=int, default=4, help="mix: a song is 'new' through its Nth use")
+    p.add_argument("--new-months", type=int, default=24, help="mix: ...and only if first used within N months")
+    p.add_argument("--exclude", help="mix: drop slots whose title matches this regex (liturgy, not song choices)")
+    p.add_argument("--exclude-tags", default="Christmas,Easter,Patriotic",
+                   help="mix: drop slots of songs carrying any of these tags (seasonal); '' to keep them")
+    p.add_argument("--keep-advent", action="store_true", help="mix: count Advent 1 -> Jan 6 slots (skipped by default)")
+    p.add_argument("--songs", action="store_true", help="mix: also list every song with its bucket(s)")
+    p.add_argument("--dormant-months", type=int, default=24,
+                   help="lifecycle: not used in N months -> Dormant")
+    p.add_argument("--skip-intro-arr-tags", default="Modernized Hymn",
+                   help="lifecycle: songs with an arrangement carrying any of these tags skip Introducing; '' to disable")
+    p.add_argument("--tag", default="Worklist:Flagged", help="flag: the scratch tag to manage")
+    p.add_argument("--ids", default="", help="flag: comma-separated song ids to flag (with --csv: added to it)")
+    p.add_argument("--clear", action="store_true", help="flag: flag nothing (take the tag off the last list)")
+    p.add_argument("--note", default="", help="flag: what this list means (kept with the state)")
+    p.add_argument("--state", help="flag: state file (default ~/.local/share/pco/<profile>/flags.json)")
+    p.add_argument("--intro-weeks", type=int, default=8, help="lifecycle: Introducing only while last use is within N weeks")
+    p.add_argument("--as-of", type=_date, help="lifecycle: evaluate as of this date (default today)")
+    p.add_argument("--seasonal-tags", default="Christmas,Easter,Patriotic",
+                   help="lifecycle: songs with these tags skip Introducing; '' to disable")
+    p.add_argument("--current-tag", default="Current",
+                   help="lifecycle: tag Lifecycle supersedes; stripped where it still exists "
+                        "('' to never strip)")
     p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("song-usage", help="song items across plans in a date range")
     p.add_argument("type"); p.add_argument("--after", type=_date, required=True)
@@ -175,7 +208,8 @@ def services_main(argv: list[str], profile: str | None) -> int:
         import pco_services as SV
         for g in SV.get_tag_groups(client):
             print(f"{g['id']:>8}  {g['name']:<20} for={g['tags_for']:<12} "
-                  f"multiple={'yes' if g['allow_multiple'] else 'no '}  "
+                  f"multiple={'yes' if g['allow_multiple'] else 'no '} "
+                  f"required={'yes' if g.get('required') else 'no '}  "
                   + ", ".join(t["name"] for t in g["tags"]))
         return 0
     if args.op == "songs":
@@ -199,6 +233,97 @@ def services_main(argv: list[str], profile: str | None) -> int:
                 print(f"## {group}: {len(gaps)} missing")
                 for g in gaps:
                     print(f"  {g}")
+            return 0
+        if args.songs_op == "mix":
+            import csv
+            if not (args.usage and args.from_json and args.after):
+                raise RuntimeError("mix needs --usage all.csv --from library.json --after D [--before D]")
+            with open(args.from_json, encoding="utf-8") as f:
+                lib = json.load(f)
+            with open(args.usage, newline="", encoding="utf-8") as f:
+                usage = list(csv.DictReader(f))
+            before = args.before or dt.date.today()
+            rep = SV.mix_report(usage, lib, args.after, before, new_threshold=args.new_threshold,
+                                new_months=args.new_months, exclude=args.exclude,
+                                exclude_tags=tuple(t.strip() for t in args.exclude_tags.split(",") if t.strip()),
+                                exclude_ranges=[] if args.keep_advent else SV.advent_windows(args.after, before))
+            tgt = dict(zip(("ccli", "historical", "new"), (int(x) for x in args.target.split("/"))))
+            total = sum(rep["totals"].values()) or 1
+            print(f"{args.after} -> {before}: {total} slots, {len(rep['songs'])} distinct songs"
+                  + (f", {rep['dropped']} excluded" if rep["dropped"] else ""))
+            print(f"{'bucket':<12}{'slots':>6}{'pct':>6}{'target':>8}{'delta':>7}")
+            for b in ("ccli", "historical", "new"):
+                n = rep["totals"].get(b, 0); pct = 100 * n / total
+                print(f"{b:<12}{n:>6}{pct:>5.0f}%{tgt[b]:>7}%{pct - tgt[b]:>+6.0f}")
+            print("by section:")
+            for sec, c in rep["by_section"].items():
+                st = sum(c.values())
+                print(f"  {sec:<28}{st:>4}  " + "  ".join(f"{b} {c.get(b, 0):>3} ({100 * c.get(b, 0) / st:.0f}%)"
+                                                            for b in ("ccli", "historical", "new")))
+            if args.songs:
+                print(f"\n{'bucket':<11}{'slots':>5}{'uses':>5}  {'first':<10} {'last':<10} title")
+                for sid, s in sorted(rep["songs"].items(), key=lambda kv: (-kv[1]["slots"], kv[1]["title"])):
+                    b = "/".join(sorted(s["buckets"]))
+                    print(f"{b:<11}{s['slots']:>5}{s['uses_total']:>5}  {s['first_used']:<10} {s['last_used']:<10} {s['title']}")
+            return 0
+        if args.songs_op == "flag":
+            import csv, os
+            ids = [x.strip() for x in args.ids.split(",") if x.strip()]
+            if args.csv:
+                with open(args.csv, newline="", encoding="utf-8") as f:
+                    ids += [r["song"].strip() for r in csv.DictReader(f) if r.get("song", "").strip()]
+            if not ids and not args.clear:
+                raise RuntimeError("flag needs --ids and/or --csv (or --clear)")
+            state = args.state or os.path.expanduser(f"~/.local/share/pco/{profile or 'default'}/flags.json")
+            index = SV.TagIndex(client)
+            r = SV.flag_songs(client, index, args.tag, [] if args.clear else ids, state, note=args.note,
+                              dry_run=args.dry_run, log=lambda m: print(m, file=sys.stderr))
+            print(f"{args.tag}: +{len(r['added'])} -{len(r['removed'])} ={len(r['kept'])} kept"
+                  + ("  [dry-run]" if args.dry_run else f"  (state: {state})"))
+            return 0
+        if args.songs_op == "lifecycle":
+            import csv
+            if not (args.usage and args.from_json):
+                raise RuntimeError("lifecycle needs --usage all.csv --from library.json")
+            with open(args.from_json, encoding="utf-8") as f:
+                lib = json.load(f)
+            with open(args.usage, newline="", encoding="utf-8") as f:
+                usage = list(csv.DictReader(f))
+            as_of = args.as_of or dt.date.today()
+            # The one online step: library.json's tags go stale the moment a tag is
+            # deleted in the UI, so ask PCO whether the superseded tag still exists.
+            current_tag = None
+            if args.current_tag:
+                hits = [t["name"] for g in SV.get_tag_groups(client) if g["tags_for"] == "song"
+                        for t in g["tags"] if t["name"].lower() == args.current_tag.lower()]
+                current_tag = hits[0] if hits else None
+            rep = SV.lifecycle_states(usage, lib, as_of, new_threshold=args.new_threshold, intro_weeks=args.intro_weeks,
+                                      skip_intro_arr_tags=tuple(t.strip() for t in args.skip_intro_arr_tags.split(",") if t.strip()),
+                                      dormant_months=args.dormant_months,
+                                      seasonal_tags=tuple(t.strip() for t in args.seasonal_tags.split(",") if t.strip()),
+                                      current_tag=current_tag)
+            print(f"as of {as_of}: {len(lib)} songs, {args.dormant_months}-month cutoff "
+                  f"{rep['cutoff']}, new-threshold {args.new_threshold}")
+            if args.current_tag:
+                strip = sum(1 for r in rep["rows"] if r["remove"])
+                print(f"{args.current_tag!r}: " + (f"still exists — stripping from {strip} song(s)"
+                                                   if current_tag else "gone from PCO — nothing to strip"))
+            if rep["unknown_songs"]:
+                print(f"{len(rep['unknown_songs'])} song id(s) in the usage CSV are not in the library (ignored)")
+            print("state        songs")
+            for s in SV.LIFECYCLE_TAGS:
+                print(f"{s:<13}{rep['counts'].get(s, 0):>5}")
+            print(f"\ntransitions ({len(rep['rows'])} row(s) to write):")
+            for k, n in sorted(rep["transitions"].items(), key=lambda kv: -kv[1]):
+                print(f"  {k:<26}{n:>5}")
+            print(f"\nnever used ({len(rep['never_used'])}) — prune or queue:")
+            for s in rep["never_used"]:
+                print(f"  {s['id']:>9}  {s['title']}")
+            if args.out:
+                with open(args.out, "w", newline="", encoding="utf-8") as f:
+                    w = csv.DictWriter(f, fieldnames=["song", "arrangement", "add", "remove"])
+                    w.writeheader(); w.writerows(rep["rows"])
+                print(f"\n{len(rep['rows'])} row(s) -> {args.out}", file=sys.stderr)
             return 0
         if args.songs_op == "chart":
             if not args.ref:

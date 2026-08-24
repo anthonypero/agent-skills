@@ -91,6 +91,15 @@ PCO's knockoff-ChordPro, NOT standard ChordPro:
   `/tag_groups/<id>`, POST `/tag_groups/<id>/tags`, DELETE a tag → all 403 ("cannot create a
   Tag" / "cannot update TagGroup"). Taxonomy edits (new tag, rename, single↔multi-select)
   happen in the web UI: Services → Settings → Tags. Only assignment is scriptable.
+- A tag group also carries `required` (bool) alongside `allow_multiple_selections` —
+  `get_tag_groups()` surfaces it. **`required` is a UI constraint only**: the API happily
+  leaves a song with no tag from a required group, and `assign_tags` never rejects a set for
+  omitting one. Don't rely on it; compute the full set yourself.
+- **Deleting a tag in the UI cascades to every assignment** (verified 2026-08-24: removing
+  `Usage:Current` stripped it from all 71 songs that had it). So a `songs export` dump goes
+  stale the moment the taxonomy changes — an offline op that plans a *removal* should confirm
+  the tag still exists via `get_tag_groups()` first, or `TagIndex.resolve` will raise
+  mid-run and abort the whole CSV.
 - Song attrs worth knowing: `last_scheduled_at`, `themes` (free text from CCLI), `hidden`.
   Arrangement: `bpm`, `length`, `meter`, `chord_chart_key`, `sequence`; keys via
   `.../keys` (`starting_key`, `ending_key`).
