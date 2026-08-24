@@ -87,6 +87,10 @@ PCO's knockoff-ChordPro, NOT standard ChordPro:
   `{"data":{"type":"TagAssignment","attributes":{},"relationships":{"tags":{"data":[{"type":"Tag","id":..},..]}}}}`.
   It **replaces the entire set** (so read-modify-write); unknown ids are silently ignored;
   the response body is `{}`.
+- **Tag groups and tags are read-only via the API** (verified 2026-08-24 as org owner): PATCH
+  `/tag_groups/<id>`, POST `/tag_groups/<id>/tags`, DELETE a tag → all 403 ("cannot create a
+  Tag" / "cannot update TagGroup"). Taxonomy edits (new tag, rename, single↔multi-select)
+  happen in the web UI: Services → Settings → Tags. Only assignment is scriptable.
 - Song attrs worth knowing: `last_scheduled_at`, `themes` (free text from CCLI), `hidden`.
   Arrangement: `bpm`, `length`, `meter`, `chord_chart_key`, `sequence`; keys via
   `.../keys` (`starting_key`, `ending_key`).
