@@ -34,7 +34,19 @@ ServiceType                 name, frequency ("Weekly", "Daily", None)
 - Identify which template a church really uses by diffing a recent plan's item titles against
   each template's `/plan_templates/<id>/items` — names like "NEW"/"Summer" are not reliable.
 
+- **Where sermon info lives on a plan** (FUMC convention): `title` = sermon title,
+  `series_title` = series, and the **"Scripture Reading" item's `description`** = sermon
+  scripture (`PATCH .../plans/<id>/items/<id>` with `{"description": "Galatians 6:2"}`).
+  "Message" item carries only a Person note ("Pastor"). No plan-level notes are used.
+- Items need `?include=item_notes` to see notes; note categories per service type at
+  `/service_types/<st>/item_note_categories`.
+
 ## FUMC specifics (profile `fumc`)
+
+- Source of truth for sermons: ".Worship - Global Spreadsheet" (Google Sheet, owner
+  JLowe@wnccumc.net), one tab per liturgical year; 2025-26 tab columns `d`, `Sermon Series`,
+  `Sermon Title`, `Sermon Scripture/`, `First Scripture`, `Preacher`, `Response` (communion).
+  Series value "Stand Alone" means no series. Export the tab as CSV → `pco services fill`.
 
 - Modern worship = service type `191364` "01. Modern". Regular template `Modern` (60925570),
   communion `Modern - Communion` (69455127). Communion is the first Sunday of the month unless

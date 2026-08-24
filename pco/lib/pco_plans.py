@@ -177,3 +177,85 @@ def extend_plans(client: PCOClient, service_type_id: str, through: dt.date,
         import_template(client, service_type_id, plan["id"], tpl)
         created.append(plan)
     return created
+
+
+# --- Fill: title / series / scripture onto existing plans ------------------------
+
+def get_plan_items(client: PCOClient, service_type_id: str, plan_id: str) -> list[dict]:
+    return list(client.get_all(f"{V2}/service_types/{service_type_id}/plans/{plan_id}/items"))
+
+
+def update_plan(client: PCOClient, service_type_id: str, plan_id: str, **attrs) -> dict:
+    body = {"data": {"type": "Plan", "attributes": attrs}}
+    return client.patch(f"{V2}/service_types/{service_type_id}/plans/{plan_id}", body)["data"]
+
+
+def update_item(client: PCOClient, service_type_id: str, plan_id: str, item_id: str,
+                **attrs) -> dict:
+    body = {"data": {"type": "Item", "attributes": attrs}}
+    return client.patch(f"{V2}/service_types/{service_type_id}/plans/{plan_id}/items/{item_id}",
+                        body)["data"]
+
+
+def parse_sheet_date(s: str) -> dt.date | None:
+    """Accept M/D/YYYY (Google Sheets US) or YYYY-MM-DD."""
+    s = s.strip()
+    try:
+        if "/" in s:
+            m, d, y = (int(x) for x in s.split("/"))
+            return dt.date(y, m, d)
+        return dt.date.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def fill_plans(client: PCOClient, service_type_id: str, rows: list[dict],
+               scripture_item: str = "Scripture Reading", overwrite: bool = False,
+               dry_run: bool = False, log=print) -> int:
+    """rows: [{date, title, series, scripture}] (values may be ''). For each
+    row with a plan on that date: set plan title/series and the description of
+    the first item whose title matches `scripture_item`. Empty fields are
+    skipped; filled fields are left alone unless overwrite. Returns count of
+    plans changed (or that would change, in dry_run)."""
+    by_date = {r["date"]: r for r in rows if r.get("date")}
+    if not by_date:
+        return 0
+    plans = get_plans(client, service_type_id, min(by_date), max(by_date))
+    changed = 0
+    for plan in plans:
+        d = plan_date(plan)
+        row = by_date.get(d)
+        if not row:
+            continue
+        a = plan["attributes"]
+        plan_attrs = {}
+        for field, attr in (("title", "title"), ("series", "series_title")):
+            new = (row.get(field) or "").strip()
+            if new and (overwrite or not a.get(attr)):
+                plan_attrs[attr] = new
+        item_change = None
+        scripture = (row.get("scripture") or "").strip()
+        if scripture:
+            for it in get_plan_items(client, service_type_id, plan["id"]):
+                if it["attributes"]["title"].strip().lower() == scripture_item.lower():
+                    if overwrite or not it["attributes"].get("description"):
+                        item_change = (it["id"], scripture)
+                    break
+            else:
+                log(f"  {d}  WARNING: no item titled {scripture_item!r} in plan {plan['id']}")
+        if not plan_attrs and not item_change:
+            log(f"  {d}  nothing to do")
+            continue
+        changed += 1
+        desc = ", ".join(f"{k}={v!r}" for k, v in plan_attrs.items())
+        if item_change:
+            desc += f"{', ' if desc else ''}{scripture_item}={item_change[1]!r}"
+        log(f"  {d}  {desc}" + ("  [dry-run]" if dry_run else ""))
+        if dry_run:
+            continue
+        if plan_attrs:
+            update_plan(client, service_type_id, plan["id"], **plan_attrs)
+        if item_change:
+            update_item(client, service_type_id, plan["id"], item_change[0],
+                        description=item_change[1])
+    return changed

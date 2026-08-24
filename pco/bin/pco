@@ -25,6 +25,14 @@ Usage:
         Creates weekly plans after the latest existing one: plan + plan
         times copied from that plan, then imports the template (the
         communion template on first Sundays / listed dates).
+    pco services fill <type> --csv <file> [--date-col d] [--title-col ...]
+        [--series-col ...] [--scripture-col ...] [--scripture-item "Scripture Reading"]
+        [--blank-series "Stand Alone"] [--after D] [--before D] [--overwrite] [--dry-run]
+        From a worship-planning CSV (one row per service date), sets each
+        matching plan's title + series and the Scripture Reading item's
+        description. Empty cells skipped; filled fields kept unless --overwrite.
+    pco services set <type> <date> [--title T] [--series S] [--scripture REF]
+        Same, for one plan, values on the command line.
 
     Global: --profile <name>            pick a ~/.config/pco/credentials.md
                                         profile (default: $PCO_PROFILE or
@@ -80,6 +88,21 @@ def services_main(argv: list[str], profile: str | None) -> int:
     p.add_argument("--no-communion-rule", action="store_true",
                    help="disable the first-Sunday-of-month default")
     p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("fill", help="set title/series/scripture on plans from a CSV")
+    p.add_argument("type"); p.add_argument("--csv", required=True)
+    p.add_argument("--date-col", default="d"); p.add_argument("--title-col", default="Sermon Title")
+    p.add_argument("--series-col", default="Sermon Series")
+    p.add_argument("--scripture-col", default="Sermon Scripture/")
+    p.add_argument("--scripture-item", default="Scripture Reading")
+    p.add_argument("--blank-series", default="Stand Alone",
+                   help="comma-separated series values meaning 'no series' (skipped)")
+    p.add_argument("--after", type=_date); p.add_argument("--before", type=_date)
+    p.add_argument("--overwrite", action="store_true"); p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("set", help="set title/series/scripture on one plan")
+    p.add_argument("type"); p.add_argument("date", type=_date)
+    p.add_argument("--title"); p.add_argument("--series"); p.add_argument("--scripture")
+    p.add_argument("--scripture-item", default="Scripture Reading")
+    p.add_argument("--overwrite", action="store_true"); p.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
     client = PCOClient(profile=profile)
@@ -112,6 +135,32 @@ def services_main(argv: list[str], profile: str | None) -> int:
                                  dry_run=args.dry_run, log=lambda m: print(m, file=sys.stderr))
         for pl in created:
             print(pl["attributes"].get("planning_center_url") or pl["id"])
+        return 0
+    if args.op in ("fill", "set"):
+        if args.op == "set":
+            rows = [{"date": args.date, "title": args.title, "series": args.series,
+                     "scripture": args.scripture}]
+        else:
+            import csv
+            with open(args.csv, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                missing = [c for c in (args.date_col, args.title_col, args.series_col,
+                                       args.scripture_col) if c not in reader.fieldnames]
+                if missing:
+                    raise RuntimeError(f"CSV lacks columns {missing}; has {reader.fieldnames}")
+                blank = {x.strip().lower() for x in args.blank_series.split(",") if x.strip()}
+                rows = []
+                for r in reader:
+                    if (r[args.series_col] or "").strip().lower() in blank:
+                        r[args.series_col] = ""
+                    d = P.parse_sheet_date(r[args.date_col] or "")
+                    if not d or (args.after and d < args.after) or (args.before and d > args.before):
+                        continue
+                    rows.append({"date": d, "title": r[args.title_col],
+                                 "series": r[args.series_col], "scripture": r[args.scripture_col]})
+        n = P.fill_plans(client, st["id"], rows, args.scripture_item, args.overwrite,
+                         args.dry_run, log=lambda m: print(m, file=sys.stderr))
+        print(f"{n} plan(s) {'would be ' if args.dry_run else ''}updated")
         return 0
     return 1
 

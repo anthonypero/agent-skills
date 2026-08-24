@@ -63,7 +63,16 @@ pco services plans <type> [--after D] [--before D]  # plans by date
 pco services extend <type> --through 2026-10-31 --template Modern \
     --communion-template "Modern - Communion" [--communion-dates D,D] \
     [--no-communion-rule] [--dry-run]
+pco services fill <type> --csv worship.csv [--after D] [--before D] \
+    [--date-col d --title-col "Sermon Title" --series-col "Sermon Series" \
+     --scripture-col "Sermon Scripture/"] [--blank-series "Stand Alone"] \
+    [--overwrite] [--dry-run]
+pco services set <type> 2026-10-18 --title T --series S --scripture "Mark 10:46-52"
 ```
+
+`fill`/`set` write plan title + series and the "Scripture Reading" item's
+description (the FUMC convention; `--scripture-item` to change). CSV column
+defaults match the FUMC worship spreadsheet exported as CSV.
 
 `extend` creates weekly plans after the latest existing one (times copied
 from it in the org's local zone, template imported; communion template on
