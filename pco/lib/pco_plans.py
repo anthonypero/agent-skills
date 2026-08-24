@@ -351,6 +351,65 @@ def get_position_roster(client: PCOClient, service_type_id: str, position: str
     raise RuntimeError(f"No team position {position!r} with assigned people in this service type")
 
 
+def resolve_team(client: PCOClient, service_type_id: str, ref: str) -> dict:
+    """Team by id or case-insensitive name within a service type (archived teams excluded)."""
+    teams = [t for t in get_teams(client, service_type_id) if not t["attributes"].get("archived_at")]
+    for t in teams:
+        if t["id"] == ref or t["attributes"]["name"].strip().lower() == ref.strip().lower():
+            return t
+    raise RuntimeError(f"No team {ref!r} in this service type; have: "
+                       + ", ".join(t["attributes"]["name"] for t in teams))
+
+
+def team_assignments(client: PCOClient, service_type_id: str, team_id: str) -> list[dict]:
+    """Every person/position assignment on a team, flattened:
+    {id, person_id, person, position, preference}."""
+    rows = client.get(f"{V2}/service_types/{service_type_id}/teams/{team_id}"
+                      f"/person_team_position_assignments?include=person,team_position&per_page=200")
+    inc = {(i["type"], i["id"]): i for i in rows.get("included", [])}
+    out = []
+    for a in rows["data"]:
+        r = a["relationships"]
+        p = inc[("Person", r["person"]["data"]["id"])]
+        tp = inc[("TeamPosition", r["team_position"]["data"]["id"])]
+        out.append({"id": a["id"], "person_id": p["id"], "person": p["attributes"]["full_name"],
+                    "position": tp["attributes"]["name"],
+                    "preference": a["attributes"].get("schedule_preference", "")})
+    return sorted(out, key=lambda x: (x["person"].lower(), x["position"].lower()))
+
+
+# PCO accepts exactly "Unavailable" here (the UI's "Preferred Weeks" control); any other
+# unknown string is silently ignored (200, value unchanged). "As often as needed" is the default.
+def set_preference(client: PCOClient, service_type_id: str, team_id: str, assignment_id: str,
+                   preference: str) -> str:
+    body = {"data": {"type": "PersonTeamPositionAssignment", "id": assignment_id,
+                     "attributes": {"schedule_preference": preference}}}
+    r = client.patch(f"{V2}/service_types/{service_type_id}/teams/{team_id}"
+                     f"/person_team_position_assignments/{assignment_id}", body)
+    return r["data"]["attributes"].get("schedule_preference", "")
+
+
+def set_availability(client: PCOClient, service_type_id: str, team_id: str, names: list[str],
+                     preference: str, dry_run: bool = False, log=print) -> int:
+    """Set every assignment of each named person on the team to `preference`. Returns changes."""
+    rows = team_assignments(client, service_type_id, team_id)
+    roster = {r["person_id"]: r["person"] for r in rows}
+    changed = 0
+    for name in names:
+        pid = match_person(name, roster)
+        if not pid:
+            log(f"  ?? {name}: no unique match on this team"); continue
+        for r in [r for r in rows if r["person_id"] == pid]:
+            if r["preference"] == preference:
+                log(f"  == {r['person']:<24} {r['position']:<28} already {preference}"); continue
+            tag = "would set" if dry_run else "set"
+            got = preference if dry_run else set_preference(client, service_type_id, team_id, r["id"], preference)
+            ok = "" if got == preference else f"  !! PCO kept {got!r}"
+            log(f"  {tag:<9} {r['person']:<24} {r['position']:<28} {r['preference']} -> {preference}{ok}")
+            changed += got == preference
+    return changed
+
+
 _NAME_PREFIXES = {"rev", "rev.", "dr", "dr.", "pastor", "bishop", "guest", "guest:", "the"}
 
 
@@ -382,6 +441,52 @@ def schedule_person(client: PCOClient, service_type_id: str, plan_id: str, team_
                                        "team": {"data": {"type": "Team", "id": team_id}}}}}
     return client.post(f"{V2}/service_types/{service_type_id}/plans/{plan_id}/team_members",
                        body)["data"]
+
+
+def schedule_grid(client: PCOClient, service_type_id: str, rows: list[dict],
+                  status: str = "U", dry_run: bool = False, log=print) -> int:
+    """rows: [{date, team, position, person}] — the desired *additions*. Skips a row when that
+    person already holds that position on the plan (any status). Someone else already in the
+    position is fine: positions hold several people (e.g. two Vocals). Returns count scheduled."""
+    teams = {t["attributes"]["name"].lower(): t for t in get_teams(client, service_type_id)
+             if not t["attributes"].get("archived_at")}
+    rosters = {}
+    def roster(team):
+        if team["id"] not in rosters:
+            rows_ = team_assignments(client, service_type_id, team["id"])
+            rosters[team["id"]] = ({r["person_id"]: r["person"] for r in rows_},
+                                   {(r["person_id"], r["position"].lower()) for r in rows_})
+        return rosters[team["id"]]
+    by_date = {}
+    for r in rows:
+        if r.get("date") and (r.get("person") or "").strip():
+            by_date.setdefault(r["date"], []).append(r)
+    if not by_date:
+        return 0
+    n = 0
+    for plan in get_plans(client, service_type_id, min(by_date), max(by_date)):
+        d = plan_date(plan)
+        if d not in by_date:
+            continue
+        current = {(m["attributes"]["team_position_name"].lower(), m["attributes"]["name"].lower())
+                   for m in get_team_members(client, service_type_id, plan["id"])}
+        for r in by_date[d]:
+            team = teams.get(r["team"].strip().lower())
+            if not team:
+                log(f"  {d}  ?? no team {r['team']!r}"); continue
+            names, held = roster(team)
+            pid = match_person(r["person"], names)
+            if not pid:
+                log(f"  {d}  ?? {r['person']!r} not on {team['attributes']['name']}"); continue
+            if (pid, r["position"].lower()) not in held:
+                log(f"  {d}  ?? {names[pid]} isn't assigned {r['position']!r} on {team['attributes']['name']}"); continue
+            if (r["position"].lower(), names[pid].lower()) in current:
+                log(f"  {d}  == {r['position']:<28} {names[pid]} already scheduled"); continue
+            log(f"  {d}  {'would add' if dry_run else 'add':<9} {r['position']:<28} {names[pid]}")
+            if not dry_run:
+                schedule_person(client, service_type_id, plan["id"], team["id"], pid, r["position"], status)
+            n += 1
+    return n
 
 
 def schedule_from_rows(client: PCOClient, service_type_id: str, rows: list[dict],

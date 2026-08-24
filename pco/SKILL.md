@@ -72,6 +72,9 @@ pco services types                                  # service types
 pco services templates <type>                       # plan templates
 pco services plans <type> [--after D] [--before D]  # plans by date
 pco services songs apply-plan --csv plan.csv --from library.json [--type "01. Modern"] [--overwrite] [--clear-empty] [--dry-run]  # make the plans match the CSV's `song` column (plan writes already-scheduled songs into it, so the CSV IS the desired state): slot n -> n-th Song(s)/song item; --overwrite replaces a different song, --clear-empty empties slots whose cell is blank; first arrangement; Congregational-named key if any
+pco services teams <type> [--team T ...] [--members] [--csv out.csv]  # teams, or every person/position/preference on them
+pco services availability <type> --team "Worship Band" --team "Tech Team" --person "Full Name" [...] [--set Unavailable|"As often as needed"] [--dry-run]  # mark fill-ins so the scheduler skips them (every position they hold on those teams)
+pco services schedule-grid <type> --csv people-plan.csv [--after D] [--before D] [--status U|C] [--dry-run]  # additive: date,team,position,person rows; skips rows already scheduled; requests stay "prepared" (no email)
 pco services plans <type> --leaders [--position "Music Director"] [--csv leaders.csv]  # who leads each plan (feeds songs plan)
 pco services extend <type> --through 2026-10-31 --template Modern \
     --communion-template "Modern - Communion" [--communion-dates D,D] \

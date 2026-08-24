@@ -201,6 +201,15 @@ def services_main(argv: list[str], profile: str | None) -> int:
                    help="instead list who holds --position on each plan (feeds songs plan --leaders)")
     p.add_argument("--position", default="Music Director", help="--leaders: the team position to read")
     p.add_argument("--csv", help="--leaders: write the CSV here (default stdout)")
+    p = sub.add_parser("teams", help="list teams; --members lists each person/position/preference")
+    p.add_argument("type"); p.add_argument("--team", action="append", default=[], help="repeatable name|id (default: all)")
+    p.add_argument("--members", action="store_true"); p.add_argument("--csv", help="--members: write CSV here")
+    p = sub.add_parser("availability", help="set a person's scheduling preference on every position they hold on a team")
+    p.add_argument("type"); p.add_argument("--team", required=True, action="append", help="repeatable name|id")
+    p.add_argument("--person", required=True, action="append", help="repeatable full name")
+    p.add_argument("--set", dest="preference", default="Unavailable",
+                   help='"Unavailable" (default) or "As often as needed"')
+    p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("extend", help="create weekly plans through a date")
     p.add_argument("type"); p.add_argument("--through", type=_date, required=True)
     p.add_argument("--template", required=True, help="regular-week template name|id")
@@ -232,6 +241,10 @@ def services_main(argv: list[str], profile: str | None) -> int:
     p.add_argument("--after", type=_date); p.add_argument("--before", type=_date)
     p.add_argument("--status", default="U", choices=["U", "C"]); p.add_argument("--dry-run", action="store_true")
     p.add_argument("--other-of", help='"Full Name,Full Name": schedule the pair member NOT named')
+    p = sub.add_parser("schedule-grid", help="schedule people from a date,team,position,person CSV (additive)")
+    p.add_argument("type"); p.add_argument("--csv", required=True)
+    p.add_argument("--after", type=_date); p.add_argument("--before", type=_date)
+    p.add_argument("--status", default="U", choices=["U", "C"]); p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("remove-item", help="delete an item by title from templates/plans")
     p.add_argument("type"); p.add_argument("title")
     p.add_argument("--template", action="append", default=[], help="repeatable")
@@ -567,6 +580,35 @@ def services_main(argv: list[str], profile: str | None) -> int:
             print(f"{t['id']:>8}  {a['name']:<30} items={a.get('item_count')} "
                   f"teams={a.get('team_count')} updated={a.get('updated_at','')[:10]}")
         return 0
+    if args.op == "teams":
+        teams = [P.resolve_team(client, st["id"], t) for t in args.team] or \
+                [t for t in P.get_teams(client, st["id"]) if not t["attributes"].get("archived_at")]
+        if not args.members:
+            for t in teams:
+                print(f"{t['id']:>8}  {t['attributes']['name']}")
+            return 0
+        import csv
+        out = open(args.csv, "w", newline="", encoding="utf-8") if args.csv else None
+        w = csv.DictWriter(out, fieldnames=["team", "person", "position", "preference", "person_id", "assignment_id"]) if out else None
+        if w: w.writeheader()
+        for t in teams:
+            rows = P.team_assignments(client, st["id"], t["id"])
+            if w:
+                for r in rows:
+                    w.writerow({"team": t["attributes"]["name"], "person": r["person"], "position": r["position"],
+                                "preference": r["preference"], "person_id": r["person_id"], "assignment_id": r["id"]})
+                continue
+            print(f"== {t['attributes']['name']} ({t['id']}): {len({r['person_id'] for r in rows})} people")
+            for r in rows:
+                print(f"  {r['person']:<24} {r['position']:<28} {r['preference']}")
+        return 0
+    if args.op == "availability":
+        total = 0
+        for t in [P.resolve_team(client, st["id"], t) for t in args.team]:
+            print(f"== {t['attributes']['name']}" + (" (dry run)" if args.dry_run else ""))
+            total += P.set_availability(client, st["id"], t["id"], args.person, args.preference, args.dry_run)
+        print(f"{total} assignment(s) {'would be ' if args.dry_run else ''}changed", file=sys.stderr)
+        return 0
     if args.op == "plans":
         after = args.after or dt.date.today()
         if args.leaders:
@@ -620,6 +662,20 @@ def services_main(argv: list[str], profile: str | None) -> int:
         n = P.fill_plans(client, st["id"], rows, args.scripture_item, args.overwrite,
                          args.dry_run, log=lambda m: print(m, file=sys.stderr))
         print(f"{n} plan(s) {'would be ' if args.dry_run else ''}updated")
+        return 0
+    if args.op == "schedule-grid":
+        import csv
+        with open(args.csv, newline="", encoding="utf-8") as f:
+            rows = []
+            for r in csv.DictReader(f):
+                d = P.parse_sheet_date(r.get("date") or "")
+                if not d or (args.after and d < args.after) or (args.before and d > args.before):
+                    continue
+                rows.append({"date": d, "team": r.get("team") or "", "position": r.get("position") or "",
+                             "person": r.get("person") or ""})
+        n = P.schedule_grid(client, st["id"], rows, args.status, args.dry_run,
+                            log=lambda m: print(m, file=sys.stderr))
+        print(f"{n} assignment(s) {'would be ' if args.dry_run else ''}scheduled")
         return 0
     if args.op == "schedule":
         import csv

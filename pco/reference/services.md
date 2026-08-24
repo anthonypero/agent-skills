@@ -75,6 +75,17 @@ PCO's knockoff-ChordPro, NOT standard ChordPro:
 - **DELETE** returns an empty body (204) — don't try to parse JSON from it.
 - Errors return JSON with a `detail`; truncate when logging, they can be long.
 
+## Teams and availability
+
+- A team's roster: `.../service_types/<st>/teams/<id>/person_team_position_assignments?include=person,team_position`
+  — one row per person × position, attributes `schedule_preference` + `preferred_weeks`. `/teams/<id>/people`
+  gives the deduplicated headcount the UI shows.
+- "Preferred Weeks" in the UI is `schedule_preference`. To keep a fill-in on the team but out of
+  auto-scheduling, PATCH it to exactly **`"Unavailable"`** (`services availability`). Any other
+  unrecognized string ("Do Not Schedule" etc.) returns 200 with the value unchanged — check the
+  response, not the status. Default is "As often as needed".
+- Editing the same assignment in the PCO UI while patching it wins over the API (learned 2026-08-24).
+
 ## Tags (songs and arrangements)
 
 - Tag groups: `GET /tag_groups?include=tags` — each has `tags_for` (song | arrangement |
