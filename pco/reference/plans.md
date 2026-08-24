@@ -54,7 +54,9 @@ ServiceType                 name, frequency ("Weekly", "Daily", None)
 ## FUMC specifics (profile `fumc`)
 
 - Preacher = Leadership team (5752974) → **Speaker** position. Justin Lowe 111128205, Melissa
-  Lowe 111128292. Guests stay unscheduled.
+  Lowe 111128292. Guests stay unscheduled. **Host** = whichever Lowe isn't preaching, unless
+  the sheet marks them absent — phrasings seen: "(Melissa @ Reynolds)", "Justin at Epworth",
+  "Melissa will not be at the 8:45/9 services", "(Melissa - Sick)". Guest preacher → host blank.
 
 - Source of truth for sermons: ".Worship - Global Spreadsheet" (Google Sheet, owner
   JLowe@wnccumc.net), one tab per liturgical year; 2025-26 tab columns `d`, `Sermon Series`,

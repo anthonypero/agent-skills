@@ -71,12 +71,15 @@ pco services set <type> 2026-10-18 --title T --series S --scripture "Mark 10:46-
 ```
 
 pco services schedule <type> --csv worship.csv --position Speaker [--name-col Preacher] [--dry-run]
+pco services schedule <type> --csv worship.csv --position Host --other-of "Justin Lowe,Melissa Lowe"
 pco services remove-item <type> "Countdown" --all-templates --after 2026-08-24 [--dry-run]
 ```
 
 `schedule` fills a team position from a name column, matching only against
 that position's roster (honorifics stripped) — guests not on the roster stay
-blank, filled positions are skipped, status U, no notification.
+blank, filled positions are skipped, status U, no notification. `--other-of`
+schedules the pair member NOT named (the non-preaching pastor hosts) unless
+the row's text marks them absent ("Melissa @ Reynolds", "Justin at ...").
 `remove-item` deletes items by exact title from templates (`--template`,
 repeatable, or `--all-templates`) and/or plans (`--dates`, `--after/--before`).
 `fill`/`set` write plan title + series and the "Scripture Reading" item's

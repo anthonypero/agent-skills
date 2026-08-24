@@ -35,10 +35,14 @@ Usage:
         Same, for one plan, values on the command line.
     pco services schedule <type> --csv <file> --position Speaker [--name-col Preacher]
         [--date-col d] [--after D] [--before D] [--status U|C] [--dry-run]
+        [--other-of "Justin Lowe,Melissa Lowe"]
         Schedules the person named in each row into that team position on
         the plan for that date, matching against the position's roster
         (honorifics stripped). Unmatched names (guests) and already-filled
-        positions are skipped. No notification is sent.
+        positions are skipped. No notification is sent. With --other-of,
+        the scheduled person is instead the OTHER member of the pair (e.g.
+        --position Host: whoever isn't preaching hosts) unless the row's
+        text marks them absent ("Melissa @ Reynolds", "Justin at ...").
     pco services remove-item <type> "<item title>" [--template NAME|ID ...]
         [--all-templates] [--dates D,D,...] [--after D] [--before D] [--dry-run]
         Deletes items with that title from the named templates and/or the
@@ -119,6 +123,7 @@ def services_main(argv: list[str], profile: str | None) -> int:
     p.add_argument("--date-col", default="d")
     p.add_argument("--after", type=_date); p.add_argument("--before", type=_date)
     p.add_argument("--status", default="U", choices=["U", "C"]); p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--other-of", help='"Full Name,Full Name": schedule the pair member NOT named')
     p = sub.add_parser("remove-item", help="delete an item by title from templates/plans")
     p.add_argument("type"); p.add_argument("title")
     p.add_argument("--template", action="append", default=[], help="repeatable")
@@ -192,12 +197,19 @@ def services_main(argv: list[str], profile: str | None) -> int:
             for c in (args.date_col, args.name_col):
                 if c not in reader.fieldnames:
                     raise RuntimeError(f"CSV lacks column {c!r}; has {reader.fieldnames}")
+            pair = tuple(x.strip() for x in args.other_of.split(",")) if args.other_of else None
+            if pair and len(pair) != 2:
+                raise RuntimeError("--other-of needs exactly two comma-separated names")
             rows = []
             for r in reader:
                 d = P.parse_sheet_date(r[args.date_col] or "")
                 if not d or (args.after and d < args.after) or (args.before and d > args.before):
                     continue
-                rows.append({"date": d, "name": r[args.name_col]})
+                name = r[args.name_col] or ""
+                if pair and name.strip():
+                    name = P.counterpart_name(name, pair, " ".join(v or "" for v in r.values()),
+                                              log=lambda m: print(m, file=sys.stderr), when=str(d)) or ""
+                rows.append({"date": d, "name": name})
         n = P.schedule_from_rows(client, st["id"], rows, args.position, args.status,
                                  args.dry_run, log=lambda m: print(m, file=sys.stderr))
         print(f"{n} person(s) {'would be ' if args.dry_run else ''}scheduled")

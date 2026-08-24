@@ -396,3 +396,30 @@ def schedule_from_rows(client: PCOClient, service_type_id: str, rows: list[dict]
             schedule_person(client, service_type_id, plan["id"], team["id"], pid, position, status)
         n += 1
     return n
+
+
+# --- Counterpart rule: "the other one hosts" --------------------------------------
+
+_ABSENT_RE = (r"\b{first}\b\s*(?::|-|–)?\s*(?:@|\bat\b|will not|won'?t|is not|isn'?t|"
+              r"sick|ill|away|out\b|off\b|vacation|retreat|conference|not (?:be )?here)")
+
+
+def is_marked_absent(first_name: str, row_text: str) -> bool:
+    import re
+    return re.search(_ABSENT_RE.format(first=re.escape(first_name)), row_text, re.I) is not None
+
+
+def counterpart_name(preacher: str, pair: tuple[str, str], row_text: str,
+                     log=print, when: str = "") -> str | None:
+    """Given the preacher and a pair of full names, return the other pair
+    member's name if they aren't marked absent in row_text; None otherwise."""
+    toks = _name_tokens(preacher)
+    who = [p for p in pair if all(t in _name_tokens(p) for t in toks)] if toks else []
+    if len(who) != 1:
+        log(f"  {when}  preacher {preacher!r} is not one of the pair — host left blank")
+        return None
+    other = pair[0] if who[0] == pair[1] else pair[1]
+    if is_marked_absent(other.split()[0], row_text):
+        log(f"  {when}  {other} marked absent in sheet — host left blank")
+        return None
+    return other
