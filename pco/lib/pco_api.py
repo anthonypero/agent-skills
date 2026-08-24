@@ -138,6 +138,27 @@ def resolve_credentials(app_id: str | None = None, secret: str | None = None,
         "Tokens: https://api.planningcenteronline.com/oauth/applications")
 
 
+def profile_setting(key: str, profile: str | None = None, default: str = "") -> str:
+    """A non-credential setting (e.g. PCO_SELF, the profile's own worship
+    leader) from the same places credentials come from: the environment, the
+    nearest project secrets file, then the credentials.md profile section."""
+    if os.environ.get(key):
+        return os.environ[key]
+    project_secrets = _nearest_project_secrets(os.getcwd())
+    if project_secrets:
+        with open(project_secrets, "r", encoding="utf-8") as f:
+            vals = _parse_secret_lines(f.read())
+        if vals.get(key):
+            return vals[key]
+    if os.path.isfile(CONFIG_PATH):
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            section = _parse_profiles(f.read()).get(
+                (profile or os.environ.get("PCO_PROFILE") or "default").lower(), {})
+        if section.get(key):
+            return section[key]
+    return default
+
+
 def list_profiles(config_path: str = CONFIG_PATH) -> dict[str, bool]:
     """{profile_name: is_complete} for every section in the credentials file
     (complete = both PCO_APP_ID and PCO_SECRET non-empty). {} if no file."""

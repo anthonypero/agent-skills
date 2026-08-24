@@ -67,9 +67,12 @@ pco services song-usage <type> --after D --csv u.csv # songs used per plan: sect
 pco services songs mix --usage all.csv --from library.json --after D [--before D] [--target 40/40/20] [--new-threshold 4] [--exclude RE] [--exclude-tags Christmas,Easter,Patriotic] [--keep-advent] [--songs]  # offline: slots bucketed ccli/historical/new vs target
 pco services songs flag --ids 1,2 | --csv list.csv [--tag Worklist:Flagged] [--note "why"] [--clear] [--dry-run]  # scratch tag = exactly this list; prior list unflagged from local state
 pco services songs lifecycle --usage all.csv --from library.json [--out lifecycle.csv] [--as-of D] [--new-threshold 4] [--dormant-months 24] [--intro-weeks 8] [--seasonal-tags Christmas,Easter,Patriotic] [--skip-intro-arr-tags "Modernized Hymn"] [--current-tag Current]  # offline: Queued/Introducing/Rotation/Dormant/Retired per song from usage -> retag CSV
+pco services songs plan --usage all.csv --from library.json --sheet worship.csv --after D --before D [--as-of D] [--period-start D] [--out plan.csv] [--leaders leaders.csv --self "Your Name"] [--lookback-weeks 12] [--run 3/4] [--follow-up-weeks 4-8] [--candidates 8] [--overrides 2] [--exclude RE]  # offline: a period's first-pass song plan — obligations, mix tilt, 4 annotated slots per Sunday
 pco services types                                  # service types
 pco services templates <type>                       # plan templates
 pco services plans <type> [--after D] [--before D]  # plans by date
+pco services songs apply-plan --csv plan.csv --from library.json [--type "01. Modern"] [--overwrite] [--clear-empty] [--dry-run]  # make the plans match the CSV's `song` column (plan writes already-scheduled songs into it, so the CSV IS the desired state): slot n -> n-th Song(s)/song item; --overwrite replaces a different song, --clear-empty empties slots whose cell is blank; first arrangement; Congregational-named key if any
+pco services plans <type> --leaders [--position "Music Director"] [--csv leaders.csv]  # who leads each plan (feeds songs plan)
 pco services extend <type> --through 2026-10-31 --template Modern \
     --communion-template "Modern - Communion" [--communion-dates D,D] \
     [--no-communion-rule] [--dry-run]
@@ -99,6 +102,36 @@ repeatable, or `--all-templates`) and/or plans (`--dates`, `--after/--before`).
 `fill`/`set` write plan title + series and the "Scripture Reading" item's
 description (the FUMC convention; `--scripture-item` to change). CSV column
 defaults match the FUMC worship spreadsheet exported as CSV.
+
+`plan` is the offline first-pass song planner for one scheduling period. It
+never picks a song — it pins the carry-over **obligations** (an intro run under
+3 uses continues on the Sundays left in its 4-Sunday window; a finished run owes
+a follow-up 4–8 weeks later; Queued songs are listed as the pool a human debuts
+from), prints the trailing-year **mix tilt** vs `--target` and a per-Sunday
+theme summary, and writes a CSV of the template's four `Song(s)` slots per
+Sunday. Columns: `date, liturgical_date, season, sermon_title, scripture,
+theme_source` (`sheet`, or `lectionary-needed` when the sheet has neither title
+nor scripture), `leader, slot` (1–4), `slot_name` (WE GATHER / WE RESPOND ×2 /
+WE RESPOND-close), `obligation` (the song a rule pinned here), `song` (**blank —
+a human fills it**), `candidates` (`;`-joined `Title [annotations]`).
+Annotations are short tokens: the mix bucket (`ccli` / `hist` / `new:2/4`), the
+Lifecycle state, `pero`, `speed:Fast`, `key:G(M)/E(F)` (the congregational key —
+a trailing `?` means no key is named congregational, so it is unvetted),
+`unsung`, `out-of-season`, and every rule the song would break if chosen —
+`repeat-in-period`, `pero-cap`, `2nd-new-song`, `week1-opener`. Nothing is
+filtered except `Lifecycle:Retired`: the perfect song wins (rule 0), so each
+slot lists `--candidates` songs that break nothing **plus** `--overrides` that
+do, merged back into merit order — the rule-breaking options stay visible and
+never crowd out the clean ones.
+
+`--after`/`--before` are the Sundays rows come out for; `--period-start`
+(default `--after`) opens the wider window the period's own rules are scoped
+to — `repeat-in-period` and the Pero 1-in-3 average — so planning the back half
+of a period still counts the front half's songs as spent. With `--leaders` (a
+`date,music_director` CSV from `plans --leaders`) plus `--self`, only your own
+Sundays get candidates — someone else's carries its obligations and nothing more.
+Ranking is deterministic: slot feel (each slot's empirical Speed mix, slot 4
+inferred from history), mix tilt, recency, then usage count.
 
 `extend` creates weekly plans after the latest existing one (times copied
 from it in the org's local zone, template imported; communion template on

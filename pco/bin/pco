@@ -38,12 +38,24 @@ Usage:
                                         offline: each song's Lifecycle state (Queued /
                                         Introducing / Rotation / Dormant / Retired) from
                                         its usage history -> retag CSV + summary
+    pco services songs plan --usage all.csv --from library.json --sheet worship.csv
+        --after D --before D [--as-of D] [--period-start D] [--out plan.csv] [--lookback-weeks 12]
+        [--run 3/4] [--follow-up-weeks 4-8] [--candidates 8] [--exclude REGEX]
+        [--leaders leaders.csv --self "Your Name"]
+                                        offline: a first-pass song plan for one period —
+                                        carry-over obligations (rule 11), the trailing-year
+                                        mix tilt, a per-Sunday theme summary, and a CSV of
+                                        4 slots per Sunday with ranked, annotated
+                                        candidates. The song column stays blank: Tony fills it.
     pco services types
     pco services song-usage <type> --after D [--before D] [--csv out.csv]
                                         every song item in the range: date,
                                         section, title, arrangement, key
     pco services templates <type>
     pco services plans <type> [--after YYYY-MM-DD] [--before YYYY-MM-DD]
+        [--leaders [--position "Music Director"] [--csv leaders.csv]]
+                                        --leaders writes date,plan_id,music_director —
+                                        the CSV `songs plan --leaders` reads
     pco services extend <type> --through YYYY-MM-DD --template <name|id>
         [--communion-template <name|id>] [--communion-dates D,D,...]
         [--no-communion-rule] [--dry-run]
@@ -93,7 +105,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "lib"))
 import datetime as dt
 
 from pco_api import (CONFIG_PATH, PCOClient, init_credentials, list_profiles,
-                     resolve_credentials)
+                     profile_setting, resolve_credentials)
 
 
 def load_data(arg: str) -> dict:
@@ -118,7 +130,7 @@ def services_main(argv: list[str], profile: str | None) -> int:
     sub.add_parser("tags", help="list tag groups and tags")
     p = sub.add_parser("songs", help="song library operations")
     p.add_argument("songs_op", choices=["export", "tag", "apply-tags", "audit", "chart", "mix",
-                                        "lifecycle", "flag"])
+                                        "lifecycle", "plan", "flag", "apply-plan"])
     p.add_argument("ref", nargs="?", help="tag: song id or exact title")
     p.add_argument("--out", help="export: write JSON here (default stdout)")
     p.add_argument("--include-hidden", action="store_true")
@@ -156,6 +168,28 @@ def services_main(argv: list[str], profile: str | None) -> int:
     p.add_argument("--current-tag", default="Current",
                    help="lifecycle: tag Lifecycle supersedes; stripped where it still exists "
                         "('' to never strip)")
+    p.add_argument("--sheet", help="plan: worship-planning CSV (sermon title/scripture/season per Sunday)")
+    p.add_argument("--period-start", type=_date,
+                   help="plan: the period's real first Sunday (default --after) — scopes the "
+                        "no-repeat window and the Pero 1-in-3 average; rows still start at --after")
+    p.add_argument("--lookback-weeks", type=int, default=12,
+                   help="plan: look this far back across the period boundary for obligations")
+    p.add_argument("--follow-up-weeks", default="4-8", help="plan: a run's deliberate repeat is due in this window")
+    p.add_argument("--run", default="3/4", help="plan: an intro run is N of M Sundays")
+    p.add_argument("--candidates", type=int, default=8, help="plan: candidates listed per slot")
+    p.add_argument("--overrides", type=int, default=2,
+                   help="plan: also list this many rule-breaking candidates per slot (rule 0); 0 for none")
+    p.add_argument("--leaders", help="plan: CSV date,music_director (see plans --leaders); "
+                                     "without it every Sunday is yours")
+    p.add_argument("--self", dest="self_leader", default="",
+                   help="plan: your name as it appears in --leaders "
+                        "(default: PCO_SELF from the env/profile)")
+    p.add_argument("--recency-weeks", type=int, default=12,
+                   help="plan: candidates sung within N weeks are pushed down")
+    p.add_argument("--mix-months", type=int, default=12, help="plan: the mix window the tilt is read from")
+    p.add_argument("--type", dest="plan_type", help="apply-plan: service type name|id (default 01. Modern)")
+    p.add_argument("--overwrite", action="store_true", help="apply-plan: replace slots that already hold a different song")
+    p.add_argument("--clear-empty", action="store_true", help="apply-plan: a blank `song` cell empties a filled slot")
     p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("song-usage", help="song items across plans in a date range")
     p.add_argument("type"); p.add_argument("--after", type=_date, required=True)
@@ -163,6 +197,10 @@ def services_main(argv: list[str], profile: str | None) -> int:
     p = sub.add_parser("templates", help="list plan templates"); p.add_argument("type")
     p = sub.add_parser("plans", help="list plans"); p.add_argument("type")
     p.add_argument("--after", type=_date); p.add_argument("--before", type=_date)
+    p.add_argument("--leaders", action="store_true",
+                   help="instead list who holds --position on each plan (feeds songs plan --leaders)")
+    p.add_argument("--position", default="Music Director", help="--leaders: the team position to read")
+    p.add_argument("--csv", help="--leaders: write the CSV here (default stdout)")
     p = sub.add_parser("extend", help="create weekly plans through a date")
     p.add_argument("type"); p.add_argument("--through", type=_date, required=True)
     p.add_argument("--template", required=True, help="regular-week template name|id")
@@ -325,6 +363,131 @@ def services_main(argv: list[str], profile: str | None) -> int:
                     w.writeheader(); w.writerows(rep["rows"])
                 print(f"\n{len(rep['rows'])} row(s) -> {args.out}", file=sys.stderr)
             return 0
+        if args.songs_op == "apply-plan":
+            import csv
+            if not (args.csv and args.from_json):
+                raise RuntimeError("apply-plan needs --csv plan.csv --from library.json [--type 01. Modern] [--overwrite] [--dry-run]")
+            with open(args.from_json, encoding="utf-8") as f:
+                lib = json.load(f)
+            with open(args.csv, newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+            st = P.resolve_service_type(client, args.plan_type or "01. Modern")
+            res = P.apply_plan_songs(client, st["id"], rows, lib, overwrite=args.overwrite, clear=args.clear_empty, dry_run=args.dry_run)
+            print(f"{res['set']} slot(s) {'would be ' if args.dry_run else ''}set, {res['cleared']} cleared, {res['skipped']} unchanged, {len(res['errors'])} error(s)")
+            return 1 if res["errors"] else 0
+        if args.songs_op == "plan":
+            import csv
+            if not (args.usage and args.from_json and args.sheet and args.after):
+                raise RuntimeError("plan needs --usage all.csv --from library.json --sheet worship.csv "
+                                   "--after D [--before D]")
+            with open(args.from_json, encoding="utf-8") as f:
+                lib = json.load(f)
+            with open(args.usage, newline="", encoding="utf-8") as f:
+                usage = list(csv.DictReader(f))
+            with open(args.sheet, newline="", encoding="utf-8") as f:
+                sheet = list(csv.DictReader(f))
+            before = args.before or (args.after + dt.timedelta(days=90))
+            as_of = args.as_of or dt.date.today()
+            fu = tuple(int(x) for x in args.follow_up_weeks.replace("/", "-").split("-"))
+            leaders, me = None, args.self_leader or profile_setting("PCO_SELF", profile)
+            if args.leaders:
+                if not me:
+                    raise RuntimeError("--leaders needs --self 'Your Name' (or PCO_SELF in the profile)")
+                with open(args.leaders, newline="", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    who = next((c for c in reader.fieldnames if c not in ("date", "plan_id")), None)
+                    leaders = {d: (r.get(who) or "").strip() for r in reader
+                               if (d := P.parse_sheet_date(r.get("date") or ""))}
+            rep = SV.plan_songs(usage, lib, sheet, args.after, before, as_of=as_of,
+                                period_start=args.period_start, lookback_weeks=args.lookback_weeks,
+                                run=tuple(int(x) for x in args.run.replace("-", "/").split("/")),
+                                follow_up_weeks=fu, candidates=args.candidates, overrides=args.overrides,
+                                new_threshold=args.new_threshold, new_months=args.new_months,
+                                intro_weeks=args.intro_weeks, recency_weeks=args.recency_weeks,
+                                mix_months=args.mix_months,
+                                exclude=args.exclude or "Great Thanksgiving",
+                                leaders=leaders, self_leader=me,
+                                seasonal_tags=tuple(t.strip() for t in args.seasonal_tags.split(",") if t.strip()),
+                                skip_intro_arr_tags=tuple(t.strip() for t in args.skip_intro_arr_tags.split(",") if t.strip()),
+                                target=tuple(int(x) for x in args.target.split("/")))
+            ob, days, pb = rep["obligations"], rep["sundays"], rep["pero_budget"]
+            print(f"{args.after} -> {before}: {len(days)} Sundays x 4 slots, as of {as_of}"
+                  + (f"; period from {args.period_start} ({pb['sundays']} Sundays)"
+                     if args.period_start and args.period_start != args.after else "")
+                  + (f" (Advent 1 {rep['advent1']})" if rep["advent1"] else ""))
+            print(f"\n## Obligations (rule 11; looked back {args.lookback_weeks} weeks past "
+                  f"{args.period_start or args.after})")
+            print(f"runs to continue ({len(ob['runs'])}):" if ob["runs"] else "runs to continue: none")
+            for o in ob["runs"]:
+                print(f"  {o['title']} — debut {o['debut']}, {o['uses']} of {args.run.split('/')[0]} "
+                      f"use(s) scheduled ({o['sung']} sung by {as_of}), needs {o['need']} more, {o['window']}")
+                print("    Sundays left: " + (", ".join(str(d) for d in o["sundays"]) or "NONE")
+                      + (f"  (else by {o['fallback']})" if o["fallback"] else ""))
+                print("    pinned: " + (", ".join(f"{d} slot {o['slot']}" for d in o["pin"]) or "nowhere"))
+                if o["short"]:
+                    print("    NOTE: " + ("the run spills past this period — it finishes in the next one"
+                                          if o["sundays"] and not o["pin"] else
+                                          "not enough Sundays left in the window — widen the run or re-debut"))
+                if o["straddles_advent"]:
+                    print(f"    WARNING: run would straddle Advent 1 ({rep['advent1']}) — Advent is planned separately")
+            print(f"follow-ups due ({len(ob['follow_ups'])}):" if ob["follow_ups"] else "follow-ups due: none")
+            for o in ob["follow_ups"]:
+                lo, hi = o["due"]
+                print(f"  {o['title']} — run ended {o['run_end']}, repeat due {lo} .. {hi}")
+                print(f"    Sundays in window: " + (", ".join(str(d) for d in o["sundays"]) or "NONE")
+                      + ("  (falls in Advent — slides to after Epiphany)" if o["in_advent"] else ""))
+                if o["pin"]:
+                    print(f"    pinned: {o['pin'][0]}")
+            if ob["exempt"]:
+                print("exempt (a modernized hymn / seasonal song is not a new song — no run owed):")
+                for o in ob["exempt"]:
+                    print(f"  {o['title']} — debut {o['debut']}, {o['uses']} use(s)")
+            if ob["stale"]:
+                print(f"lapsed runs (under {args.run.split('/')[0]} uses, not sung in "
+                      f"{args.intro_weeks} weeks — nothing owed; retire by hand if it didn't work):")
+                for o in ob["stale"]:
+                    print(f"  {o['title']} — debut {o['debut']}, {o['uses']} use(s), last {o['last']}")
+            print("queued (Tony's new-song pool; the planner never picks a debut):"
+                  if ob["queued"] else "queued (new-song pool): none")
+            for o in ob["queued"]:
+                print(f"  {o['title']}" + (f" [speed:{o['speed']}]" if o["speed"] else "")
+                      + ("  [pero]" if o["pero"] else ""))
+            total = sum(rep["mix"]["totals"].values()) or 1
+            tgt = dict(zip(("ccli", "historical", "new"), (int(x) for x in args.target.split("/"))))
+            print(f"\n## Mix, trailing {args.mix_months} months ({total} slots, "
+                  f"{len(rep['mix']['songs'])} songs; Advent and seasonal songs dropped)")
+            for b in ("ccli", "historical", "new"):
+                n = rep["mix"]["totals"].get(b, 0)
+                print(f"  {b:<12}{n:>4}{100 * n / total:>5.0f}%  target {tgt[b]}%  "
+                      f"{rep['delta'][b]:+.0f}  {rep['tilt'][b]}")
+            hint = {"over": "ease off", "under": "lean in", "on target": "hold"}
+            print("  tilt: " + " · ".join(f"{b} {rep['tilt'][b]} ({hint[rep['tilt'][b]]})"
+                                          for b in ("ccli", "historical", "new")))
+            print(f"  slot-4 feel from history: " + ", ".join(
+                f"{sp} {100 * v:.0f}%" for sp, v in sorted(rep["slot_feel"].get(4, {}).items(),
+                                                           key=lambda kv: -kv[1])))
+            print(f"  Pero originals (rule 12): {len(pb['committed'])}/{pb['budget']} of "
+                  f"{pb['sundays']} Sundays committed; {len(pb['exempt'])} song(s) exempt (intro run)")
+            print("\n## Sundays")
+            for day in days:
+                obs = [r for r in rep["rows"] if r["date"] == day["date"].isoformat() and r["obligation"]]
+                print(f"{day['date']}  {day['liturgical_date'] or '-':<8}{day['season'] or '-':<10}"
+                      f"{'communion' if day['communion'] else '':<10}[{day['theme_source']}]  "
+                      f"{day['title'] or '(no sermon title)'}")
+                print(f"{'':12}{day['scripture'] or '(no scripture — use the lectionary)'}")
+                print(f"{'':12}leader: {day['leader'] or '(unknown)'}"
+                      + ("" if day["mine"] else " — not yours; obligations only, no candidates"))
+                if obs:
+                    print(f"{'':12}obligation: " + ", ".join(f"{r['obligation']} (slot {r['slot']})" for r in obs))
+                print(f"{'':12}pero: {day['pero']}")
+            if args.out:
+                cols = ["date", "liturgical_date", "season", "sermon_title", "scripture", "theme_source",
+                        "leader", "slot", "slot_name", "obligation", "song", "candidates"]
+                with open(args.out, "w", newline="", encoding="utf-8") as f:
+                    w = csv.DictWriter(f, fieldnames=cols)
+                    w.writeheader(); w.writerows(rep["rows"])
+                print(f"\n{len(rep['rows'])} row(s) -> {args.out}", file=sys.stderr)
+            return 0
         if args.songs_op == "chart":
             if not args.ref:
                 raise RuntimeError("chart needs a song id or title")
@@ -406,6 +569,16 @@ def services_main(argv: list[str], profile: str | None) -> int:
         return 0
     if args.op == "plans":
         after = args.after or dt.date.today()
+        if args.leaders:
+            import csv
+            rows = P.plan_leaders(client, st["id"], after, args.before or dt.date.today(),
+                                  args.position, log=lambda m: print(m, file=sys.stderr))
+            out = open(args.csv, "w", newline="", encoding="utf-8") if args.csv else sys.stdout
+            w = csv.DictWriter(out, fieldnames=list(rows[0].keys()) if rows else
+                               ["date", "plan_id", args.position.lower().replace(" ", "_")])
+            w.writeheader(); w.writerows(rows)
+            print(f"{len(rows)} plan(s)", file=sys.stderr)
+            return 0
         for pl in P.get_plans(client, st["id"], after, args.before):
             a = pl["attributes"]
             print(f"{pl['id']:>9}  {a['sort_date'][:10]}  items={a['items_count']:<3} "

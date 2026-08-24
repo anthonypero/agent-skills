@@ -307,6 +307,26 @@ def remove_item(client: PCOClient, service_type_id: str, title: str,
 
 # --- Schedule: put a named person into a team position from a sheet column --------
 
+def plan_leaders(client: PCOClient, service_type_id: str, after: dt.date, before: dt.date,
+                 position: str = "Music Director", log=None) -> list[dict]:
+    """[{date, plan_id, <position column>}] — who is scheduled into `position`
+    on each plan in the range. Feeds `songs plan --leaders`: which Sundays are
+    the profile's own to fill (rule 13). One call per plan."""
+    rows = []
+    plans = get_plans(client, service_type_id, after, before)
+    col = position.lower().replace(" ", "_")
+    for n, plan in enumerate(plans, 1):
+        if log and n % 10 == 0:
+            log(f"  ...{n}/{len(plans)} plans")
+        members = client.get(f"{V2}/service_types/{service_type_id}/plans/{plan['id']}"
+                             f"/team_members?per_page=100")["data"]
+        who = [m["attributes"].get("name") or "" for m in members
+               if (m["attributes"].get("team_position_name") or "").strip().lower() == position.lower()]
+        rows.append({"date": plan_date(plan).isoformat(), "plan_id": plan["id"],
+                     col: "; ".join(dict.fromkeys(w for w in who if w))})
+    return rows
+
+
 def get_teams(client: PCOClient, service_type_id: str) -> list[dict]:
     return list(client.get_all(f"{V2}/service_types/{service_type_id}/teams"))
 
@@ -461,3 +481,116 @@ def song_usage(client: PCOClient, service_type_id: str, after: dt.date, before: 
                 "length": a.get("length"),
             })
     return rows
+
+
+# --- Song planning: write a plan CSV's picks into the plans ---------------------
+
+def pick_key(keys: list[dict]) -> dict | None:
+    """Rule 14: a key whose name says Congregational wins; else 'Original Key'; else the first."""
+    if not keys:
+        return None
+    for k in keys:
+        if "congregational" in (k["attributes"].get("name") or "").lower():
+            return k
+    for k in keys:
+        if "original" in (k["attributes"].get("name") or "").lower():
+            return k
+    return keys[0]
+
+
+def song_slots(items: list[dict], placeholder: str = "Song(s)") -> list[dict]:
+    """The plan's song slots in service order: items that already hold a song plus
+    the untouched `placeholder` items the template left behind."""
+    return [i for i in sorted(items, key=lambda i: i["attributes"]["sequence"])
+            if i["attributes"]["item_type"] == "song" or (i["attributes"].get("title") or "").strip() == placeholder]
+
+
+def set_item_song(client: PCOClient, service_type_id: str, plan_id: str, item_id: str,
+                  song: dict, arrangement: dict, key: dict | None) -> dict:
+    """Turn a plan item into a song item — the same PATCH the UI does when a song is
+    dropped onto a placeholder: item_type, title, length and the three relationships."""
+    rel = {"song": {"data": {"type": "Song", "id": song["id"]}},
+           "arrangement": {"data": {"type": "Arrangement", "id": arrangement["id"]}}}
+    if key:
+        rel["key"] = {"data": {"type": "Key", "id": key["id"]}}
+    body = {"data": {"type": "Item", "id": item_id,
+                     "attributes": {"title": song["attributes"]["title"],
+                                    "length": arrangement["attributes"].get("length") or 0},
+                     "relationships": rel}}
+    return client.patch(f"{V2}/service_types/{service_type_id}/plans/{plan_id}/items/{item_id}", body)["data"]
+
+
+def clear_item_song(client: PCOClient, service_type_id: str, plan_id: str, item_id: str,
+                    placeholder: str = "Song(s)", length: int = 300) -> dict:
+    """Undo set_item_song: null the three relationships and restore the placeholder title.
+    PCO flips item_type back to `item` on its own."""
+    body = {"data": {"type": "Item", "id": item_id, "attributes": {"title": placeholder, "length": length},
+                     "relationships": {"song": {"data": None}, "arrangement": {"data": None}, "key": {"data": None}}}}
+    return client.patch(f"{V2}/service_types/{service_type_id}/plans/{plan_id}/items/{item_id}", body)["data"]
+
+
+def apply_plan_songs(client: PCOClient, service_type_id: str, rows: list[dict], library: list[dict],
+                     *, overwrite: bool = False, clear: bool = False, dry_run: bool = False,
+                     placeholder: str = "Song(s)", log=print) -> dict:
+    """Write the `song` column of a `songs plan` CSV into the plans.
+
+    rows: the CSV (date, slot, song, ...). Only rows with a song are touched. Slot n
+    is the n-th song slot of that date's plan in service order (`song_slots`), so the
+    template's four `Song(s)` items map to slots 1–4 whether or not some are already
+    filled. A slot that already holds a song is skipped unless `overwrite`. Songs are
+    With `clear`, a row whose `song` is blank empties a filled slot back to the placeholder
+    (rows with a song still need `overwrite` to replace). Songs are
+    resolved by exact title against `library` (an export_library() dump, for the id);
+    arrangement = the song's first arrangement, key = `pick_key` over the live keys.
+    Returns {"set": n, "cleared": n, "skipped": n, "errors": [..]}.
+    """
+    by_title = {s["title"]: s for s in library}
+    wanted = {}
+    for r in rows:
+        title = (r.get("song") or "").strip()
+        d = parse_sheet_date(r.get("date") or "")
+        if d and (title or clear):
+            wanted.setdefault(d, {})[int(r["slot"])] = title
+    if not wanted:
+        return {"set": 0, "cleared": 0, "skipped": 0, "errors": ["no rows with a song"]}
+    plans = {plan_date(p): p for p in get_plans(client, service_type_id, min(wanted), max(wanted))}
+    out = {"set": 0, "cleared": 0, "skipped": 0, "errors": []}
+    cache = {}
+    for d in sorted(wanted):
+        plan = plans.get(d)
+        if not plan:
+            out["errors"].append(f"{d}: no plan"); log(f"  {d}  no plan — skipped"); continue
+        slots = song_slots(get_plan_items(client, service_type_id, plan["id"]), placeholder)
+        for n, title in sorted(wanted[d].items()):
+            if n > len(slots):
+                out["errors"].append(f"{d}: slot {n} but plan has {len(slots)} song slots"); log(f"  {d}  slot {n}: only {len(slots)} slots — skipped"); continue
+            item = slots[n - 1]
+            cur = item["attributes"].get("title")
+            if not title:
+                if item["attributes"]["item_type"] == "song":
+                    log(f"  {d}  slot {n}: clear {cur!r}" + ("  [dry-run]" if dry_run else ""))
+                    if not dry_run:
+                        clear_item_song(client, service_type_id, plan["id"], item["id"], placeholder)
+                    out["cleared"] += 1
+                continue
+            if item["attributes"]["item_type"] == "song" and cur == title:
+                out["skipped"] += 1; continue
+            if item["attributes"]["item_type"] == "song" and not overwrite:
+                out["skipped"] += 1; log(f"  {d}  slot {n}: already {cur!r} — skip (use --overwrite)"); continue
+            s = by_title.get(title)
+            if not s:
+                out["errors"].append(f"{d}: {title!r} not in library"); log(f"  {d}  slot {n}: {title!r} not in library — skipped"); continue
+            if s["id"] not in cache:
+                arrs = client.get(f"{V2}/songs/{s['id']}/arrangements?per_page=100")["data"]
+                if not arrs:
+                    out["errors"].append(f"{d}: {title!r} has no arrangement"); log(f"  {d}  slot {n}: {title!r} has no arrangement — skipped"); continue
+                arr = arrs[0]
+                keys = client.get(f"{V2}/songs/{s['id']}/arrangements/{arr['id']}/keys?per_page=100")["data"]
+                cache[s["id"]] = ({"id": s["id"], "attributes": {"title": s["title"]}}, arr, pick_key(keys))
+            song, arr, key = cache[s["id"]]
+            kd = f"{key['attributes'].get('starting_key')} ({key['attributes'].get('name') or 'unnamed'})" if key else "no key"
+            log(f"  {d}  slot {n}: {title}  [{arr['attributes']['name']}, {kd}]" + ("  [dry-run]" if dry_run else ""))
+            if not dry_run:
+                set_item_song(client, service_type_id, plan["id"], item["id"], song, arr, key)
+            out["set"] += 1
+    return out

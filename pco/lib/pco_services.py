@@ -486,6 +486,448 @@ def lifecycle_states(usage: list[dict], library: list[dict], as_of, *,
             "rows": rows, "unknown_songs": sorted(unknown), "cutoff": cutoff.isoformat()}
 
 
+# --- period plan (first-pass song plan for one scheduling period) -------------
+
+SPEEDS = ("Fast", "Medium", "Slow")
+SLOT_NAMES = ("WE GATHER", "WE RESPOND", "WE RESPOND", "WE RESPOND-close")
+
+# Which liturgical seasons a seasonally-tagged song belongs to. Matched against
+# the sheet's "Liturgical Season" cell; Christmas also falls back to the
+# Advent 1 -> Epiphany window and Patriotic to Memorial Day -> July 4 / Veterans Day.
+SEASON_WORDS = {"Christmas": ("advent", "christmas", "epiphany"),
+                "Easter": ("lent", "holy week", "easter", "pentecost"),
+                "Patriotic": ("independence", "memorial", "veterans")}
+
+
+def key_label(arrangements: list[dict], played: str = "") -> str:
+    """A candidate's key annotation (rule 14): the arrangement key(s) whose
+    NAME says congregational — tagged (M)/(F) where it names a male or female
+    lead, joined when several arrangements disagree. With none, the key named
+    'Original Key' (else the first key, else the key it has actually been
+    played in) marked with a trailing '?' — unvetted for congregational singing.
+    Most keys in the library are unnamed, so most annotations carry the '?'."""
+    keys = [((k.get("name") or ""), k.get("starting") or "") for a in arrangements
+            for k in (a.get("keys") or ()) if k.get("starting")]
+    cong = []
+    for name, start in keys:
+        low = name.lower()
+        if "congregational" not in low:
+            continue
+        tag = "F" if "female" in low else "M" if "male" in low else ""
+        label = f"{start}({tag})" if tag else start
+        if label not in cong:
+            cong.append(label)
+    if cong:
+        return "/".join(cong)
+    fallback = next((s for n, s in keys if "original key" in n.lower()), "")
+    fallback = fallback or (keys[0][1] if keys else played)
+    return f"{fallback}?" if fallback else ""
+
+
+def _same_person(a: str, b: str) -> bool:
+    """Loose name match — a plan's team member may be 'Anthony J. Pero'."""
+    ta = [x.lower().strip(".,") for x in (a or "").split()]
+    tb = [x.lower().strip(".,") for x in (b or "").split()]
+    return bool(ta) and bool(tb) and ta[0] == tb[0] and ta[-1] == tb[-1]
+
+
+def in_season(tag: str, d, sheet_season: str = "") -> bool:
+    """Is a song tagged `tag` (Christmas / Easter / Patriotic) in season on `d`?"""
+    if any(w in (sheet_season or "").lower() for w in SEASON_WORDS.get(tag, ())):
+        return True
+    if tag == "Christmas":
+        return any(a <= d <= b for a, b in advent_windows(d, d))
+    if tag == "Patriotic":
+        return (5, 20) <= (d.month, d.day) <= (7, 10) or (d.month == 11 and d.day <= 15)
+    return False
+
+
+def _norm_header(s: str) -> str:
+    import re
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def sheet_column(fields, *wanted) -> str | None:
+    """First CSV header matching any of `wanted` once both are normalized
+    (lowercased, punctuation -> spaces) and compared by prefix. Worship-sheet
+    headers drift ('Sermon Scripture/', doubled spaces, a garbled date header),
+    so they are never matched exactly."""
+    for w in wanted:
+        nw = _norm_header(w)
+        for f in fields:
+            if _norm_header(f).startswith(nw):
+                return f
+    return None
+
+
+def sheet_by_date(sheet: list[dict]) -> dict:
+    """{date: row} from a worship-planning sheet. The date column is whichever
+    column parses as M/D/YYYY (or ISO) most often — the header is unreliable."""
+    from pco_plans import parse_sheet_date
+    if not sheet:
+        return {}
+    fields = list(sheet[0].keys())
+    col = max(fields, key=lambda f: sum(1 for r in sheet if parse_sheet_date(r.get(f) or "")))
+    out = {}
+    for r in sheet:
+        d = parse_sheet_date(r.get(col) or "")
+        if d:
+            out.setdefault(d, r)
+    return out
+
+
+def plan_slots(rows: list[dict]) -> dict:
+    """One plan's song rows -> {slot: row}, the four `Song(s)` fields of the
+    Modern template: 1 the WE GATHER opener, 2 and 3 the songs out of the
+    message, 4 the closing song (always the last one in the plan)."""
+    rows = sorted(rows, key=lambda r: int(r.get("sequence") or 0))
+    gather = [r for r in rows if "GATHER" in (r.get("section") or "").upper()]
+    rest = rows[1:] if gather and rows[0] is gather[0] else [r for r in rows if r not in gather]
+    slots = {}
+    if gather:
+        slots[1] = gather[0]
+    if len(rest) == 1:
+        slots[4] = rest[0]
+    elif rest:
+        slots[2], slots[4] = rest[0], rest[-1]
+        if len(rest) > 2:
+            slots[3] = rest[1]
+    return slots
+
+
+def plan_songs(usage: list[dict], library: list[dict], sheet: list[dict], after, before, *,
+               as_of=None, period_start=None, lookback_weeks: int = 12, run: tuple[int, int] = (3, 4),
+               follow_up_weeks: tuple[int, int] = (4, 8), candidates: int = 8, overrides: int = 2,
+               new_threshold: int = 4, new_months: int = 24, recency_weeks: int = 12,
+               intro_weeks: int = 8, exclude: str | None = None, ccli_tag: str = "CCLI Top 100",
+               seasonal_tags: tuple[str, ...] = ("Christmas", "Easter", "Patriotic"),
+               skip_intro_arr_tags: tuple[str, ...] = ("Modernized Hymn",),
+               pero_author: str = "Anthony Pero", leaders: dict | None = None,
+               self_leader: str = "",
+               target: tuple[int, int, int] = (40, 40, 20), mix_months: int = 12) -> dict:
+    """First-pass song plan for one scheduling period — four slots per Sunday,
+    candidates only, the song column left for a human. Offline: `usage` is the
+    full-history song-usage CSV (a use is a DISTINCT plan date; future plans
+    count — they are already scheduled), `library` an export_library() dump,
+    `sheet` the worship-planning CSV rows. [`after`, `before`] are the Sundays
+    rows come out for; `period_start` (default `after`) opens the wider window
+    the period's own rules are scoped to — no-repeat and the Pero 1-in-3 average
+    — so a planner asked for the back half of a period still sees the front
+    half's songs as already spent.
+
+    Carry-over obligations come first (rule 11), found by looking back
+    `lookback_weeks` across the previous period boundary. A song is in an intro
+    run when it is tagged Lifecycle:Introducing / Queued or debuted inside that
+    look-back, and is not Retired, seasonal, or a modernized hymn
+    (`skip_intro_arr_tags` — a fresh arrangement of a known hymn is not a new
+    song, so it never owes a run):
+      runs        fewer than run[0] uses and still moving (last use within
+                  `intro_weeks`, or still ahead) -> continue on the Sundays left
+                  in a run[1]-Sunday window from the debut (widened by one
+                  Sunday when 3-of-4 no longer fits), pinned earliest-first.
+                  Only Sundays inside the period can be pinned; a window that
+                  runs out inside it is flagged short
+      stale       fewer than run[0] uses but not sung for `intro_weeks` — the
+                  run lapsed, so nothing is owed (rule 8's Rotation fallback)
+      follow_ups  run complete and no repeat since -> one repeat
+                  `follow_up_weeks` after the run's last week
+      queued      tagged Queued and never used: the new-song pool, listed only.
+                  Tony picks debuts; the planner never does
+      exempt      would owe a run but is a modernized hymn / seasonal song
+    A run must finish before Advent 1 (`advent_windows`) and a follow-up that
+    would land in Advent slides past Epiphany; both are flagged, not moved.
+
+    Rule 13: with `leaders` ({date: music director}) and `self_leader`, only the
+    Sundays that leader runs get candidates — someone else's Sunday is theirs to
+    fill, and carries nothing but the obligations the rules put there. Without
+    `leaders` every Sunday counts as the caller's own.
+
+    Ranking is deterministic: slot feel (the empirical Speed distribution of
+    that slot over history — slot 4's feel is inferred, not assumed), the
+    trailing-`mix_months` mix tilt vs `target` (favor the under bucket), recency
+    (no credit past `recency_weeks` — the rule is a floor, not a reward for
+    staleness), then usage count. Nothing is filtered except Lifecycle:Retired
+    and songs already committed elsewhere in the same service.
+
+    Rule 0 — the perfect song is the perfect song — is why breaking a rule
+    neither removes a candidate nor moves it down the list: songs rank on merit
+    alone and the rules they would break ride along as annotations
+    (repeat-in-period, pero-cap for rule 12, 2nd-new-song for rule 0's one hard
+    constraint, week1-opener for rule 8). Each slot lists the top `candidates`
+    songs that break nothing PLUS the top `overrides` that do, merged back into
+    merit order — so the rule-breaking options are always visible and never
+    crowd out the clean ones. Fit annotations
+    (out-of-season, unsung, dormant) DO lower the score: those are bad matches,
+    not rule overrides. The key annotation is the congregational key (rule 14,
+    see `key_label`).
+
+    Returns {'obligations': {'runs': [...], 'follow_ups': [...], 'queued': [...],
+    'exempt': [...], 'stale': [...]}, 'sundays': [ {date, season, liturgical_date, series,
+    preacher, title, scripture, communion, leader, mine, theme_source, pero} ], 'rows': [one
+    dict per Sunday x slot — the --out CSV], 'mix': mix_report(...), 'delta':
+    {bucket: points off target}, 'tilt': {bucket: over/under/on target},
+    'slot_feel': {slot: {speed: share}}, 'pero_budget': {...}, 'advent1': date}.
+    """
+    import datetime as dt
+    import re
+    from collections import Counter, defaultdict
+
+    as_of = as_of or dt.date.today()
+    ex = re.compile(exclude, re.I) if exclude else None
+    need, window = run
+    fu_lo, fu_hi = follow_up_weeks
+    seasonal, skip_arr = set(seasonal_tags), set(skip_intro_arr_tags)
+    period_start = period_start or after
+    look_from = period_start - dt.timedelta(weeks=lookback_weeks)
+    adv = [a for a, _ in advent_windows(after, before + dt.timedelta(days=120)) if a >= after]
+    advent1 = adv[0] if adv else None
+
+    # --- library index --------------------------------------------------------
+    songs = {}
+    for s in library:
+        tags = set(s.get("tags") or [])
+        arrs = s.get("arrangements") or []
+        arr_tags = {t for a in arrs for t in (a.get("tags") or ())}
+        songs[s["id"]] = {
+            "id": s["id"], "title": s.get("title") or "", "tags": tags,
+            "state": next((t for t in LIFECYCLE_TAGS if t in tags), None),
+            "ccli": ccli_tag in tags,
+            "speed": next((t for a in arrs for t in (a.get("tags") or ()) if t in SPEEDS), None),
+            "arrangements": arrs,
+            "pero": (s.get("author") or "").strip() == pero_author,
+            "exempt_new": bool(tags & seasonal) or bool(arr_tags & skip_arr),
+        }
+
+    # --- usage: distinct plan dates per song, each plan's slots, slot feel -----
+    plans = defaultdict(list)
+    for r in usage:
+        if not r.get("song_id") or (ex and ex.search(r.get("title") or "")):
+            continue
+        plans[dt.date.fromisoformat(r["date"])].append(r)
+    used = defaultdict(list)                       # song id -> distinct dates, in order
+    slot_of = {}                                   # (song id, date) -> slot it sat in
+    slot_speed = defaultdict(Counter)              # slot -> Speed distribution over history
+    key_of = defaultdict(Counter)                  # song id -> keys it has been played in
+    for d, rows in sorted(plans.items()):
+        slots = plan_slots(rows)
+        modern = any(re.search(r"GATHER|RESPOND", r.get("section") or "", re.I) for r in rows)
+        for slot, r in slots.items():
+            slot_of[(r["song_id"], d)] = slot
+            sp = songs.get(r["song_id"], {}).get("speed")
+            if modern and sp and len(slots) >= 3:
+                slot_speed[slot][sp] += 1
+        for r in rows:
+            if d not in used[r["song_id"]]:
+                used[r["song_id"]].append(d)
+            if r.get("key"):
+                key_of[r["song_id"]][r["key"]] += 1
+    for sid, info in songs.items():
+        info["key"] = key_label(info["arrangements"],
+                                key_of[sid].most_common(1)[0][0] if key_of.get(sid) else "")
+    feel = {slot: {sp: c[sp] / sum(c.values()) for sp in SPEEDS} for slot, c in slot_speed.items()}
+    max_uses = max((len(v) for v in used.values()), default=1) or 1
+
+    # --- mix tilt (rule 9: trailing year, diagnostic not quota) ---------------
+    mix_after = as_of - dt.timedelta(days=int(30.44 * mix_months))
+    mix_before = as_of - dt.timedelta(days=1)
+    mix = mix_report(usage, library, mix_after, mix_before, new_threshold=new_threshold,
+                     new_months=new_months, ccli_tag=ccli_tag, exclude=exclude,
+                     exclude_tags=seasonal_tags,
+                     exclude_ranges=advent_windows(mix_after, mix_before))
+    mix_total = sum(mix["totals"].values()) or 1
+    tgt = dict(zip(("ccli", "historical", "new"), target))
+    delta = {b: 100 * mix["totals"].get(b, 0) / mix_total - tgt[b] for b in tgt}
+    tilt = {b: ("on target" if abs(v) <= 3 else "over" if v > 0 else "under") for b, v in delta.items()}
+
+    # --- Sundays, joined to the sermon sheet ---------------------------------
+    sundays = [d for d in (after + dt.timedelta(days=i) for i in range((before - after).days + 1))
+               if d.weekday() == 6]
+    period_sundays = [d for d in (period_start + dt.timedelta(days=i)
+                                  for i in range((before - period_start).days + 1)) if d.weekday() == 6]
+    rows_by_date = sheet_by_date(sheet)
+    fields = list(sheet[0].keys()) if sheet else []
+    col = {k: sheet_column(fields, w) for k, w in (
+        ("season", "Liturgical Season"), ("lit", "Liturgical Date"), ("series", "Sermon Series"),
+        ("preacher", "Preacher"), ("title", "Sermon Title"), ("first", "First Scripture"),
+        ("scripture", "Sermon Scripture"), ("response", "Response"))}
+
+    def cell(row, key):
+        c = col.get(key)
+        return (row.get(c) or "").replace("\\", "").strip() if row and c else ""
+
+    days = []
+    for d in sundays:
+        row = rows_by_date.get(d)
+        scr = "; ".join(x for x in (cell(row, "first"), cell(row, "scripture")) if x)
+        title = cell(row, "title")
+        leader = (leaders or {}).get(d, self_leader if leaders is None else "")
+        days.append({"date": d, "season": cell(row, "season"), "liturgical_date": cell(row, "lit"),
+                     "series": cell(row, "series"), "preacher": cell(row, "preacher"),
+                     "title": title, "scripture": scr, "response": cell(row, "response"),
+                     "communion": "communion" in cell(row, "response").lower(),
+                     "leader": leader, "mine": leaders is None or _same_person(leader, self_leader),
+                     "theme_source": "sheet" if (title or scr) else "lectionary-needed"})
+
+    # --- obligations (rule 11) ------------------------------------------------
+    runs, follow_ups, queued, exempt, stale = [], [], [], [], []
+    lapsed = as_of - dt.timedelta(weeks=intro_weeks)
+    for sid, info in sorted(songs.items(), key=lambda kv: kv[1]["title"].lower()):
+        dates = [d for d in used.get(sid, ()) if d <= before]
+        if info["state"] == "Retired":
+            continue
+        if info["state"] == "Queued" and not dates:
+            queued.append({"song": sid, "title": info["title"], "speed": info["speed"],
+                           "pero": info["pero"], "why": "Queued, never used — the new-song pool"})
+            continue
+        if not dates:
+            continue
+        if not (info["state"] in ("Introducing", "Queued") or dates[0] >= look_from):
+            continue
+        debut, n = dates[0], len(dates)
+        if n < need and dates[-1] < lapsed:
+            stale.append({"song": sid, "title": info["title"], "debut": debut, "uses": n,
+                          "last": dates[-1], "why": f"run lapsed — last sung {dates[-1]}, "
+                                                    f"over {intro_weeks} weeks ago"})
+            continue
+        if info["exempt_new"]:
+            if dates[-1] >= lapsed:
+                exempt.append({"song": sid, "title": info["title"], "debut": debut, "uses": n,
+                               "why": "modernized hymn / seasonal — not a new song, owes no run"})
+            continue
+        if n < need:
+            span, left = window, []
+            while True:
+                left = [d for d in (debut + dt.timedelta(weeks=i) for i in range(span))
+                        if d > dates[-1] and d >= as_of and d not in dates]
+                if len(left) >= need - n or span > window:
+                    break
+                span += 1
+            usable = [d for d in left if after <= d <= before]
+            pin = usable[:need - n]
+            runs.append({"kind": "run", "song": sid, "title": info["title"], "debut": debut,
+                         "uses": n, "sung": sum(1 for d in dates if d <= as_of), "need": need - n,
+                         "window": f"{need}-of-{span}", "sundays": left, "pin": pin,
+                         "fallback": debut + dt.timedelta(weeks=window) if span == window else None,
+                         "slot": slot_of.get((sid, dates[-1]), 2),
+                         "straddles_advent": bool(advent1 and left and left[-1] >= advent1),
+                         "short": len(usable) < need - n})
+            continue
+        run_end = dates[need - 1]
+        if any(d > run_end + dt.timedelta(weeks=fu_lo - 1) for d in dates):
+            continue
+        lo, hi = run_end + dt.timedelta(weeks=fu_lo), run_end + dt.timedelta(weeks=fu_hi)
+        in_advent = bool(advent1 and lo >= advent1)
+        wdates = [d for d in sundays if lo <= d <= hi and not (advent1 and d >= advent1)]
+        follow_ups.append({"kind": "follow-up", "song": sid, "title": info["title"],
+                           "run_end": run_end, "uses": n, "due": (lo, hi), "sundays": wdates,
+                           "pin": wdates[:1], "in_advent": in_advent,
+                           "slot": slot_of.get((sid, dates[-1]), 2)})
+
+    pinned = defaultdict(dict)                     # date -> {slot: obligation}
+    for o in runs + follow_ups:
+        for d in o["pin"]:
+            slot = o["slot"] if o["slot"] not in pinned[d] else next(
+                (s for s in (2, 3, 4, 1) if s not in pinned[d]), o["slot"])
+            pinned[d][slot] = o
+
+    # --- Pero pacing (rule 12): <= 1 per Sunday, <= 1 Sunday in 3 over the period
+    in_run = {o["song"] for o in runs + follow_ups}
+    pero_on = {}
+    for d in period_sundays:
+        hit = [songs[r["song_id"]] for r in plans.get(d, ()) if songs.get(r["song_id"], {}).get("pero")]
+        hit += [songs[o["song"]] for o in pinned.get(d, {}).values() if songs[o["song"]]["pero"]]
+        if hit:
+            pero_on[d] = hit[0]
+    budget = len(period_sundays) // 3
+    counted = sorted(d for d, s in pero_on.items() if s["id"] not in in_run)
+    for day in days:
+        s = pero_on.get(day["date"])
+        day["pero"] = ((s["title"] + (" (exempt: intro run)" if s["id"] in in_run else " (counts)"))
+                       if s else f"open — {len(counted)}/{budget} Sundays committed")
+
+    # --- per-slot candidates --------------------------------------------------
+    period_used = {sid for sid, ds in used.items() if any(period_start <= d <= before for d in ds)}
+    period_used |= {o["song"] for o in runs + follow_ups if o["pin"]}
+    new_on = {d for d, ps in pinned.items() if ps}
+    for d, rows in plans.items():
+        if period_start <= d <= before:
+            for r in rows:
+                i = songs.get(r["song_id"])
+                if i and not i["exempt_new"] and len([x for x in used[r["song_id"]] if x <= d]) <= need:
+                    new_on.add(d)
+
+    out = []
+    titles = {x["id"]: x["title"] for x in library}
+    for day in days:
+        d = day["date"]
+        scheduled = {slot: r["song_id"] for slot, r in plan_slots(plans.get(d, [])).items()}
+        here = {r["song_id"] for r in plans.get(d, ())} | {o["song"] for o in pinned.get(d, {}).values()}
+        for slot in (1, 2, 3, 4):
+            ob = pinned.get(d, {}).get(slot)
+            ranked = []
+            for sid, info in (songs.items() if day["mine"] else ()):
+                if info["state"] == "Retired" or (sid in here and scheduled.get(slot) != sid):
+                    continue
+                ds = [x for x in used.get(sid, ()) if x < d]
+                n = len(ds)
+                if info["ccli"]:
+                    bucket, tok = "ccli", "ccli"
+                elif not ds or (n <= new_threshold and ds[0] >= d - dt.timedelta(days=30.44 * new_months)):
+                    bucket, tok = "new", f"new:{n}/{new_threshold}"
+                else:
+                    bucket, tok = "historical", "hist"
+                weeks = (d - ds[-1]).days / 7 if ds else None
+                score = 2.0 * (feel.get(slot, {}).get(info["speed"], 1 / 3) if info["speed"] else 1 / 3)
+                score += -6.0 * delta[bucket] / 100
+                score += 1.0 * (min(weeks / recency_weeks, 1.0) if weeks is not None else 1.0)
+                score += 0.75 * min(n, 12) / 12
+                ann = [tok, (info["state"] or "untagged").lower()]
+                if info["pero"]:
+                    ann.append("pero")
+                if info["speed"]:
+                    ann.append(f"speed:{info['speed']}")
+                if info["key"]:
+                    ann.append(f"key:{info['key']}")
+                if info["state"] == "Dormant":
+                    score -= 0.5
+                if not ds:
+                    ann.append("unsung")
+                    score -= 1.5
+                for st in sorted(info["tags"] & seasonal):
+                    if not in_season(st, d, day["season"]):
+                        ann.append(f"out-of-season:{st}")
+                        score -= 2.5
+                breaks = []
+                if sid in period_used and scheduled.get(slot) != sid:
+                    breaks.append("repeat-in-period")
+                if info["pero"] and sid not in in_run and (d in pero_on or len(counted) >= budget):
+                    breaks.append("pero-cap")
+                if bucket == "new" and not info["exempt_new"] and d in new_on and sid not in here:
+                    breaks.append("2nd-new-song")
+                if slot == 1 and not ds and not info["exempt_new"]:
+                    breaks.append("week1-opener")
+                if scheduled.get(slot) == sid:
+                    ann.insert(0, "scheduled")
+                    score += 100
+                ranked.append((-score, info["title"].lower(),
+                               f"{info['title']} [{', '.join(ann + breaks)}]", bool(breaks)))
+            ranked.sort()
+            picked = sorted([t for t in ranked if not t[3]][:candidates]
+                            + [t for t in ranked if t[3]][:overrides])
+            out.append({"date": d.isoformat(), "liturgical_date": day["liturgical_date"],
+                        "season": day["season"], "sermon_title": day["title"],
+                        "scripture": day["scripture"], "theme_source": day["theme_source"],
+                        "slot": slot, "slot_name": SLOT_NAMES[slot - 1],
+                        "leader": day["leader"], "obligation": ob["title"] if ob else "",
+                        "song": titles.get(scheduled.get(slot), "") if scheduled.get(slot) else "",
+                        "candidates": "; ".join(t[2] for t in picked)})
+    return {"obligations": {"runs": runs, "follow_ups": follow_ups, "queued": queued,
+                            "exempt": exempt, "stale": stale},
+            "sundays": days, "rows": out, "mix": mix, "tilt": tilt, "delta": delta,
+            "slot_feel": feel, "advent1": advent1,
+            "pero_budget": {"budget": budget, "committed": counted, "sundays": len(period_sundays),
+                            "exempt": sorted(in_run)}}
+
 # --- worklist flag (a script-owned scratch tag for UI filtering) --------------
 
 def flag_songs(client: PCOClient, index: TagIndex, tag: str, song_ids: list[str], state_path: str,

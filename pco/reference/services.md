@@ -105,3 +105,45 @@ PCO's knockoff-ChordPro, NOT standard ChordPro:
   `.../keys` (`starting_key`, `ending_key`).
 - Plan items link songs: `.../plans/<id>/items?include=song,arrangement,key` → item
   `relationships.song/arrangement/key`; `key_name` attr is the display key.
+- Who is scheduled on a plan: `.../plans/<id>/team_members?per_page=100` — attributes
+  `team_position_name` and `name`. No `include` on the plans listing brings them along, so
+  it is one call per plan (`plan_leaders()` / `pco services plans <type> --leaders`).
+
+## Offline song planning (`songs mix` / `lifecycle` / `plan`)
+
+`songs export` → `library.json` plus a full-history `song-usage` CSV is enough to run the
+whole song-planning chain with **zero API calls**. Things learned building it:
+
+- **A "use" is a distinct plan date**, not a row: a song listed twice in one service is one
+  use. The usage CSV also contains FUTURE plans — `lifecycle` ignores dates past `--as-of`
+  (a song scheduled for next Sunday has not been sung), but `plan` counts them, because a
+  scheduled debut is already an obligation.
+- **Section headers carry the slot.** The Modern template's four `Song(s)` fields land under
+  `WE GATHER` (opener) and `WE RESPOND` (2 and 3 after the message, 4 after the offering,
+  sometimes under a communion variant of the header). `plan_slots()` reads them back:
+  opener = the GATHER row, closer = the LAST row in sequence. Older plans use other section
+  names, so slot inference only trusts plans with GATHER/RESPOND headers.
+- **Liturgy is not a song choice.** `The Great Thanksgiving` is a communion setting that would
+  otherwise look like the most-repeated song in the library — `plan` excludes the title regex
+  `Great Thanksgiving` by default, `mix` takes it via `--exclude`.
+- **Key names are the congregational signal.** Arrangement keys carry a free-text `name`;
+  the ones a congregation can actually sing are named `Congregational: Male Lead` /
+  `Congregational - Female Lead` (spelling varies — match the substring). Most keys are
+  unnamed, so a planner should mark an unvetted key rather than pretend.
+- **Worship-sheet headers drift** (`Sermon Scripture/`, doubled spaces, a garbled date
+  header). Match them normalized and by prefix (`sheet_column()`), and find the date column
+  by which one parses as a date most often rather than by its name.
+
+### Applying a plan (`songs apply-plan`)
+
+- A plan item becomes a song item by PATCHing the `song` relationship; `item_type` is **not
+  assignable** (422 "Forbidden Attribute") — PCO flips it to `song` itself. Send `title`, `length`,
+  and the `song` / `arrangement` / `key` relationships in one PATCH.
+- Slot n = the n-th item in service order that is either already `item_type: song` or a template
+  placeholder titled `Song(s)`; filled slots are skipped unless `--overwrite`.
+- The export has no key ids, so keys are fetched live per song (cached per run); `pick_key` prefers a
+  name containing "congregational", then "original", else the first key (rule 14).
+- **The CSV is the desired state.** `songs plan` writes already-scheduled songs into `song`, so a
+  blank cell means "empty slot" — with `--clear-empty` it clears. (Lesson 2026-08-24: an older CSV
+  with blank cells for an already-planned Sunday wiped it; restored by hand from item ids.) Always
+  `--dry-run` first after hand-editing.
