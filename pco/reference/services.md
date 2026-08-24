@@ -86,6 +86,13 @@ PCO's knockoff-ChordPro, NOT standard ChordPro:
   response, not the status. Default is "As often as needed".
 - Editing the same assignment in the PCO UI while patching it wins over the API (learned 2026-08-24).
 
+## Scheduling notifications — no API (verified 2026-08-24)
+The public API only *prepares* requests (`prepare_notification`, `notification_prepared_at`).
+Probed and dead: POST `.../team_members/<id>/send_notification|notifications|send`, POST
+`.../plans/<id>/send_notifications`, `.../team_members/send_notifications` → 404; PATCH
+`notification_sent_at` → 422 Forbidden Attribute. Sending is done from the matrix view in the web
+app (Tony does this by hand — select weeks → Email). Don't re-probe.
+
 ## Tags (songs and arrangements)
 
 - Tag groups: `GET /tag_groups?include=tags` — each has `tags_for` (song | arrangement |
