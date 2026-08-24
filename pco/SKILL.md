@@ -147,6 +147,10 @@ one-off API calls in a session** — the CLI is the deliverable.
 ```
 sh install.sh          # symlinks bin/pco into ~/.local/bin (stdlib python3 only)
 pco init               # then paste each church's PAT into ~/.config/pco/credentials.md
+# Church data (rules NOTES.md, exports, plan CSVs) lives OUTSIDE this public skill, e.g.
+# ~/.local/share/pco/<church>/ — keep the non-regenerable files (NOTES.md, flags.json) in a
+# private repo and symlink; library.json / usage / leaders regenerate from `songs export`,
+# `song-usage`, `plans --leaders`.
 pco profiles           # confirm; pco -P <church> whoami to verify auth
 ```
 
