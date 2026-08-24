@@ -147,8 +147,14 @@ def get_arrangement_tags(client: PCOClient, song_id: str, arrangement_id: str) -
             client.get(f"{arrangement_path(song_id, arrangement_id)}/tags?per_page=100")["data"]]
 
 
-def export_library(client: PCOClient, include_hidden: bool = False, log=None) -> list[dict]:
-    """Every song with its tags, and every arrangement with its tags and keys.
+def get_attachment_names(client: PCOClient, attachable_path: str) -> list[str]:
+    return [a["attributes"].get("filename") or "" for a in get_attachments(client, attachable_path)]
+
+
+def export_library(client: PCOClient, include_hidden: bool = False, log=None,
+                   lyrics: bool = True, attachments: bool = True) -> list[dict]:
+    """Every song with its tags, and every arrangement with its tags, keys,
+    lyrics and attachment filenames (song-level attachments too).
     Listing endpoints ignore `include`, so this is ~3 calls per song plus one
     per arrangement; expect minutes for a few hundred songs (rate-limited)."""
     songs = []
@@ -171,6 +177,8 @@ def export_library(client: PCOClient, include_hidden: bool = False, log=None) ->
                 "chord_chart_key": aa.get("chord_chart_key"),
                 "has_chord_chart": bool(aa.get("chord_chart")),
                 "sequence": aa.get("sequence") or [],
+                "lyrics": (aa.get("lyrics") or "") if lyrics else None,
+                "attachments": get_attachment_names(client, arrangement_path(s["id"], arr["id"])) if attachments else None,
                 "keys": [{"starting": keys_by_id[k].get("starting_key"),
                           "ending": keys_by_id[k].get("ending_key"),
                           "name": keys_by_id[k].get("name")} for k in key_ids if k in keys_by_id],
@@ -181,6 +189,8 @@ def export_library(client: PCOClient, include_hidden: bool = False, log=None) ->
             "ccli_number": a.get("ccli_number"), "themes": a.get("themes"),
             "hidden": a.get("hidden"), "last_scheduled_at": a.get("last_scheduled_at"),
             "notes": a.get("notes"), "tags": get_song_tags(client, s["id"]),
+            "copyright": a.get("copyright"), "admin": a.get("admin"),
+            "attachments": get_attachment_names(client, song_path(s["id"])) if attachments else None,
             "arrangements": arrangements,
         })
     return songs

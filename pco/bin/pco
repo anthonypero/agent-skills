@@ -18,7 +18,8 @@ Usage:
   Services (layer 1 — named operations; <type> is an id or name substring):
     pco services tags                   tag groups + tags (song/arrangement/person/media)
     pco services songs export [--out library.json] [--include-hidden]
-                                        full library: songs, tags, arrangements, keys
+        [--no-lyrics] [--no-attachments]    full library: songs, tags, arrangements,
+                                        keys, lyrics, attachment filenames
     pco services songs tag <song id|title> [--arrangement <id|name>]
         [--add TAG ...] [--remove TAG ...] [--dry-run]
                                         tag names may be qualified "Group:Tag";
@@ -111,6 +112,7 @@ def services_main(argv: list[str], profile: str | None) -> int:
     p.add_argument("ref", nargs="?", help="tag: song id or exact title")
     p.add_argument("--out", help="export: write JSON here (default stdout)")
     p.add_argument("--include-hidden", action="store_true")
+    p.add_argument("--no-lyrics", action="store_true"); p.add_argument("--no-attachments", action="store_true")
     p.add_argument("--arrangement", help="tag: arrangement id|name (tags the arrangement, not the song)")
     p.add_argument("--add", action="append", default=[]); p.add_argument("--remove", action="append", default=[])
     p.add_argument("--csv", help="apply-tags: bulk CSV")
@@ -175,7 +177,8 @@ def services_main(argv: list[str], profile: str | None) -> int:
         import pco_services as SV
         if args.songs_op == "export":
             lib = SV.export_library(client, args.include_hidden,
-                                    log=lambda m: print(m, file=sys.stderr))
+                                    log=lambda m: print(m, file=sys.stderr),
+                                    lyrics=not args.no_lyrics, attachments=not args.no_attachments)
             out = open(args.out, "w", encoding="utf-8") if args.out else sys.stdout
             json.dump(lib, out, indent=2); out.write("\n")
             print(f"{len(lib)} songs exported", file=sys.stderr)
