@@ -1,6 +1,6 @@
 ---
 name: pager
-description: Email check-in mode for when the user is away from the desk. `/pager on` flips the session into away mode — at every hand-back moment (done, blocked, or a question) email the user instead of only printing to the terminal, then poll the agent Gmail label in the background so the user's email reply wakes the session and steers it. `/pager off` (or the user typing in the terminal again) ends the mode. Use when the user runs `/pager on|off|status`, or says they are leaving / stepping away / AFK and wants to be reached by email, or asks to "page me when you're done."
+description: Email check-in mode for when the user is away from the desk. `/pager on [address]` flips the session into away mode (optional address overrides where pages are sent this session) — at every hand-back moment (done, blocked, or a question) email the user instead of only printing to the terminal, then poll the agent Gmail label in the background so the user's email reply wakes the session and steers it. `/pager off` (or the user typing in the terminal again) ends the mode. Use when the user runs `/pager on|off|status`, or says they are leaving / stepping away / AFK and wants to be reached by email, or asks to "page me when you're done."
 ---
 
 # Pager
@@ -9,9 +9,9 @@ Away-mode email loop: the session keeps working; the user carries a phone. Outbo
 
 **Read `~/.config/pager/channel.md` first, every time.** It is this machine's channel config — alias, label, authorized senders, subject tag. If it is missing or marked TODO, the channel is not built on this machine — tell the user what is missing (setup steps are in [references/infrastructure.md](references/infrastructure.md)) instead of silently degrading. Infrastructure facts shared by all channels (gws behaviors, Zoho plumbing, send/threading mechanics) also live in [references/infrastructure.md](references/infrastructure.md) — read it before any send.
 
-## `/pager on`
+## `/pager on [address]`
 
-1. Load `~/.config/pager/channel.md`. Verify the label exists (`gws gmail labels`) and `gws auth status` is authenticated. If not, report what's broken in the terminal and stop — do not enter away mode half-working.
+1. Load `~/.config/pager/channel.md`. Verify the label exists (`gws gmail labels`) and `gws auth status` is authenticated. If not, report what's broken in the terminal and stop — do not enter away mode half-working. An optional `address` argument overrides the config's "User's address" as the destination for this session only (the label, alias, and from-guard are unchanged — replies still work from any authorized sender).
 2. Confirm in the terminal: mode is on, what will trigger an email, the poll cadence.
 3. Continue whatever work is in flight. Away mode changes the hand-back medium, not the work.
 4. At every hand-back moment — task done, blocked, or a question only the user can answer — **send an email** and start the poller (below). The terminal summary still gets written as normal; email is an addition, not a replacement.
