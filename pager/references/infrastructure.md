@@ -27,5 +27,5 @@ All channels ride the same plumbing: Zoho hosts `anthonypero.com` (catch-all del
 2. Gmail: filter `to:<alias>` → apply a label (convention: the alias itself) + **Skip the Inbox**.
 3. Gmail: add the alias under Send mail as, relayed via Zoho SMTP (keeps SPF/DKIM aligned). Zoho rejects the relay until step 1 is done.
 4. Machine: `gws auth login` with the Keep-excluding `--services` list above; verify with `gws auth status`.
-5. Machine: write `~/.config/pager/channel.md` with the channel table (copy the shape from an existing machine: channel name, alias, label + ID from `gws gmail labels`, send-as, user's address, authorized senders, subject tag).
+5. Machine: copy the skill's `assets/channel-template.md` to `~/.config/pager/channel.md` and fill in every TODO (label ID comes from `gws gmail labels`).
 6. Acceptance test: `send_as.py` to the user's address (check From survives), have the user reply, confirm the poller digest catches it on the label.
