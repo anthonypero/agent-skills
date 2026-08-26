@@ -19,7 +19,7 @@ Away-mode email loop: the session keeps working; the user carries a phone. Outbo
 
 ## The email loop
 
-**Outbound.** Always send as the agent alias via `scripts/send_as.py --from <alias> --to <user address> --subject "[<tag>] <specific subject>" --body ...` (`gws gmail send`/`reply` would stamp the account's default identity instead). Continuing an exchange: add `--thread-id <gmail thread id> --in-reply-to <RFC822 Message-ID>` (both from `gws gmail read` on the message being answered) and keep the same subject with `Re:` so it threads. Write for a phone screen: lead with the outcome, keep it self-contained (no "see terminal"), number any questions so a one-line reply can answer them ("1: yes, 2: option B"). Never put secrets in email.
+**Outbound.** Always send as the agent alias via `scripts/send_as.py --from <alias> --to <user address> --subject "[<tag>] <specific subject>" --body ...` (`gws gmail send`/`reply` would stamp the account's default identity instead). Continuing an exchange: add `--thread-id <gmail thread id>` and keep the same subject with `Re:` so it threads (`gws gmail read` does not expose the RFC822 Message-ID, so skip `--in-reply-to`; threadId alone threads correctly on both ends). Write for a phone screen: lead with the outcome, keep it self-contained (no "see terminal"), number any questions so a one-line reply can answer them ("1: yes, 2: option B"). Never put secrets in email.
 
 **Poller.** Immediately after sending, start the watcher as a background task (`run_in_background`):
 
