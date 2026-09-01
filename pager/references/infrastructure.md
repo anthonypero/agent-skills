@@ -19,8 +19,7 @@ All channels ride the same plumbing: Zoho hosts `anthonypero.com` (catch-all del
 | Channel | Machine | Alias | Status |
 | --- | --- | --- | --- |
 | `clt` | Work laptop (`~/Projects/clt`) | `claude-clt@anthonypero.com` | Working — acceptance-tested 2026-08-26 |
-| `fumc` | FUMC laptop (`~/Projects/fumc`) | `agent@anthonypero.com` | Zoho alias, Gmail label (`Label_2`) + filter, and send-as done 2026-09-01; `gws` auth + acceptance test pending |
-| `personal` | Personal machine | — | Not started; `agent@anthonypero.com` was reassigned to `fumc` on 2026-09-01, so pick a new alias |
+| `personal` | FUMC laptop (`~/Projects/fumc`) | `agent@anthonypero.com` | Working — acceptance-tested 2026-09-01. One channel for everything non-work (FUMC and personal are co-mingled by design); the CLT laptop is the only separate channel |
 
 ## Standing up a channel on a new machine
 
