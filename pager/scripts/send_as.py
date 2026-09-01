@@ -23,14 +23,35 @@ from pathlib import Path
 GWS_DIR = Path.home() / ".config" / "gws"
 
 
-def gws_credentials() -> dict:
+def gws_credentials() -> dict | None:
+    """client_id / client_secret / refresh_token from the legacy gws layout
+    (config.yaml + token.json). Returns None on gws >= 0.22, which keeps the
+    credentials in the OS keyring and redacts them in `gws auth export` — there
+    the message is sent through `gws gmail users messages send` instead
+    (see send_via_gws)."""
+    config = GWS_DIR / "config.yaml"
+    if not config.exists():
+        return None
     creds = {}
-    for line in (GWS_DIR / "config.yaml").read_text().splitlines():
+    for line in config.read_text().splitlines():
         if ":" in line:
             k, _, v = line.partition(":")
             creds[k.strip()] = v.strip().strip('"')
     creds.update(json.loads((GWS_DIR / "token.json").read_text()))
     return creds
+
+
+def send_via_gws(raw_b64: str, thread_id: str | None) -> dict:
+    import shutil
+    import subprocess
+    gws = shutil.which("gws") or "/opt/homebrew/bin/gws"
+    body = {"raw": raw_b64}
+    if thread_id:
+        body["threadId"] = thread_id
+    out = subprocess.run(
+        [gws, "gmail", "users", "messages", "send", "--params", '{"userId":"me"}', "--json", json.dumps(body)],
+        capture_output=True, text=True, check=True).stdout
+    return json.loads(out[out.index("{"):])
 
 
 def access_token(creds: dict) -> str:
@@ -43,6 +64,15 @@ def access_token(creds: dict) -> str:
     req = urllib.request.Request("https://oauth2.googleapis.com/token", data=data)
     with urllib.request.urlopen(req) as resp:
         return json.load(resp)["access_token"]
+
+
+def body_to_html(body: str) -> str:
+    import html
+    paras = [p for p in body.strip().split("\n\n") if p.strip()]
+    rendered = "".join(
+        "<p>" + html.escape(p.strip()).replace("\n", "<br>") + "</p>\n" for p in paras)
+    return ("<html><body style=\"font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; font-size: 14px;\">\n"
+            + rendered + "</body></html>\n")
 
 
 def main() -> int:
@@ -65,13 +95,21 @@ def main() -> int:
     if args.in_reply_to:
         msg["In-Reply-To"] = args.in_reply_to
         msg["References"] = args.in_reply_to
+    # Plain part plus an HTML alternative: Anthony reads mail in Outlook, which
+    # renders text/plain with hard wraps; HTML paragraphs reflow properly.
     msg.set_content(body)
+    msg.add_alternative(body_to_html(body), subtype="html")
 
     payload = {"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode()}
     if args.thread_id:
         payload["threadId"] = args.thread_id
 
-    token = access_token(gws_credentials())
+    creds = gws_credentials()
+    if creds is None:
+        print(json.dumps(send_via_gws(payload["raw"], args.thread_id), indent=2))
+        return 0
+
+    token = access_token(creds)
     req = urllib.request.Request(
         "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
         data=json.dumps(payload).encode(),
