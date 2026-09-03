@@ -12,10 +12,11 @@ Away-mode email loop: the session keeps working; the user carries a phone. Outbo
 ## `/pager on [address]`
 
 1. Load `~/.config/pager/channel.md`. Verify the label exists (`gws gmail labels`) and `gws auth status` is authenticated. If not, report what's broken in the terminal and stop — do not enter away mode half-working. An optional `address` argument overrides the config's "User's address" as the destination for this session only (the label, alias, and from-guard are unchanged — replies still work from any authorized sender).
-2. Confirm in the terminal: mode is on, what will trigger an email, the poll cadence.
-3. Continue whatever work is in flight. Away mode changes the hand-back medium, not the work.
-4. At every hand-back moment — task done, blocked, or a question only the user can answer — **send an email** and start the poller (below). The terminal summary still gets written as normal; email is an addition, not a replacement.
-5. Stay in away mode for the rest of the session until `/pager off` or the user types in the terminal again (that message is proof they're back: kill any running poller, confirm mode off, and answer them in the terminal).
+2. Keep the machine awake: start `caffeinate -is` as a background task (`run_in_background`) and note its task id — a sleeping laptop kills the poller and the whole loop with it. `-is` blocks idle and system sleep but **cannot block lid-close sleep**: on battery the lid must stay open (or the Mac must be on power with an external display for clamshell mode) — say so in the confirmation. If a caffeinate task from this session is already running, don't start a second.
+3. Confirm in the terminal: mode is on, what will trigger an email, the poll cadence, and the lid/sleep caveat.
+4. Continue whatever work is in flight. Away mode changes the hand-back medium, not the work.
+5. At every hand-back moment — task done, blocked, or a question only the user can answer — **send an email** and start the poller (below). The terminal summary still gets written as normal; email is an addition, not a replacement.
+6. Stay in away mode for the rest of the session until `/pager off` or the user types in the terminal again (that message is proof they're back: kill any running poller, confirm mode off, and answer them in the terminal — but keep caffeinate and away mode if their message is steering setup or ongoing work rather than announcing they're back for good; use judgment).
 
 ## The email loop
 
@@ -42,8 +43,8 @@ The channel doubles as a context drop: the user can forward an email/thread to t
 
 ## `/pager off`
 
-Kill any running poller (TaskStop on its task id), confirm in the terminal that away mode is over, and summarize anything that arrived by email while it was on.
+Kill any running poller and the `caffeinate` task (TaskStop on their task ids — the machine may sleep normally again), confirm in the terminal that away mode is over, and summarize anything that arrived by email while it was on.
 
 ## `/pager status`
 
-Report: mode on/off, poller task id if running, channel health (`gws auth status`, label present), and any unprocessed messages on the label (`gws gmail list --query "label:<label> is:unread"`).
+Report: mode on/off, poller task id if running, whether `caffeinate` is running (task id), channel health (`gws auth status`, label present), and any unprocessed messages on the label (`gws gmail list --query "label:<label> is:unread"`).
