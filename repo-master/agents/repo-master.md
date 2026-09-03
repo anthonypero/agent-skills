@@ -2,7 +2,7 @@
 name: repo-master
 description: "Git operations agent. Use when user asks to commit, push, pull, merge, rebase, manage branches, configure remotes, verify authentication, check repo ownership, or perform any git/GitHub operation."
 tools: Bash, Read, Grep, Glob
-model: haiku
+model: sonnet
 color: blue
 skills:
   - repo-master
