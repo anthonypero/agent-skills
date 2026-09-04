@@ -68,6 +68,8 @@ pco services songs mix --usage all.csv --from library.json --after D [--before D
 pco services songs flag --ids 1,2 | --csv list.csv [--tag Worklist:Flagged] [--note "why"] [--clear] [--dry-run]  # scratch tag = exactly this list; prior list unflagged from local state
 pco services songs lifecycle --usage all.csv --from library.json [--out lifecycle.csv] [--as-of D] [--new-threshold 4] [--dormant-months 24] [--intro-weeks 8] [--seasonal-tags Christmas,Easter,Patriotic] [--skip-intro-arr-tags "Modernized Hymn"] [--current-tag Current]  # offline: Queued/Introducing/Rotation/Dormant/Retired per song from usage -> retag CSV
 pco services songs plan --usage all.csv --from library.json --sheet worship.csv --after D --before D [--as-of D] [--period-start D] [--out plan.csv] [--leaders leaders.csv --self "Your Name"] [--lookback-weeks 12] [--run 3/4] [--follow-up-weeks 4-8] [--candidates 8] [--overrides 2] [--exclude RE]  # offline: a period's first-pass song plan — obligations, mix tilt, 4 annotated slots per Sunday
+pco services snapshot <type> [--after D] [--before D | --weeks 6] [--dir DIR] [--quiet]  # fetch each plan (items+song/arr/key, notes, team, times); store a version only if it changed; print the diff vs the previous snapshot
+pco services changes <type> [--after D] [--before D] [--since D] [--dir DIR]   # offline: what changed between stored snapshots (latest vs previous, or vs newest at/before --since)
 pco services types                                  # service types
 pco services templates <type>                       # plan templates
 pco services plans <type> [--after D] [--before D]  # plans by date
@@ -192,3 +194,17 @@ Named helpers are added lazily, per real project need, to the matching
 generically (would another of my projects call this verbatim?). Project
 business logic (file formats, naming schemes, sync flows) stays in the
 project.
+
+## Plan snapshots — "has anything changed since I last looked?"
+
+PCO's API exposes only a plan's *last* editor (`updated_by`) and per-record
+`updated_at`; the UI's "everyone who edited this" footer is not available.
+`lib/pco_snapshot.py` keeps our own history instead: `snapshot` fetches each
+plan's full state and stores it under `<dir>/<service_type_id>/<plan_id>/<fetched-at>.json`
+**only when the normalized content differs** from the previous version, then prints
+the diff (title/series, items added/removed/moved, song/arrangement/key changes,
+team members added/removed/status flips, notes, plan times). `changes` re-runs the
+diff offline. Retention: 20 versions per plan, plan folders dropped a year after the
+service date. Snapshot dir resolves from `--dir`, then `PCO_SNAPSHOT_DIR` (env /
+project secrets / profile), then `<project>/.agents/pco-snapshots` next to the nearest
+`PROJECT_SECRETS.md` — keep that directory gitignored; it is a regenerable cache.
