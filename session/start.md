@@ -1,6 +1,6 @@
 # Start / Restart
 
-**Sync first.** If the project is a git repo with a remote, run `git pull --ff-only` before reading anything — another machine may own the newest handoff. If it fails (the branch has diverged, or local changes block it), say so and stop; do not merge, rebase, or force your way past it. A stale tree makes every file below untrustworthy.
+**Sync first.** If the project is a git repo with a remote, run `git pull --ff-only` before reading anything — another machine may own the newest handoff. If it fails (the branch has diverged, or local changes block it), say so and stop; do not merge, rebase, or force your way past it. A branch with no upstream is not a failure — note it and continue. A stale tree makes every file below untrustworthy.
 
 **Resolve the restart file and notes dir** — see [SKILL.md](SKILL.md), "Where the session files live". In per-host mode with no host slug, stop and ask; do not read another host's handoff as if it were yours.
 
