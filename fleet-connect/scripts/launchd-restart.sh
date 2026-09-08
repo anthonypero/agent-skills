@@ -110,7 +110,7 @@ live="$(fc_tmux_sessions)"
 PREFIX="${RC_PREFIX:-$(fc_session_prefix)}"
 found=0; armjobs=""; seen=""
 
-while IFS=$'\t' read -r name session _label script _job arm; do
+while IFS="$FC_FS" read -r name session _label script _job arm _status; do
   [ -n "$session" ] || continue
   seen="$seen $session"
   wanted "$name" "$session" || continue

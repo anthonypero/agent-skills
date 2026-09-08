@@ -38,7 +38,7 @@ scripts/install.sh --link /path/to/fleet.json         # or point at an existing 
 scripts/fleet-connect.sh --where                      # confirm: config, host kind, agents
 ```
 
-If a session shows up as `unlisted:` in the output, the config is behind the machine — add it.
+If a session shows up as `unlisted:` in the output, the config is behind the machine — add it. (That prefix-based discovery, and the `host.session_prefix` it keys on, is implemented by the launchd path only; a systemd host works from its registry alone.)
 
 ## Use it
 
@@ -49,7 +49,9 @@ scripts/fleet-connect.sh --restart    # escalate: restart the processes, then re
 scripts/fleet-connect.sh NAME...      # limit to these agents (config name or session name)
 ```
 
-Always run it from a shell **outside** the sessions it operates on — a plain session over SSH is the natural orchestrator. A session cannot reliably re-arm or restart itself; the scripts skip self.
+A plain run targets **live agents only** — an entry whose `status` starts with `staged` has no session yet and is skipped. Naming one explicitly overrides that; naming the calling session does not.
+
+Always run it from a shell **outside** the sessions it operates on — a plain session over SSH is the natural orchestrator. A session cannot reliably re-arm or restart itself; the scripts skip self — on every path, and even when you name it explicitly (with a warning).
 
 Escalate only after re-arming fails: `--restart` quits each runtime process and relaunches it with `--continue` (history preserved, but it costs a resume), so it is the second move, never the first.
 

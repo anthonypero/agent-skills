@@ -57,21 +57,39 @@ fc_host_kind() {
 
 fc_session_prefix() { fc_get '.host.session_prefix'; }
 
-# Emit one TAB-separated record per configured agent: name, session, label, launch script,
-# keep-alive job, arm job. Defaults are merged in, so per-agent entries stay minimal.
+# The field separator fc_agents emits. NOT a tab: bash treats tab as IFS *whitespace*, so
+# `IFS=$'\t' read` silently collapses a run of tabs into one delimiter and every empty field
+# disappears, shifting the ones after it. US (0x1f) is not IFS whitespace, so empty fields
+# survive. Readers must use `IFS="$FC_FS" read` (and cut/awk must be told the delimiter too).
+FC_FS=$'\037'
+
+# Emit one FC_FS-separated record per configured agent: name, session, label, launch script,
+# keep-alive job, arm job, status. Defaults are merged in, so per-agent entries stay minimal.
+# `status` is the registry's lifecycle field; a missing status means "live". Anything
+# starting with `staged` is an agent that exists on paper but has no session yet — see
+# fc_is_live. New columns go on the END: every reader reads by position.
 fc_agents() {
-  jq -r '
+  jq -j '
     (.defaults // {}) as $d
     | .agents[]?
     | ($d * .) as $a
     | [ ($a.name // ""), ($a.session // ""), ($a.channel.label // $a.name // ""),
-        ($a.keepalive.script // ""), ($a.keepalive.job // ""), ($a.keepalive.arm_job // "") ]
-    | @tsv' "$FC_CONFIG"
+        ($a.keepalive.script // ""), ($a.keepalive.job // ""), ($a.keepalive.arm_job // ""),
+        ($a.status // "live") ]
+    | join("\u001f") + "\n"' "$FC_CONFIG"
+}
+
+# True unless the status marks the agent as staged (not yet stood up on this host).
+fc_is_live() {
+  case "${1:-live}" in staged*) return 1 ;; *) return 0 ;; esac
 }
 
 fc_tmux_sessions() { tmux list-sessions -F '#{session_name}' 2>/dev/null || true; }
 
 # The session this script is running inside, if any — never poke yourself.
+# FC_SELF_SESSION overrides the tmux lookup; it exists so the self-skip can be exercised
+# from a test harness that is not itself running inside the session under test.
 fc_self_session() {
+  if [ -n "${FC_SELF_SESSION:-}" ]; then printf '%s' "$FC_SELF_SESSION"; return 0; fi
   [ -n "${TMUX:-}" ] && tmux display-message -p '#{session_name}' 2>/dev/null || true
 }

@@ -59,7 +59,7 @@ wanted() {  # no name filter => everything
 # --- build the target list: configured agents first, then prefix-discovered strays -------
 live="$(fc_tmux_sessions)"
 targets=""; seen=""
-while IFS=$'\t' read -r name session label _script _job _arm; do
+while IFS="$FC_FS" read -r name session label _script _job _arm _status; do
   [ -n "$session" ] || continue
   seen="$seen $session"
   printf '%s\n' "$live" | grep -qx "$session" || { wanted "$name" "$session" && echo "not running:   $session (config: $name)"; continue; }

@@ -22,19 +22,19 @@ One source of truth, and the registry's own schema is a superset of this one.
 
 ## Schema
 
-The schema is the `agent-fleet` **v2 `fleet.json`** shape, plus an optional `host` block and an optional `keepalive` block per agent. A fleet registry validates as a fleet-connect config unchanged; a launchd host's config is the same shape with different keep-alive fields. Unknown keys are ignored, so a registry's extra fields (`user`, `timers`, `data`, `status`, …) cost nothing here.
+The schema is the `agent-fleet` **v2 `fleet.json`** shape, plus an optional `host` block and an optional `keepalive` block per agent. A fleet registry validates as a fleet-connect config unchanged; a launchd host's config is the same shape with different keep-alive fields. Unknown keys are ignored, so a registry's extra fields (`user`, `timers`, `data`, …) cost nothing here.
 
 ### `host` (optional)
 
 | Field | Meaning |
 | --- | --- |
 | `keepalive` | `"launchd"` or `"systemd"` — which dispatch path this host takes |
-| `session_prefix` | tmux prefix used to find sessions the config does not list (e.g. `cc-`, `agent-`) |
+| `session_prefix` | **launchd hosts only** — tmux prefix used to find sessions the config does not list (e.g. `cc-`) |
 | `fleet_root` | systemd hosts: the fleet repo root holding `infra/`; defaults to the resolved config's own directory |
 
 Omit the whole block and the host kind is **inferred**: if `infra/channel-up.sh` sits next to the resolved config (i.e. the config is a symlink into a fleet repo), the host is a fleet/systemd host; otherwise it is treated as launchd. That inference is what lets a fleet registry be symlinked in verbatim.
 
-`session_prefix` is a safety net, not the inventory. Sessions found by prefix but absent from `agents` are still operated on, and reported as `unlisted:` so the config gets fixed.
+`session_prefix` is a safety net, not the inventory. Sessions found by prefix but absent from `agents` are still operated on, and reported as `unlisted:` so the config gets fixed. Only the launchd scripts implement this discovery — a systemd host dispatches to the fleet's own `infra/` machinery, which works from the registry alone, so `session_prefix` is ignored there.
 
 ### `defaults` (optional)
 
@@ -53,6 +53,7 @@ Merged under every agent entry — put `channel.type` here rather than repeating
 | `keepalive.job` | no | the keep-alive job's label or unit name |
 | `keepalive.arm_job` | no | a job that re-creates in-session timers; kicked after a restart |
 | `keepalive.script` | no | the session-up script whose `LAUNCH=` line is the launch command (launchd hosts) |
+| `status` | no | registry lifecycle field; anything starting with `staged` marks an agent that is not yet stood up. Missing means live. A default run targets live agents only; naming a staged agent explicitly overrides that |
 | `notes` | no | free text |
 
 `keepalive.script` matters: a restart reconstructs the launch command from that script's `LAUNCH=` assignment, **never** from the running process's arguments — a process can be running with wrong or partial flags, and `ps`-reconstruction would faithfully relaunch the mistake. Without it, the restart falls back to a `*-resume` alias in `$FLEET_CONNECT_ALIAS_FILE` (default `~/.zshrc`), and skips the session if that also fails.
