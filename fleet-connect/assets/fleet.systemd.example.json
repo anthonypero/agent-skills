@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "_comment": "fleet-connect config TEMPLATE for a systemd fleet host. On a host that already has a fleet registry, do NOT copy this — symlink the config at the registry instead (scripts/install.sh --link /path/to/fleet.json), so there is exactly one source of truth. Use this template only for a systemd host that has no registry of its own. Schema: reference/config.md.",
+  "host": {
+    "keepalive": "systemd",
+    "fleet_root": "/var/agent-fleet",
+    "session_prefix": "agent-"
+  },
+  "defaults": {
+    "channel": { "type": "claude-remote-control" }
+  },
+  "agents": [
+    {
+      "name": "example",
+      "session": "agent-example",
+      "dir": "/var/agent-fleet/agents/example",
+      "channel": { "label": "example-mini" }
+    }
+  ]
+}

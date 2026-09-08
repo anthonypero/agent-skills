@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "_comment": "fleet-connect config TEMPLATE for a launchd-managed host (macOS). Copy to ${XDG_CONFIG_HOME:-~/.config}/fleet-connect/fleet.json and replace every value — this file is an example, not a registry. One entry per persistent session on THIS machine. Schema: reference/config.md.",
+  "host": {
+    "keepalive": "launchd",
+    "session_prefix": "cc-"
+  },
+  "defaults": {
+    "channel": { "type": "claude-remote-control" }
+  },
+  "agents": [
+    {
+      "name": "example",
+      "session": "cc-example",
+      "dir": "~/Projects/example",
+      "channel": { "label": "Example" },
+      "keepalive": {
+        "managed_by": "launchd",
+        "job": "com.example.example.session",
+        "arm_job": "com.example.example.arm",
+        "script": "~/Projects/example/bin/ex-session-up.sh"
+      },
+      "notes": "arm_job is optional — only sessions with an in-session reminder timer have one."
+    }
+  ]
+}
