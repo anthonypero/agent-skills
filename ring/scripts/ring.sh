@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 #
-# ring.sh — play a loud attention sound ONCE, on demand.
+# ring.sh — play a loud attention sound ONCE, on demand, and show a popup that
+# stays on screen until dismissed.
 #
 # This is a one-off alert, not a hook. Nothing is installed and nothing persists;
-# each run just plays the sound. Call it at the moment you hand control back with
-# the thing the user was waiting for (see SKILL.md for when).
+# each run just plays the sound and raises the popup. Call it at the moment you
+# hand control back with the thing the user was waiting for (see SKILL.md for when).
 #
-# Usage: ring.sh [--volume N] [--repeat N] [--sound PATH] [--dry-run]
-#   --volume N    afplay volume multiplier (1.0 = normal; default 4)
-#   --repeat N    play N times in a row (default 3)
-#   --sound PATH  sound file to play (default: bundled comedy-horns.caf)
-#   --dry-run     print what would play, make no sound
+# Usage: ring.sh [--message TEXT] [--volume N] [--repeat N] [--sound PATH] [--no-popup] [--dry-run]
+#   --message TEXT  text shown in the popup (default: "Your turn — Claude Code needs you.")
+#   --volume N      afplay volume multiplier (1.0 = normal; default 4)
+#   --repeat N      play N times in a row (default 3)
+#   --sound PATH    sound file to play (default: bundled comedy-horns.caf)
+#   --no-popup      sound only, no dialog
+#   --dry-run       print what would happen, make no sound, show no dialog
+#
+# The popup is a macOS dialog with a single "Dismiss" button. It is raised in the
+# background so this script returns as soon as the sound finishes; the dialog
+# stays up until the user clicks it.
 #
 set -euo pipefail
 
@@ -19,17 +26,21 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SOUND="$SKILL_DIR/assets/comedy-horns.caf"
+MESSAGE="Your turn — Claude Code needs you."
 VOLUME="4"
 REPEAT="3"
+POPUP="1"
 DRY="0"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --volume)  VOLUME="${2:-}"; shift 2 ;;
-    --repeat)  REPEAT="${2:-}"; shift 2 ;;
-    --sound)   SOUND="${2:-}"; shift 2 ;;
-    --dry-run) DRY="1"; shift ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    --message)  MESSAGE="${2:-}"; shift 2 ;;
+    --volume)   VOLUME="${2:-}"; shift 2 ;;
+    --repeat)   REPEAT="${2:-}"; shift 2 ;;
+    --sound)    SOUND="${2:-}"; shift 2 ;;
+    --no-popup) POPUP="0"; shift ;;
+    --dry-run)  DRY="1"; shift ;;
+    -h|--help)  sed -n '2,21p' "$0"; exit 0 ;;
     *) echo "error: unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -38,8 +49,18 @@ done
 
 if [ "$DRY" = "1" ]; then
   echo "would play (x$REPEAT, volume $VOLUME): $SOUND"
+  [ "$POPUP" = "1" ] && echo "would show popup: $MESSAGE"
   exit 0
 fi
 
 command -v afplay >/dev/null 2>&1 || { echo "error: afplay not found (macOS only)" >&2; exit 1; }
+
+if [ "$POPUP" = "1" ] && command -v osascript >/dev/null 2>&1; then
+  # Escape backslashes and double quotes for the AppleScript string literal.
+  ESCAPED="$(printf '%s' "$MESSAGE" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+  nohup osascript -e "display dialog \"$ESCAPED\" with title \"Ring\" buttons {\"Dismiss\"} default button 1 with icon caution" \
+    >/dev/null 2>&1 &
+  disown
+fi
+
 for i in $(seq 1 "$REPEAT"); do afplay -v "$VOLUME" "$SOUND"; done

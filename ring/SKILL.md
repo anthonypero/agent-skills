@@ -5,8 +5,10 @@ description: "Play a loud, one-off attention sound (a 'ring') at the moment you 
 
 # ring
 
-Plays a loud sound **once**, on demand, so the user knows it's their turn without watching the
-screen. Ships a bundled car-horn sound. macOS only (uses `afplay`).
+Plays a loud sound **once**, on demand, and raises a popup dialog that stays on screen until the
+user clicks **Dismiss** — so the user knows it's their turn without watching the screen, and can
+see what they were called back for even if they missed the sound. Ships a bundled car-horn sound.
+macOS only (uses `afplay` and `osascript`).
 
 ## The model: one-off, never automatic
 
@@ -30,11 +32,17 @@ they ask again. Never ring during ordinary back-and-forth work.
 Run the play script (in this skill's directory):
 
 ```bash
-scripts/ring.sh
+scripts/ring.sh --message "Build finished — 2 tests failing, see terminal."
 ```
 
-Defaults: bundled `comedy-horns.caf`, amplified (`--volume 4`), played 3× in a row. Options:
-`--volume N` (`1.0` = normal), `--repeat N`, `--sound PATH`, `--dry-run` (print, make no sound).
+Always pass `--message` with a one-line summary of *why* you're ringing (done / decision needed /
+blocked on what). It becomes the popup text; the popup persists until dismissed, so it should stand
+on its own for someone walking back to the desk. The script returns when the sound finishes; the
+dialog is left up in the background.
+
+Defaults: bundled `comedy-horns.caf`, amplified (`--volume 4`), played 3× in a row, popup shown.
+Options: `--message TEXT`, `--volume N` (`1.0` = normal), `--repeat N`, `--sound PATH`,
+`--no-popup` (sound only), `--dry-run` (print, no sound, no dialog).
 
 If a long-running task is what they're waiting on, kick it off, let it run, and call `ring.sh` in
 the same response where you report that it finished.
