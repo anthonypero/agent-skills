@@ -47,6 +47,13 @@ Usage:
                                         mix tilt, a per-Sunday theme summary, and a CSV of
                                         4 slots per Sunday with ranked, annotated
                                         candidates. The song column stays blank: Tony fills it.
+    pco services snapshot <type> [--after D] [--before D | --weeks 6] [--dir DIR] [--quiet]
+                                        fetch each plan (items, songs/keys, notes, team,
+                                        times); store a version only when it changed;
+                                        print what changed vs the previous snapshot
+    pco services changes <type> [--after D] [--before D] [--since D] [--dir DIR]
+                                        offline: diff stored snapshots (latest vs the
+                                        previous one, or vs the newest at/before --since)
     pco services types
     pco services song-usage <type> --after D [--before D] [--csv out.csv]
                                         every song item in the range: date,
@@ -119,6 +126,22 @@ def load_data(arg: str) -> dict:
 
 def _date(s: str) -> dt.date:
     return dt.date.fromisoformat(s)
+
+
+def _snapshot_dir(explicit: str | None) -> str:
+    """--dir, else $PCO_SNAPSHOT_DIR (env / project secrets / profile), else
+    <project>/.agents/pco-snapshots next to the nearest PROJECT_SECRETS.md,
+    else ~/.config/pco/snapshots."""
+    from pco_api import profile_setting, _nearest_project_secrets
+    if explicit:
+        return explicit
+    setting = profile_setting("PCO_SNAPSHOT_DIR")
+    if setting:
+        return os.path.expanduser(setting)
+    secrets = _nearest_project_secrets(os.getcwd())
+    if secrets:
+        return os.path.join(os.path.dirname(secrets), "pco-snapshots")
+    return os.path.expanduser("~/.config/pco/snapshots")
 
 
 def services_main(argv: list[str], profile: str | None) -> int:
@@ -201,6 +224,15 @@ def services_main(argv: list[str], profile: str | None) -> int:
                    help="instead list who holds --position on each plan (feeds songs plan --leaders)")
     p.add_argument("--position", default="Music Director", help="--leaders: the team position to read")
     p.add_argument("--csv", help="--leaders: write the CSV here (default stdout)")
+    p = sub.add_parser("snapshot", help="fetch plans and store a version when they changed; report diffs")
+    p.add_argument("type"); p.add_argument("--after", type=_date); p.add_argument("--before", type=_date)
+    p.add_argument("--weeks", type=int, default=6, help="default range: today .. today+N weeks")
+    p.add_argument("--dir", help="snapshot root (default: $PCO_SNAPSHOT_DIR, else <project>/.agents/pco-snapshots)")
+    p.add_argument("--quiet", action="store_true", help="only print plans that changed")
+    p = sub.add_parser("changes", help="offline: what changed between stored snapshots")
+    p.add_argument("type"); p.add_argument("--after", type=_date); p.add_argument("--before", type=_date)
+    p.add_argument("--since", help="compare against the newest snapshot at/before this date or datetime (default: previous snapshot)")
+    p.add_argument("--dir")
     p = sub.add_parser("teams", help="list teams; --members lists each person/position/preference")
     p.add_argument("type"); p.add_argument("--team", action="append", default=[], help="repeatable name|id (default: all)")
     p.add_argument("--members", action="store_true"); p.add_argument("--csv", help="--members: write CSV here")
@@ -608,6 +640,54 @@ def services_main(argv: list[str], profile: str | None) -> int:
             print(f"== {t['attributes']['name']}" + (" (dry run)" if args.dry_run else ""))
             total += P.set_availability(client, st["id"], t["id"], args.person, args.preference, args.dry_run)
         print(f"{total} assignment(s) {'would be ' if args.dry_run else ''}changed", file=sys.stderr)
+        return 0
+    if args.op in ("snapshot", "changes"):
+        import os.path as _osp
+        import pco_snapshot as S
+        root = _snapshot_dir(args.dir)
+        after = args.after or dt.date.today()
+        before = args.before or (after + dt.timedelta(weeks=args.weeks) if args.op == "snapshot"
+                                 else dt.date.max)
+        if args.op == "snapshot":
+            reps = S.snapshot_plans(client, root, st, after, before,
+                                    log=lambda m: print(m, file=sys.stderr))
+            for r in reps:
+                if args.quiet and not r["changed"]:
+                    continue
+                head = f"{r['date']}  {r['title'] or '-'}  (plan {r['plan_id']}; last edit {r['updated_at']} by {r['updated_by'] or '?'})"
+                if r["first"]:
+                    print(f"{head}\n  first snapshot")
+                elif r["changed"]:
+                    print(f"{head}\n  CHANGED since {r['previous']}:")
+                    for l in r["lines"]:
+                        print(f"    {l}")
+                else:
+                    print(f"{head}\n  unchanged since {r['previous']}")
+            n = sum(r["changed"] for r in reps)
+            print(f"{len(reps)} plan(s), {n} changed, stored in {root}", file=sys.stderr)
+            return 0
+        since = None
+        if args.since:
+            since = dt.datetime.fromisoformat(args.since)
+            if since.tzinfo is None:
+                since = since.astimezone()
+        idx_path = _osp.join(root, "index.json")
+        idx = json.load(open(idx_path)) if _osp.isfile(idx_path) else {}
+        plans = sorted(((m["date"], pid, m) for pid, m in idx.items()
+                        if m["service_type_id"] == st["id"]
+                        and after <= dt.date.fromisoformat(m["date"]) <= before))
+        for date, pid, m in plans:
+            old, new, lines = S.changes_since(root, st["id"], pid, since)
+            checked = S.last_checked(root, st["id"], pid)
+            head = f"{date}  {m.get('title') or '-'}  (plan {pid}; last checked {checked})"
+            if lines:
+                print(f"{head}\n  CHANGED {old} -> {new}:")
+                for l in lines:
+                    print(f"    {l}")
+            else:
+                print(f"{head}\n  no changes" + (f" since {old or new}" if (old or new) else " (no snapshots)"))
+        if not plans:
+            print(f"no snapshots for {st['attributes']['name']} in range under {root}")
         return 0
     if args.op == "plans":
         after = args.after or dt.date.today()
