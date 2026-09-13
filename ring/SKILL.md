@@ -5,10 +5,10 @@ description: "Play a loud, one-off attention sound (a 'ring') at the moment you 
 
 # ring
 
-Plays a loud sound **once**, on demand, and raises a popup dialog that stays on screen until the
-user clicks **Dismiss** — so the user knows it's their turn without watching the screen, and can
-see what they were called back for even if they missed the sound. Ships a bundled car-horn sound.
-macOS only (uses `afplay` and `osascript`).
+Raises a popup dialog on demand and **keeps a loud sound playing until the user clicks Dismiss** —
+so the user is pulled back from another room, and sees what they were called back for when they get
+there. Clicking Dismiss silences the sound immediately. Ships a bundled car-horn sound. macOS only
+(uses `afplay` and `osascript`).
 
 ## The model: one-off, never automatic
 
@@ -37,12 +37,27 @@ scripts/ring.sh --message "Build finished — 2 tests failing, see terminal."
 
 Always pass `--message` with a one-line summary of *why* you're ringing (done / decision needed /
 blocked on what). It becomes the popup text; the popup persists until dismissed, so it should stand
-on its own for someone walking back to the desk. The script returns when the sound finishes; the
-dialog is left up in the background.
+on its own for someone walking back to the desk.
 
-Defaults: bundled `comedy-horns.caf`, amplified (`--volume 4`), played 3× in a row, popup shown.
-Options: `--message TEXT`, `--volume N` (`1.0` = normal), `--repeat N`, `--sound PATH`,
-`--no-popup` (sound only), `--dry-run` (print, no sound, no dialog).
+**The script blocks until the user clicks Dismiss.** That is intended: the sound loops the whole
+time the popup is up, and Dismiss stops it instantly and returns. Nothing is left running — no
+orphan `afplay`. Run it as the *last* thing in the turn.
+
+Defaults: bundled `comedy-horns.caf`, amplified (`--volume 4`), looping under a persistent popup,
+with the sound capped at 300 s. Options:
+
+| Option | Meaning |
+| --- | --- |
+| `--message TEXT` | popup text (always pass this) |
+| `--volume N` | `afplay` multiplier, `1.0` = normal (default 4) |
+| `--max-seconds N` | silence the sound after N seconds even if the popup is still up; the popup stays. Default 300, `0` = no cap |
+| `--sound PATH` | alternate sound file |
+| `--no-popup` | sound only: play `--repeat` times and exit, no dialog (the old behavior) |
+| `--repeat N` | number of plays — **only meaningful with `--no-popup`** (default 3); with the popup the sound loops instead |
+| `--dry-run` | print what would happen; no sound, no dialog |
+
+The dialog is raised through System Events so it comes to the front rather than opening behind
+whatever window is on screen.
 
 If a long-running task is what they're waiting on, kick it off, let it run, and call `ring.sh` in
 the same response where you report that it finished.
