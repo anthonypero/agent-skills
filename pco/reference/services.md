@@ -29,9 +29,21 @@ Attachments hang off an "attachable": `/songs/<id>`,
 `/songs/<id>/arrangements/<id>`, or `.../keys/<id>` (`GET|POST
 <attachable>/attachments`).
 
-- **Audio belongs at the arrangement or key level.** A song-level attachment
-  renders as a generic "file" across every arrangement instead of as that
-  arrangement's playable reference recording.
+- **Audio belongs at the KEY level.** An arrangement-level audio attachment is
+  inherited by every key on that arrangement, so the moment an arrangement
+  carries two keys the playback engine lists both files under each one and the
+  band picks between them mid-service. House rule: audio always attaches to the
+  key, **video links** to the arrangement. A song-level attachment is worse
+  still — it renders as a generic "file" across every arrangement instead of as
+  a playable reference recording.
+- **Uploading a file**: POST the bytes as multipart `file` to
+  `https://upload.planningcenteronline.com/v2/files` — same basic auth as the
+  API, but the host is `upload.`, not `api.`. The response's `data[0].id` is a
+  UUID; POST that as the attachment's `file_upload_identifier` alongside
+  `filename`.
+- **A `file_upload_identifier` is reusable.** The same UUID can be POSTed to
+  more than one attachable, so re-filing a track (arrangement → key) is
+  attach-then-delete with no second upload.
 - **Link attachments** (a URL, no upload): POST with attributes
   `remote_link` + `filename`.
 - **The filename MUST end `.mp3`** for PCO to mark a link attachment
@@ -40,11 +52,24 @@ Attachments hang off an "attachable": `/songs/<id>`,
   `filetype: file`, `streamable: false` — content sniffing is not performed.
 - Idempotency is yours: list the attachable's attachments and match on
   `remote_link` before creating.
-- Arrangements carry an auto-generated `lyric_chart-<arr_id>` PDF attachment;
-  ignore it.
+- **Auto-generated lyric PDFs**: an arrangement carries `lyric_chart-<arr_id>`,
+  and creating a Key adds a per-key lyric PDF on that key. Ignore both.
 - The remote host must be publicly reachable (no auth) for PCO's player to
   stream it. Unlisted-but-public object storage (e.g. R2 with robots.txt and
   no bucket listing) works.
+
+### Transposing audio is UI-only
+
+PCO pitch-shifts an attached mp3/m4a/aac into other keys ("Transpose Audio" on
+the arrangement's media list), filing the result on the target key and creating
+that key if it does not exist. **The API exposes no transpose action** —
+attachments report `transposable: true`, but no route accepts it and the
+attachments collection's `meta` advertises no such action. Automating a key's
+audio therefore means shifting it locally and uploading to the key.
+`rubberband -3 -F --pitch=<semitones>` (R3 engine, formant preservation) is the
+closest local match; plain R2 without `-F` — what most ffmpeg builds use, when
+`--enable-librubberband` is even compiled in — is noticeably rough on vocals
+shifted downward.
 
 ## chord_chart dialect ("Lyrics & Chords" format)
 
