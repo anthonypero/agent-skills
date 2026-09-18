@@ -1,0 +1,709 @@
+#!/usr/bin/env bash
+#
+# lp — machine-portable secrets tier for agents, backed by LastPass (lastpass-cli).
+#
+# Every API key/token the fleet needs lives in the shared folder `Shared-agent` of
+# the fleet LastPass account. Any agent on any machine reads a secret by name with
+# one command, and the login self-heals from a master-password file, so unattended
+# sessions never block on a password prompt.
+#
+# Naming convention:  Shared-agent/<scope>/<NAME>
+#   <scope> = the project folder name, or `global` for fleet-wide secrets
+#   <NAME>  = the environment-variable name, e.g. GEMINI_API_KEY
+#
+# SECURITY INVARIANTS — do not relax these:
+#   * The master-password file is never printed, copied, logged or echoed. It is
+#     only ever redirected into `lpass login` on stdin.
+#   * Secret VALUES never travel through argv (argv is world-readable via `ps`).
+#     `lp put` reads the value from stdin, always.
+#   * Secret values reach stdout only from `lp get` and `lp env`. Nothing else
+#     prints them — not errors, not summaries, not --dry-run output.
+#   * `set -x` is never enabled here; it would echo every secret.
+#
+set -euo pipefail
+
+PROG="$(basename "$0")"
+SHARE="Shared-agent"
+
+# --- defaults, overridable by env or ~/.config/lastpass/env --------------------
+# Record which values the environment supplied BEFORE defaults are applied, so the
+# precedence stays: environment > ~/.config/lastpass/env > built-in default.
+LP_USERNAME_FROM_ENV=0
+LP_MASTER_FILE_FROM_ENV=0
+if [ -n "${LP_USERNAME:-}" ]; then LP_USERNAME_FROM_ENV=1; fi
+if [ -n "${LP_MASTER_FILE:-}" ]; then LP_MASTER_FILE_FROM_ENV=1; fi
+
+LP_USERNAME="${LP_USERNAME:-agent@anthonypero.com}"
+LP_MASTER_FILE="${LP_MASTER_FILE:-$HOME/.secret-drop/lastpass-master}"
+CONFIG_FILE="${LP_CONFIG_FILE:-$HOME/.config/lastpass/env}"
+
+usage() {
+  cat <<'EOF'
+lp — read and write fleet secrets in the LastPass share `Shared-agent`.
+
+Usage:
+  lp status                                  who am I logged in as (exit 1 if not)
+  lp login                                   ensure logged in (idempotent, unattended)
+  lp get <scope>/<NAME> [--field F]          print one secret value
+  lp get <NAME> [--field F]                  same, with the scope inferred from cwd
+  lp put <scope>/<NAME> [opts]               create/update; VALUE is read from stdin
+  lp ls [scope]                              list item names
+  lp env <scope> [NAME ...] [--secrets-md]   print export lines for eval
+  lp sweep <PROJECT_SECRETS.md> --scope S    import a secrets file into the vault
+  lp rm <scope>/<NAME> --yes                 delete an item
+
+Options:
+  get   --field password|username|url|notes|json   (default: password)
+  put   --username U   --url URL   --notes TEXT
+  env   --secrets-md      print `- **NAME** = `value`` lines instead of exports
+  sweep --dry-run         report what would be written; write nothing
+        --scope NAME      required; the scope to import into
+        --overwrite       replace items already in the vault (default: skip them)
+
+`lp status` and `lp sweep --dry-run` do not log in: they are safe to run on a
+machine with no session and no master file. Every other subcommand logs in first.
+
+Items are addressed as Shared-agent/<scope>/<NAME>. <scope> is a project folder
+name, or `global` for fleet-wide secrets. When `lp get` is given a bare NAME it
+tries the inferred project scope first (nearest ancestor directory containing
+`.agents/`, else the git root), then `global`.
+
+Environment (also read from ~/.config/lastpass/env as KEY=value lines):
+  LP_USERNAME      LastPass account   (default: agent@anthonypero.com)
+  LP_MASTER_FILE   master-password file (default: ~/.secret-drop/lastpass-master)
+
+Exit codes: 0 ok · 1 not logged in / lpass error · 2 master file missing
+            3 item not found · 4 usage or bad input
+EOF
+}
+
+die() { printf '%s: %s\n' "$PROG" "$1" >&2; exit "${2:-1}"; }
+
+# Guard for every `shift 2`: a trailing option with no value would otherwise make
+# `shift 2` fail, and under `set -e` that kills the script with a bare exit 1 and
+# no message. $1 is the caller's $#, $2 the subcommand, $3 the option name.
+need_arg() { [ "$1" -ge 2 ] || die "$2: $3 needs a value" 4; }
+
+# --- config file --------------------------------------------------------------
+# Parsed, not sourced: only LP_USERNAME / LP_MASTER_FILE are honored, and the file
+# cannot execute code. A value already set in the environment wins.
+load_config() {
+  [ -r "$CONFIG_FILE" ] || return 0
+  local line key val
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="${line%%=*}"; val="${line#*=}"
+    key="$(printf '%s' "$key" | tr -d '[:space:]')"
+    val="${val#\"}"; val="${val%\"}"; val="${val#\'}"; val="${val%\'}"
+    case "$key" in
+      LP_USERNAME)    if [ "$LP_USERNAME_FROM_ENV" = 0 ]; then LP_USERNAME="$val"; fi ;;
+      LP_MASTER_FILE)
+        # The file is parsed, not sourced, so a leading `~/` is never expanded
+        # for us. Expand it here, or the path is taken literally and never found.
+        case "$val" in '~/'*) val="$HOME/${val#\~/}" ;; esac
+        if [ "$LP_MASTER_FILE_FROM_ENV" = 0 ]; then LP_MASTER_FILE="$val"; fi ;;
+    esac
+  done < "$CONFIG_FILE"
+}
+
+# --- lpass --------------------------------------------------------------------
+LPASS_BIN="${LPASS_BIN:-}"
+find_lpass() {
+  if [ -n "$LPASS_BIN" ]; then printf '%s' "$LPASS_BIN"; return 0; fi
+  # `type -P` searches PATH for an executable FILE only. Plain `command -v` would
+  # match the `lpass` wrapper function defined below and recurse until it crashes.
+  local p
+  if p="$(type -P lpass 2>/dev/null)" && [ -n "$p" ]; then printf '%s' "$p"; return 0; fi
+  local c
+  for c in /opt/homebrew/bin/lpass /usr/local/bin/lpass /usr/bin/lpass; do
+    if [ -x "$c" ]; then printf '%s' "$c"; return 0; fi
+  done
+  return 1
+}
+
+install_hint() {
+  case "$(uname -s)" in
+    Darwin) printf 'brew install lastpass-cli' ;;
+    *)      printf 'sudo apt-get install -y lastpass-cli' ;;
+  esac
+}
+
+lpass() { "$LPASS_BIN" "$@"; }
+
+# --- login --------------------------------------------------------------------
+ensure_login() {
+  load_config
+  # Never prompt on a pinentry dialog, and never let the agent expire mid-session.
+  export LPASS_DISABLE_PINENTRY=1
+  # Forced to 0 (never expire) rather than defaulted: an inherited non-zero value
+  # is exactly the one-hour expiry this wrapper exists to make a non-event.
+  export LPASS_AGENT_TIMEOUT=0
+
+  LPASS_BIN="$(find_lpass)" || die "lastpass-cli not installed. Install it with: $(install_hint)" 1
+
+  if lpass status >/dev/null 2>&1; then
+    # `lpass ls`/`show` serve the local cache, so an item written on another
+    # machine is invisible here until a sync. One sync per process keeps every
+    # resolve current (a fresh login below syncs on its own). Once only: `sweep`
+    # calls `put` per item, and a burst of syncs makes LastPass answer with HTTP
+    # errors and drop queued writes.
+    if [ "${LP_SYNCED:-0}" != 1 ]; then lpass sync >/dev/null 2>&1 || true; LP_SYNCED=1; fi
+    [ "$LISTING_LOADED" = 1 ] || refresh_listing
+    return 0
+  fi
+
+  if [ ! -r "$LP_MASTER_FILE" ]; then
+    cat >&2 <<EOF
+$PROG: no LastPass session and no master-password file at $LP_MASTER_FILE
+
+Copy it machine-to-machine from a host that already has it — never paste it into
+a chat, a note, a commit, or a command line:
+
+  mkdir -p "$(dirname "$LP_MASTER_FILE")" && chmod 700 "$(dirname "$LP_MASTER_FILE")"
+  scp <logged-in-host>:$LP_MASTER_FILE "$LP_MASTER_FILE"
+  chmod 600 "$LP_MASTER_FILE"
+
+Then re-run: $PROG login
+EOF
+    exit 2
+  fi
+
+  # The ONLY permitted use of the master file: redirected onto lpass's stdin.
+  if ! lpass login --trust "$LP_USERNAME" < "$LP_MASTER_FILE" >/dev/null 2>&1; then
+    die "lpass login failed for $LP_USERNAME (master file present but rejected — check the password, or a pending MFA prompt on the account)" 1
+  fi
+  lpass status >/dev/null 2>&1 || die "lpass login reported success but status says not logged in" 1
+  LP_SYNCED=1
+  refresh_listing
+}
+
+# --- upload queue --------------------------------------------------------------
+# lpass writes go to a local upload queue that a background uploader drains.
+# Under a burst of syncs LastPass answers "HTTP response code said error" and a
+# queued write can be discarded, so a write is only trustworthy once the queue is
+# empty. Locations: ~/.lpass (macOS, and any host where it already exists) or
+# $XDG_DATA_HOME/lpass, default ~/.local/share/lpass.
+upload_queue_dir() {
+  if [ -n "${LPASS_HOME:-}" ]; then printf '%s/upload-queue' "$LPASS_HOME"; return; fi
+  if [ -d "$HOME/.lpass" ]; then printf '%s/.lpass/upload-queue' "$HOME"; return; fi
+  printf '%s/lpass/upload-queue' "${XDG_DATA_HOME:-$HOME/.local/share}"
+}
+
+# Wait up to ~20 s for the queue to empty; warn on stderr if it does not.
+wait_for_upload() {
+  local q i n
+  q="$(upload_queue_dir)"
+  [ -d "$q" ] || return 0
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    n="$(ls -1 "$q" 2>/dev/null | wc -l | tr -d ' ')"
+    [ "$n" = 0 ] && return 0
+    sleep 2
+  done
+  echo "$PROG: warning: write to $1 is still in the local upload queue ($q) after 20 s — LastPass may be rate-limiting. Wait a minute, run \`$PROG login\`, and confirm with \`$PROG get\` from another machine." >&2
+  return 0
+}
+
+# --- item addressing ----------------------------------------------------------
+infer_scope() {
+  local d="$PWD"
+  while [ "$d" != "/" ] && [ -n "$d" ]; do
+    if [ -d "$d/.agents" ]; then basename "$d"; return 0; fi
+    d="$(dirname "$d")"
+  done
+  local gr
+  if gr="$(git rev-parse --show-toplevel 2>/dev/null)" && [ -n "$gr" ]; then
+    basename "$gr"; return 0
+  fi
+  return 1
+}
+
+# Candidate fullnames for a `<scope>/<NAME>` or bare `<NAME>` reference.
+candidates() {
+  local ref="$1"
+  case "$ref" in
+    */*) printf '%s/%s\n' "$SHARE" "$ref" ;;
+    *)
+      local s
+      if s="$(infer_scope)"; then printf '%s/%s/%s\n' "$SHARE" "$s" "$ref"; fi
+      printf '%s/global/%s\n' "$SHARE" "$ref"
+      ;;
+  esac
+}
+
+# Print the unique id of an item by exact fullname; return 1 if absent.
+# Matching is exact on the fullname — never lpass's fuzzy name matching, which
+# would happily resolve `API_KEY` to some other project's item.
+# The share listing is fetched once per process, at top level, so that an lpass
+# failure (typically "HTTP response code said error", LastPass rate-limiting a
+# burst of syncs) aborts the command instead of reading as "absent" — otherwise a
+# real item would be reported not found, or `put` would create a duplicate.
+# (`resolve_id` runs inside `$(...)`, where `die` could only exit the subshell.)
+LISTING=""
+LISTING_LOADED=0
+refresh_listing() {
+  LISTING="$(lpass ls --format='%ai|%aN' "$SHARE" 2>/dev/null)" || die "lpass ls failed — LastPass may be rate-limiting (\"HTTP response code said error\"). Wait a minute and retry; if it persists: lpass logout -f, then $PROG login." 1
+  LISTING_LOADED=1
+}
+
+# Print the unique id of an item by exact fullname; return 1 if absent.
+# Matching is exact on the fullname — never lpass's fuzzy name matching, which
+# would happily resolve `API_KEY` to some other project's item.
+resolve_id() {
+  local want="$1" line id name
+  [ "$LISTING_LOADED" = 1 ] || refresh_listing
+  [ -n "$LISTING" ] || return 1
+  while IFS= read -r line; do
+    id="${line%%|*}"; name="${line#*|}"
+    if [ "$name" = "$want" ]; then printf '%s' "$id"; return 0; fi
+  done <<< "$LISTING"
+  return 1
+}
+
+# --- subcommands --------------------------------------------------------------
+cmd_status() {
+  load_config
+  export LPASS_DISABLE_PINENTRY=1
+  LPASS_BIN="$(find_lpass)" || { echo "not logged in (lastpass-cli not installed; $(install_hint))"; exit 1; }
+  local out
+  if out="$(lpass status 2>/dev/null)"; then printf '%s\n' "$out"; exit 0; fi
+  echo "not logged in"
+  exit 1
+}
+
+cmd_login() {
+  ensure_login
+  lpass status
+}
+
+cmd_get() {
+  local ref="" field="password"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --field) need_arg "$#" get --field; field="$2"; shift 2 ;;
+      --field=*) field="${1#*=}"; shift ;;
+      -*) die "get: unknown option: $1" 4 ;;
+      *) [ -n "$ref" ] && die "get: unexpected argument: $1" 4; ref="$1"; shift ;;
+    esac
+  done
+  [ -n "$ref" ] || die "get: missing <scope>/<NAME>" 4
+  case "$field" in password|username|url|notes|json) ;; *) die "get: bad --field: $field (want password|username|url|notes|json)" 4 ;; esac
+
+  ensure_login
+
+  local tried="" full id=""
+  while IFS= read -r full; do
+    tried="${tried:+$tried, }$full"
+    if id="$(resolve_id "$full")"; then break; fi
+    id=""
+  done < <(candidates "$ref")
+
+  [ -n "$id" ] || die "not found: tried $tried" 3
+
+  case "$field" in
+    json) lpass show --json "$id" ;;
+    notes) lpass show --notes "$id" ;;
+    *) lpass show "--$field" "$id" ;;
+  esac
+}
+
+# lastpass-cli older than 1.6 (Ubuntu's packaged 1.3.7) needs the remove+re-add
+# update path; see cmd_put.
+lpass_is_old() {
+  local v maj min
+  v="$(lpass --version 2>/dev/null | sed -nE 's/.*v([0-9]+)\.([0-9]+).*/\1 \2/p')"
+  [ -n "$v" ] || return 1
+  maj="${v%% *}"; min="${v##* }"
+  [ "$maj" -lt 1 ] || { [ "$maj" -eq 1 ] && [ "$min" -lt 6 ]; }
+}
+
+# Only one field flag is accepted per `lpass edit`, so extras are separate calls.
+# A field the caller did not pass is simply left alone. Uses cmd_put's locals.
+put_extra_fields() {
+  if [ "$have_u" = 1 ]; then printf '%s' "$username" | lpass edit --non-interactive --username "$1" >/dev/null; fi
+  if [ "$have_l" = 1 ]; then printf '%s' "$url"      | lpass edit --non-interactive --url      "$1" >/dev/null; fi
+  if [ "$have_n" = 1 ]; then printf '%s' "$notes"    | lpass edit --non-interactive --notes    "$1" >/dev/null; fi
+}
+
+cmd_put() {
+  local ref="" username="" url="" notes="" have_u=0 have_l=0 have_n=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --username) need_arg "$#" put --username; username="$2"; have_u=1; shift 2 ;;
+      --username=*) username="${1#*=}"; have_u=1; shift ;;
+      --url) need_arg "$#" put --url; url="$2"; have_l=1; shift 2 ;;
+      --url=*) url="${1#*=}"; have_l=1; shift ;;
+      --notes) need_arg "$#" put --notes; notes="$2"; have_n=1; shift 2 ;;
+      --notes=*) notes="${1#*=}"; have_n=1; shift ;;
+      -*) die "put: unknown option: $1" 4 ;;
+      *) [ -n "$ref" ] && die "put: unexpected argument: $1" 4; ref="$1"; shift ;;
+    esac
+  done
+  [ -n "$ref" ] || die "put: missing <scope>/<NAME>" 4
+  case "$ref" in */*) ;; *) die "put: need an explicit <scope>/<NAME> (scopes are never inferred on write)" 4 ;; esac
+
+  if [ -t 0 ]; then
+    die "put: the value is read from stdin, never from the command line. Pipe it in: printf '%s' \"\$VALUE\" | $PROG put $ref" 4
+  fi
+  local value
+  value="$(cat)"
+  value="${value%$'\n'}"
+  [ -n "$value" ] || die "put: empty value on stdin" 4
+  case "$value" in
+    *$'\n'*) die "put: value contains a newline; lpass truncates a password field at the first one. Store multi-line material with --notes instead." 4 ;;
+  esac
+
+  ensure_login
+
+  local full="$SHARE/$ref" id verb old=0
+  lpass_is_old && old=1
+  # Writes go one field at a time, via the --password/--username/--url/--notes
+  # flags. The whole-record "template" form (all fields on stdin, no field flag)
+  # is tempting because it is atomic, but lastpass-cli 1.3.7 silently DROPS a
+  # template add whose name targets a shared folder — it exits 0 and creates
+  # nothing. The field-flag form works on both 1.3.7 and 1.6.1.
+  if id="$(resolve_id "$full")"; then
+    verb="updated"
+    if [ "$old" = 1 ]; then
+      # lastpass-cli < 1.6 cannot update an existing shared-folder item: `edit`
+      # exits 0 and changes nothing (by id or by name), and remove+re-add lands a
+      # duplicate because the removal never reaches the server before the add
+      # (both verified on 1.3.7, 2026-09-18). Refuse rather than corrupt the vault.
+      die "put: $full already exists and this lastpass-cli ($(lpass --version 2>/dev/null)) cannot update shared-folder items. Update it from a machine with lastpass-cli 1.6+ (the Studio), or \`$PROG rm $ref --yes\` here, wait a minute, then put." 1
+    else
+      # By id, so a duplicate name (which lpass will happily create) can never
+      # make the edit ambiguous. (Old lpass ignores id-addressed edits — it never
+      # reaches this branch.)
+      printf '%s' "$value" | lpass edit --non-interactive --password "$id" >/dev/null
+      put_extra_fields "$id"
+    fi
+  else
+    verb="created"
+    printf '%s' "$value" | lpass add --non-interactive --password "$full" >/dev/null
+    # Sync before touching the new item again. Until the upload queue drains, the
+    # local cache serves a placeholder record (name "0", empty password), and a
+    # second write against that placeholder leaves a phantom half-written entry.
+    lpass sync >/dev/null 2>&1 || true
+    refresh_listing
+    id="$(resolve_id "$full")" || die "put: $full was not created (lastpass-cli can fail a shared-folder write silently — check that the account still has write access to $SHARE)" 1
+    put_extra_fields "$id"
+  fi
+  unset value
+
+  # `--sync=now` does not block, so sync explicitly, then wait for the upload
+  # queue to drain: the very next `lp get`, here or on another machine, must
+  # read the value that was just written.
+  lpass sync >/dev/null 2>&1 || true
+  wait_for_upload "$full"
+
+  printf '%s %s\n' "$verb" "$full"
+}
+
+cmd_ls() {
+  local scope=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      # Without this an `lp ls --bogus` would be silently treated as a scope name
+      # and print an empty list, which reads as "the scope is empty".
+      -*) die "ls: unknown option: $1" 4 ;;
+      *) [ -n "$scope" ] && die "ls: unexpected argument: $1" 4; scope="$1"; shift ;;
+    esac
+  done
+  ensure_login
+  local prefix="$SHARE/"
+  [ -n "$scope" ] && prefix="$SHARE/${scope%/}/"
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      "$prefix"*) ;;
+      *) continue ;;
+    esac
+    line="${line#"$prefix"}"
+    [ -n "$line" ] || continue
+    printf '%s\n' "$line"
+  done < <(lpass ls --format='%aN' "$SHARE" 2>/dev/null || true)
+}
+
+# Turn an item name into a shell-safe variable name.
+var_name() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9_]/_/g'; }
+
+# Single-quote a value for shell `eval`: every embedded ' becomes '\''.
+# The two literals are built in variables on purpose — inside double quotes bash
+# does not strip a backslash before a single quote, so writing the replacement
+# inline as "${1//\'/\'\\\'\'}" leaves stray backslashes in the output.
+shq() {
+  local sq="'" esc="'\\''"
+  local v="${1//$sq/$esc}"
+  printf "'%s'" "$v"
+}
+
+cmd_env() {
+  local scope="" secrets_md=0 names=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --secrets-md) secrets_md=1; shift ;;
+      -*) die "env: unknown option: $1" 4 ;;
+      *) if [ -z "$scope" ]; then scope="$1"; else names+=("$1"); fi; shift ;;
+    esac
+  done
+  [ -n "$scope" ] || die "env: missing <scope>" 4
+
+  ensure_login
+
+  if [ "${#names[@]}" -eq 0 ]; then
+    local n
+    while IFS= read -r n; do
+      case "$n" in */*) continue ;; esac   # skip nested sub-groups
+      names+=("$n")
+    done < <(cmd_ls "$scope")
+  fi
+  [ "${#names[@]}" -gt 0 ] || die "env: no items under $SHARE/$scope/" 3
+
+  local name id value esc
+  for name in "${names[@]}"; do
+    id="$(resolve_id "$SHARE/$scope/$name")" || die "env: not found: $SHARE/$scope/$name" 3
+    value="$(lpass show --password "$id")"
+    if [ "$secrets_md" = 1 ]; then
+      case "$value" in
+        # A backtick inside a backtick-quoted value would end the span early and
+        # not round-trip through `sweep`. Such a value goes out in the alternate
+        # double-quoted form instead, escaping \ and " — the two escapes `sweep`
+        # understands. Everything else keeps the repo's usual backtick form.
+        *'`'*)
+          esc="${value//\\/\\\\}"; esc="${esc//\"/\\\"}"
+          printf -- '- **%s** = "%s"\n' "$(var_name "$name")" "$esc"
+          ;;
+        *)
+          printf -- '- **%s** = `%s`\n' "$(var_name "$name")" "$value"
+          ;;
+      esac
+    else
+      printf 'export %s=%s\n' "$(var_name "$name")" "$(shq "$value")"
+    fi
+  done
+  unset value esc
+}
+
+# A sweepable entry name: two or more characters, first an uppercase letter, the
+# rest A-Z 0-9 _. The character set is checked with LC_ALL=C on purpose — under a
+# UTF-8 locale a plain [A-Z] glob range also matches lowercase letters, so
+# `lowercase_ignored` would sail through.
+valid_name() {
+  local n="$1" rest
+  [ "${#n}" -ge 2 ] || return 1
+  case "$n" in
+    [ABCDEFGHIJKLMNOPQRSTUVWXYZ]*) ;;
+    *) return 1 ;;
+  esac
+  rest="$(printf '%s' "$n" | LC_ALL=C tr -d 'A-Z0-9_')"
+  [ -z "$rest" ]
+}
+
+is_placeholder() {
+  local v="$1"
+  [ -z "$v" ] && return 0
+  case "$v" in
+    ...|'…') return 0 ;;
+    '<'*'>') return 0 ;;
+    your-*|YOUR-*|your_*|YOUR_*) return 0 ;;
+    xxx*|XXX*) return 0 ;;
+    TODO*|todo*|TBD*|tbd*) return 0 ;;
+  esac
+  return 1
+}
+
+# Unescape a double-quoted secrets-file value into UNQUOTED_VALUE: the value runs
+# to the first UNESCAPED `"`, with `\\` and `\"` decoded. This is the form
+# `lp env --secrets-md` emits for a value containing a backtick, so the two must
+# stay in step. The result is not printed — it goes straight into `lp put`.
+unquote_dq() {
+  local s="$1" out="" c
+  s="${s#\"}"
+  while [ -n "$s" ]; do
+    c="${s:0:1}"; s="${s:1}"
+    case "$c" in
+      \\) out="$out${s:0:1}"; s="${s:1}" ;;
+      '"') break ;;
+      *) out="$out$c" ;;
+    esac
+  done
+  UNQUOTED_VALUE="$out"
+}
+UNQUOTED_VALUE=""
+
+cmd_sweep() {
+  local file="" scope="" dry=0 overwrite=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --scope) need_arg "$#" sweep --scope; scope="$2"; shift 2 ;;
+      --scope=*) scope="${1#*=}"; shift ;;
+      --dry-run) dry=1; shift ;;
+      --overwrite) overwrite=1; shift ;;
+      -*) die "sweep: unknown option: $1" 4 ;;
+      *) [ -n "$file" ] && die "sweep: unexpected argument: $1" 4; file="$1"; shift ;;
+    esac
+  done
+  [ -n "$file" ] || die "sweep: missing path to a PROJECT_SECRETS.md" 4
+  [ -n "$scope" ] || die "sweep: --scope <name> is required" 4
+  [ -r "$file" ] || die "sweep: cannot read $file" 4
+
+  # The source file is only ever opened for reading, below. Nothing in this
+  # function writes to it, renames it, or truncates it.
+  #
+  # A dry run does not log in: it has to be runnable on a machine with no session
+  # and no master file. If a session happens to exist already, it is used to say
+  # which names are in the vault; if not, that column is simply unavailable.
+  local can_check=1
+  if [ "$dry" = 1 ]; then
+    export LPASS_DISABLE_PINENTRY=1
+    if LPASS_BIN="$(find_lpass 2>/dev/null)" && lpass status >/dev/null 2>&1; then
+      can_check=1
+      refresh_listing   # at top level, so a rate-limit error aborts loudly here
+    else
+      can_check=0
+    fi
+  else
+    ensure_login
+  fi
+
+  # Anchored on purpose. The old unanchored `**NAME** … =` glob also matched
+  # ordinary prose ("The **GEMINI_API_KEY** env var = the key…") and markdown
+  # table rows. An entry must be a list item: optional indent, `-` or `*`, space,
+  # a bold span, optional space, `=`. The name is captured loosely and validated
+  # afterwards, so a bold span that is not a usable NAME gets reported rather
+  # than silently dropped.
+  local entry_re='^[[:space:]]*[-*][[:space:]]+\*\*([^*]+)\*\*[[:space:]]*=[[:space:]]*(.*)$'
+
+  local line lineno=0 name raw value quoted full exists label
+  local to_write=() existing=() skipped=() unparsed=() failed=() today
+  today="$(date +%Y-%m-%d)"
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
+    [[ $line =~ $entry_re ]] || continue
+    name="${BASH_REMATCH[1]}"
+    raw="${BASH_REMATCH[2]}"
+
+    if ! valid_name "$name"; then
+      # Reported, never swept. Only the text up to and including the `=` is
+      # shown — the remainder of the line is a value and stays unprinted.
+      unparsed+=("line $lineno: ${line%"$raw"}")
+      continue
+    fi
+
+    value="$raw"
+    value="${value%"${value##*[![:space:]]}"}"            # rtrim (regex ltrimmed)
+
+    # A quoted value ends at its CLOSING delimiter — these lines often carry a
+    # trailing prose comment ("`abc123` (created 2026-07-06)") that must not be
+    # swallowed into the secret. A bare value is taken whole; there is no way to
+    # tell a comment from the value itself, so bare entries are flagged below.
+    quoted=1
+    case "$value" in
+      '`'*) value="${value#\`}"; value="${value%%\`*}" ;;
+      '"'*) unquote_dq "$value"; value="$UNQUOTED_VALUE" ;;
+      *) quoted=0 ;;
+    esac
+
+    if is_placeholder "$value"; then skipped+=("$name"); continue; fi
+
+    # Report shape, never content: length and quoting are enough to spot a
+    # mis-parsed line (a swallowed comment shows up as a surprising length).
+    label="$name (${#value} chars)"
+    [ "$quoted" = 0 ] && label="$name (${#value} chars, UNQUOTED — check for a trailing comment)"
+
+    full="$SHARE/$scope/$name"
+    exists=0
+    if [ "$can_check" = 1 ] && resolve_id "$full" >/dev/null 2>&1; then exists=1; fi
+
+    # A sweep never silently replaces a value someone already put in the vault:
+    # the vault copy may be the newer one, and its notes may be hand-written.
+    if [ "$exists" = 1 ] && [ "$overwrite" = 0 ]; then
+      existing+=("$label")
+      continue
+    fi
+
+    if [ "$dry" = 1 ]; then
+      to_write+=("$label")
+      continue
+    fi
+
+    # `cmd_put` runs as the last element of a pipeline, i.e. in a subshell, so a
+    # `die` inside it ends that subshell and not the sweep: one unwritable entry
+    # must not abandon the rest of the file half-imported.
+    if printf '%s' "$value" | cmd_put "$scope/$name" --notes "swept from $file on $today" >/dev/null; then
+      to_write+=("$name")
+    else
+      failed+=("$name")
+    fi
+  done < "$file"
+  unset value raw UNQUOTED_VALUE
+
+  if [ "$dry" = 1 ]; then
+    printf 'dry run — nothing written. The source file is never modified.\n'
+    if [ "$can_check" = 0 ]; then
+      printf 'no LastPass session, so the vault was not consulted: items that already exist are listed under "would write".\n'
+    fi
+    printf 'would write to %s/%s/:\n' "$SHARE" "$scope"
+  else
+    printf 'wrote to %s/%s/:\n' "$SHARE" "$scope"
+  fi
+  if [ "${#to_write[@]}" -gt 0 ]; then printf '  %s\n' "${to_write[@]}"; else printf '  (none)\n'; fi
+
+  if [ "${#existing[@]}" -gt 0 ]; then
+    printf 'already in vault (skipped — pass --overwrite to replace):\n'
+    printf '  %s\n' "${existing[@]}"
+  fi
+  if [ "${#skipped[@]}" -gt 0 ]; then
+    printf 'skipped as placeholders:\n'
+    printf '  %s\n' "${skipped[@]}"
+  fi
+  if [ "${#unparsed[@]}" -gt 0 ]; then
+    printf 'unparsed entry-like lines (the name is not A-Z 0-9 _ — fix or import by hand):\n'
+    printf '  %s\n' "${unparsed[@]}"
+  fi
+  if [ "${#failed[@]}" -gt 0 ]; then
+    printf 'FAILED to write (see the errors above):\n'
+    printf '  %s\n' "${failed[@]}"
+    exit 1
+  fi
+}
+
+cmd_rm() {
+  local ref="" yes=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --yes|-y) yes=1; shift ;;
+      -*) die "rm: unknown option: $1" 4 ;;
+      *) [ -n "$ref" ] && die "rm: unexpected argument: $1" 4; ref="$1"; shift ;;
+    esac
+  done
+  [ -n "$ref" ] || die "rm: missing <scope>/<NAME>" 4
+  case "$ref" in */*) ;; *) die "rm: need an explicit <scope>/<NAME>" 4 ;; esac
+  [ "$yes" = 1 ] || die "rm: refusing to delete $SHARE/$ref without --yes" 4
+
+  ensure_login
+  local full="$SHARE/$ref" id
+  id="$(resolve_id "$full")" || die "not found: $full" 3
+  # Old lpass (< 1.6) silently ignores an id-addressed rm; there, use the name.
+  if lpass_is_old; then lpass rm "$full"; else lpass rm "$id"; fi
+  lpass sync >/dev/null 2>&1 || true
+  wait_for_upload "$full"
+  printf 'removed %s\n' "$full"
+}
+
+# --- dispatch -----------------------------------------------------------------
+[ $# -gt 0 ] || { usage; exit 4; }
+sub="$1"; shift
+case "$sub" in
+  status) cmd_status "$@" ;;
+  login)  cmd_login "$@" ;;
+  get)    cmd_get "$@" ;;
+  put)    cmd_put "$@" ;;
+  ls)     cmd_ls "$@" ;;
+  env)    cmd_env "$@" ;;
+  sweep)  cmd_sweep "$@" ;;
+  rm)     cmd_rm "$@" ;;
+  -h|--help|help) usage ;;
+  *) die "unknown subcommand: $sub (try --help)" 4 ;;
+esac
