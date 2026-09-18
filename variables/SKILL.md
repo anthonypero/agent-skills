@@ -18,7 +18,12 @@ Search these sources in order. Use the first match found:
 
 1. **Project memory** — `CLAUDE.md`, `AGENTS.md`, or equivalent in the project root
 2. **Secrets** — `.agents/PROJECT_SECRETS.md` or similar non-committed files
-3. **Local context** — conversation history, `.env`, or other active files
+3. **LastPass vault** — for a secret-shaped name (a key, token, password, or credential) that the
+   files above do not define, ask the `lastpass` skill: run `lp get NAME` from the project
+   directory, which tries `<project>/NAME` in the shared vault and then `global/NAME`. The
+   vault is the source of truth for secrets; `PROJECT_SECRETS.md` is a fallback copy. Use the
+   value in place, never paste it into the conversation or a file.
+4. **Local context** — conversation history, `.env`, or other active files
 
 If a variable is undefined in all sources, ask the user.
 
