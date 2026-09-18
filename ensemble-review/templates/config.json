@@ -1,0 +1,38 @@
+{
+  "openrouter": {
+    "type": "openai_compat",
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key_secret": "global/OPENROUTER_API_KEY",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "default_tier": "frontier",
+    "tiers": {
+      "frontier": {
+        "claude": "anthropic/claude-sonnet-5",
+        "openai": "openai/gpt-6-astra",
+        "kimi": "moonshotai/kimi-k3",
+        "glm": "z-ai/glm-5.3",
+        "xai": "x-ai/grok-4.6",
+        "google": "google/gemini-3.8-flash",
+        "deepseek": "deepseek/deepseek-v4-pro-0813"
+      },
+      "standard": {
+        "claude": "anthropic/claude-sonnet-5",
+        "openai": "openai/gpt-5.6-sol",
+        "kimi": "moonshotai/kimi-k3",
+        "glm": "z-ai/glm-5.3-flash",
+        "xai": "x-ai/grok-4.6",
+        "google": "google/gemini-3.8-flash",
+        "deepseek": "deepseek/deepseek-v4-pro-0813"
+      },
+      "fast": {
+        "claude": "anthropic/claude-sonnet-5",
+        "openai": "openai/gpt-5.6-luna",
+        "kimi": "moonshotai/kimi-k3",
+        "glm": "z-ai/glm-5.3-flash",
+        "xai": "x-ai/grok-4.6",
+        "google": "google/gemini-3.6-flash",
+        "deepseek": "deepseek/deepseek-v4.1-flash"
+      }
+    }
+  }
+}

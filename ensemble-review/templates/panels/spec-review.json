@@ -1,0 +1,34 @@
+{
+  "name": "spec-review",
+  "description": "A spec, plan or technical-requirements document judged against its PRD, seed and framework docs. The measured panel: it reproduces the four lenses of the 2026-06-26 annotate full-spec round, one seat per model family. No Claude seat by default: the host session that authors and reconciles is a Claude model, so a Claude reviewer is the seat most correlated with the artifact.",
+  "requires_references": true,
+  "min_families": 2,
+  "tier": "frontier",
+  "reconciler": "default",
+  "auto_apply": false,
+  "seats": [
+    {
+      "lens": "fidelity",
+      "family": "openai"
+    },
+    {
+      "lens": "buildability",
+      "family": "glm"
+    },
+    {
+      "lens": "consistency",
+      "family": "kimi"
+    },
+    {
+      "lens": "adversarial",
+      "family": "xai"
+    }
+  ],
+  "optional_seats": [
+    {
+      "lens": "completeness",
+      "family": "xai",
+      "note": "A fifth family is seated here when the artifact is large enough to earn it. Not enabled in v0: the completeness persona is not written yet. Move this into `seats` once agents/lens-completeness.md exists."
+    }
+  ]
+}
