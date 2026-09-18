@@ -17,7 +17,7 @@ The point is the login. The `lpass` agent expires after an hour, which used to l
 ## Setup
 
 ```bash
-brew install lastpass-cli                        # or: sudo apt-get install lastpass-cli
+brew install lastpass-cli                        # Linux: build 1.6 from source, see SKILL.md (apt ships 1.3.7, which cannot update)
 scp <a-logged-in-host>:~/.secret-drop/lastpass-master ~/.secret-drop/
 chmod 600 ~/.secret-drop/lastpass-master
 lp login

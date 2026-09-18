@@ -125,11 +125,19 @@ find_lpass() {
 install_hint() {
   case "$(uname -s)" in
     Darwin) printf 'brew install lastpass-cli' ;;
-    *)      printf 'sudo apt-get install -y lastpass-cli' ;;
+    *)      printf 'build lastpass-cli 1.6+ from source (see SKILL.md — the apt package is 1.3.7 and cannot update shared-folder items)' ;;
   esac
 }
 
 lpass() { "$LPASS_BIN" "$@"; }
+
+# The "create the directory" line of the remediation, or nothing when the master
+# file sits directly under / (a pasted `chmod 700 "/"` would break the machine).
+master_dir_hint() {
+  local d; d="$(dirname "$LP_MASTER_FILE")"
+  [ "$d" = "/" ] && return 0
+  printf '  mkdir -p "%s" && chmod 700 "%s"' "$d" "$d"
+}
 
 # --- login --------------------------------------------------------------------
 ensure_login() {
@@ -160,7 +168,7 @@ $PROG: no LastPass session and no master-password file at $LP_MASTER_FILE
 Copy it machine-to-machine from a host that already has it — never paste it into
 a chat, a note, a commit, or a command line:
 
-  mkdir -p "$(dirname "$LP_MASTER_FILE")" && chmod 700 "$(dirname "$LP_MASTER_FILE")"
+$(master_dir_hint)
   scp <logged-in-host>:$LP_MASTER_FILE "$LP_MASTER_FILE"
   chmod 600 "$LP_MASTER_FILE"
 
@@ -307,8 +315,8 @@ cmd_get() {
   esac
 }
 
-# lastpass-cli older than 1.6 (Ubuntu's packaged 1.3.7) needs the remove+re-add
-# update path; see cmd_put.
+# lastpass-cli older than 1.6 (Ubuntu's apt package is 1.3.7) cannot update
+# shared-folder items; cmd_put refuses there.
 lpass_is_old() {
   local v maj min
   v="$(lpass --version 2>/dev/null | sed -nE 's/.*v([0-9]+)\.([0-9]+).*/\1 \2/p')"

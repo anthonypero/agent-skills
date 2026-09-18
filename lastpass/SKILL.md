@@ -39,8 +39,17 @@ Keeping `<NAME>` identical to the env var is what makes `lp env` and the resolve
 Install the CLI:
 
 ```bash
-brew install lastpass-cli                 # macOS
-sudo apt-get install -y lastpass-cli      # Debian / Ubuntu
+brew install lastpass-cli                 # macOS (1.6.1)
+```
+
+On Debian/Ubuntu do **not** use the apt package: it is 1.3.7, which cannot update items in a shared folder (see Notes). Build 1.6 from source instead; it takes a few minutes and needs no asciidoc:
+
+```bash
+sudo apt-get update && sudo apt-get install -y cmake build-essential pkg-config libcurl4-openssl-dev libxml2-dev libssl-dev
+git clone https://github.com/lastpass/lastpass-cli /tmp/lastpass-cli
+cd /tmp/lastpass-cli && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j && sudo cmake --install build
+sudo apt-get remove -y lastpass-cli 2>/dev/null; hash -r; lpass --version   # expect /usr/local/bin/lpass, v1.6.x
+rm -rf /tmp/lastpass-cli
 ```
 
 Then get the master-password file onto the machine. It is copied host-to-host and never travels through a chat window, a note, a commit, or a command line:
@@ -157,7 +166,7 @@ scripts/lp ls --bogus; echo "exit $?"                             # 4, unknown o
 LP_MASTER_FILE=/nonexistent scripts/lp get _test/PROBE; echo "exit $?"   # 2 once logged out
 ```
 
-Then the second machine, which is the whole point of the skill — `lpass` there is 1.3.7, old enough to behave differently:
+Then the second machine, which is the whole point of the skill (the mini runs a source-built 1.6.1 since 2026-09-18):
 
 ```bash
 scp scripts/lp virtuosicmini:/tmp/lp
@@ -209,7 +218,7 @@ Learned the hard way; the script already handles all of these.
 - **`lpass add` does not deduplicate.** Adding an existing fullname creates a second item with the same name, after which every lookup reports "Multiple matches found". `lp put` resolves the name first and edits when it exists.
 - **A password field is truncated at the first newline.** `lp put` rejects a multi-line value rather than storing a silently-truncated one; multi-line material belongs in `--notes`.
 - Item lookups resolve the exact fullname through `lpass ls` and then act on the item id, never on `lpass`'s fuzzy name matching, which would happily resolve `API_KEY` to another project's item.
-- **lastpass-cli older than 1.6 cannot update an existing shared-folder item.** On Ubuntu's 1.3.7, `lpass edit` exits 0 and changes nothing (by id or by name), and remove-then-re-add leaves a duplicate because the removal never reaches the server before the add does (both verified 2026-09-18). Plain creates, reads and lists work there; a create with extra fields, and removes, are unreliable. `lp put` refuses to update on such a version and says so. Do writes from a 1.6.x machine, or build lastpass-cli 1.6 from source on the Ubuntu box.
+- **lastpass-cli older than 1.6 cannot update an existing shared-folder item.** On Ubuntu's apt-packaged 1.3.7, `lpass edit` exits 0 and changes nothing (by id or by name), `rm` by id is a no-op, and remove-then-re-add leaves a duplicate because the removal never reaches the server before the add does (all verified 2026-09-18). `lp put` refuses to update on such a version and says so. The fix is the source build in Setup; the mini was upgraded to 1.6.1 the same day and every path passed there.
 - **`lpass ls` and `show` serve the local cache.** A write from another machine is invisible until a sync, so `lp` syncs once per process before resolving anything.
 - **LastPass rate-limits bursts of syncs.** After a dozen or so in quick succession every network call fails with `HTTP response code said error` for a minute or two, and a write sitting in the local upload queue can be discarded. `lp` syncs at most once per process, waits for the upload queue to drain after every write (warning if it does not), and treats a failed listing as an error rather than as "not found". If you see that message, wait a minute; the verified recovery is `lpass logout -f` then `lp login`.
 - **Only a read from another machine proves a write.** A machine's own read after a write can come from its local blob with the queued edit already applied. The smoke test's cross-machine step exists for that reason.
