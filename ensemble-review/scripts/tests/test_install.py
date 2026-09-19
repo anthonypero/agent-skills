@@ -28,6 +28,10 @@ SCRIPTS_DIR = os.path.dirname(TESTS_DIR)
 SKILL_DIR = os.path.dirname(SCRIPTS_DIR)
 INSTALL = os.path.join(SKILL_DIR, "install.sh")
 
+sys.path.insert(0, SCRIPTS_DIR)
+
+from lib import judge as judge_lib  # noqa: E402
+
 MODEL = "test/install-model"
 SECRET = "sk-or-v1-this-value-must-never-be-printed"
 
@@ -153,6 +157,76 @@ class HappyPathTest(InstallTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("not touched", result.stdout)
         self.assertEqual(_read(self.registry), before)
+
+
+class HarnessJudgeInstallTest(InstallTestCase):
+    """Step 3: the harness judge, into the harness agents directory.
+
+    `$ENSEMBLE_REVIEW_HARNESS_AGENTS_DIR` points at a temp directory here, so nothing is written
+    anywhere near the real `~/.claude/agents` — and its presence at that path is also the signal
+    `judge_lib.harness_present()` reads, so these tests are the only place in the suite that
+    installs one.
+    """
+
+    def setUp(self):
+        super(HarnessJudgeInstallTest, self).setUp()
+        self.agents_dir = os.path.join(self.root, "harness-agents")
+        self.judge = os.path.join(self.agents_dir, "ensemble-judge.md")
+
+    def install(self, args=None, env=None, path_prefix=None):
+        environment = {"ENSEMBLE_REVIEW_HARNESS_AGENTS_DIR": self.agents_dir}
+        environment.update(env or {})
+        return super(HarnessJudgeInstallTest, self).install(args, environment, path_prefix)
+
+    def test_it_installs_the_judge_agent_under_the_name_the_spawn_instruction_uses(self):
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("judge:", result.stdout)
+        self.assertTrue(os.path.isfile(self.judge), "the harness judge was not installed")
+        self.assertEqual(_read(self.judge), _read(os.path.join(SKILL_DIR, "agents", "judge.md")),
+                         "the installed agent must be the shipped one, byte for byte")
+
+    def test_installing_it_twice_moves_nothing(self):
+        self.install()
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("nothing moved", result.stdout)
+
+    def test_check_only_reports_it_and_installs_nothing(self):
+        result = self.install(args=["--check-only"], env={"ENSEMBLE_REVIEW_CATALOGUE_URL": ""})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("NOT installed", result.stdout)
+        self.assertFalse(os.path.exists(self.judge), "--check-only wrote something")
+
+    def test_dry_run_installs_nothing_either(self):
+        """A dry run that installed an agent is the surprise the flag exists to prevent."""
+        result = self.install(args=["--dry-run"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("nothing written", result.stdout)
+        self.assertFalse(os.path.exists(self.judge), "--dry-run wrote the agent")
+
+    def test_dry_run_reports_an_installed_judge_without_touching_it(self):
+        self.install()
+        before = _read(self.judge)
+        result = self.install(args=["--dry-run"])
+        self.assertIn("not touched", result.stdout)
+        self.assertEqual(_read(self.judge), before)
+
+    def test_check_only_says_so_once_it_is_installed(self):
+        self.install()
+        result = self.install(args=["--check-only"], env={"ENSEMBLE_REVIEW_CATALOGUE_URL": ""})
+        self.assertIn("installed at", result.stdout)
+        self.assertNotIn("NOT installed", result.stdout)
+
+    def test_an_installed_judge_is_what_makes_a_harness_present(self):
+        """The install and the detection name one path between them, and this is that assertion."""
+        self.assertFalse(judge_lib.harness_present(self.agents_dir))
+        self.install()
+        self.assertTrue(judge_lib.harness_present(self.agents_dir))
+        self.assertEqual(
+            judge_lib.resolve_reconciler(None, None, autonomous=True,
+                                         harness=judge_lib.harness_present(self.agents_dir)),
+            judge_lib.HARNESS_JUDGE_AUTHOR)
 
 
 class FailureTest(InstallTestCase):

@@ -82,10 +82,22 @@ Reachable only with `--skip-claude` on a panel that has explicitly seated a `cla
 - **Model is pinned at spawn.** The host passes an explicit model override, never `subagent_type: "fork"`, never the parent session's model. The manifest records the model the host says it spawned.
 - **Effort is not guaranteed.** There is no per-spawn effort parameter, and these personas are deliberately never installed as harness agent files. The manifest records `effort: null` for harness seats, and a panel mixing legs is recorded as effort-heterogeneous.
 - **Inputs are materialized, not live.** Harness seats are pointed at the pinned copies in `inputs/`, never at working-tree paths. Otherwise a mid-run edit gives two seats different documents and the reconciliation clusters quotes that never coexisted.
-- **Writes are staged.** The seat writes into a seat-private staging directory **outside** the run directory; `render_harness_report.py` validates it by the same code path and moves it in. No seat is given a path into a directory holding a sibling's report.
+- **Writes are staged.** The seat writes into a seat-private staging directory **outside** the run directory — `<run-dir>/../.ensemble-staging/<run-id>/<reviewer-id>/`, which `lib/runs.py`'s `staging_dir()` computes — and `render_harness_report.py` validates it by the same code path the OpenRouter leg is held to. No seat is given a path into a directory holding a sibling's report. **The move into the run directory is the operator's `mv`**, not the script's: nothing in the package moves a staged report, and `SKILL.md` step 5 says so.
 - **Blinding is prompt-enforced, not sandboxed**, as above.
 
-Each brief must carry the persona body verbatim plus the finding schema, the artifact and references by path with the instruction to read only those, the instruction to write its report to one named path and nothing else, the instruction to return a digest under 2000 characters, and the instruction not to look for or ask about any other reviewer's output.
+Each brief must carry the persona body verbatim plus the finding schema, the artifact and references by path with the instruction to read only those, the instruction to write its report to its staging path and nothing else, the instruction to return a digest under 2000 characters, and the instruction not to look for or ask about any other reviewer's output.
+
+## The judge leg
+
+One harness agent, and it is not a reviewer. `agents/judge.md` installs as `ensemble-judge`, pinned to frontier Claude at `high` effort with read-only tools, and it supplies the **judgment patch** on an unattended run where it is installed. It is the same job the `synthesis` persona does under the same rubric — its body references `agents/synthesis.md` rather than restating it — and the differences are all about tools: the persona is handed everything in one message and this goes and reads it, from the package, the run directory and the pinned `inputs/` copies, and nothing else.
+
+It follows the harness leg's rules, not the OpenRouter leg's. Its model is pinned in the agent definition rather than at spawn. It writes to a seat-private staging path, `<run-dir>/../.ensemble-staging/<run-id>/ensemble-judge/judgment.json`, and never into the run directory. Its blinding is prompt-enforced. It costs the run nothing, so `manifest.judge` records it with `leg: harness` and a null cost, and `cost_usd_total` does not move.
+
+A script cannot spawn it, so the judge stage stops — and it writes the question first. `reconcile.py`'s no-patch pass computes the provisional clusters and writes `judgment-request.json`, then prints the spawn instruction over it: the agent, the run directory, the package path, **the worksheet**, the staging path. `run_panel.py` reaches that by running the pass rather than by reproducing either half of it, so there is one clustering and one instruction. The order is load-bearing: an agent pointed at a run directory with no worksheet in it finds no question and halts, and nothing reports that but the wasted turn. Zero reporting seats stops above both judges, exit 2.
+
+The patch that comes back is held to `author: "harness-judge"` and to the same mechanical floor the persona is held to.
+
+**Its `Write` tool is scoped by instruction, not by the harness.** The tool list is an allowlist and cannot express "this one path", so the agent body carries the rule — exactly one file, at exactly the staging path it was given — and nothing enforces it mechanically. That is the same prompt-enforced blinding the rest of this leg runs on, and the same reason the leg is opt-in.
 
 ## The connector seam
 
@@ -97,6 +109,6 @@ The key is resolved by `dispatch.py` itself: `skills/lastpass/scripts/lp get glo
 
 ## Exit codes
 
-`0` every expected seat validated · `1` usage or composition error · `2` terminal infrastructure failure — a provider auth failure, or zero reporting seats · `3` the run is under-seated · `4` an autonomous budget refusal.
+`0` every expected seat validated · `1` usage or composition error, an unrecognized panel-template key included · `2` terminal infrastructure failure — a provider auth failure, or zero reporting seats · `3` the run is under-seated, or a judgment patch is required, did not validate, or does not fit the judge model's context window · `4` a budget refusal: an autonomous run over its projection, or a direct judgment call nothing has priced.
 
 `dispatch.py` has one more, **`5`, and it is internal**: it is how a child tells `run_panel.py` that the provider refused this model rather than that the reviewer wrote a bad report, which is what the re-seat-once path turns on. The parent consumes it and never re-emits it.

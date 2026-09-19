@@ -26,9 +26,10 @@ instead, before any of the patch is applied:
 - `test_the_matcher_does_not_join_these` pins two near misses that must stay apart, at 39 shared
   characters each. Without this half only a *raised* threshold would fail.
 
-Together they bracket `QUOTE_OVERLAP_MIN` to [40, 79] — this corpus's overlap lengths jump straight
-from 39 to 75, so no fixture here distinguishes 60 from 45 — and they fail on a disabled
-`location_match`, which a product-only test would not catch at all.
+Together they bracket `QUOTE_OVERLAP_MIN` to **[40, 75]** — measured by sweeping the threshold over
+this corpus, not reasoned about: at 39 the two near misses join, and at 76 `P-4` loses
+`adversarial-glm` F12 and the pinned nine change. No fixture here distinguishes 60 from 45. They
+also fail on a disabled `location_match`, which a product-only test would not catch at all.
 
     python3 -m unittest discover -s scripts/tests     # from the skill root
     python3 scripts/tests/test_replay.py
@@ -154,10 +155,15 @@ MECHANICAL_JOINS = {
 MECHANICALLY_SPURIOUS = ("P-1", "P-4", "P-9", "P-28")
 
 # The other half of the pin: pairs the matcher must NOT join. Without these the threshold is pinned
-# only from above. This corpus's longest-common-substring lengths jump straight from 39 to 75, so
-# every value from 40 through 79 produces the same nine clusters; the two tests together bracket the
-# threshold to that range rather than pinning 60 exactly. Both pairs sit at 39, so a threshold of 39
-# or lower joins them and fails here, and 80 or higher breaks the positive pin.
+# only from above. Every value from **40 through 75** produces the same nine clusters with the same
+# memberships, so the two tests together bracket the threshold to that range rather than pinning 60
+# exactly. Both pairs below sit at 39, so a threshold of 39 or lower joins them and fails here; at
+# 76 the weakest quote link in `P-4` gives way and it drops `adversarial-glm` F12, and at 81 `P-9`
+# (80) breaks too — so either end of the bracket fails the positive pin above.
+#
+# `P-1`'s two findings overlap by 73 and that length is **not** in the sweep, because `P-1` is the
+# corpus's one `location` join: the quote threshold never decides it, and a sweep of this threshold
+# alone cannot see it. That is why the bracket's upper end is 75 rather than 73.
 MUST_NOT_JOIN = (
     ((ADVERSARIAL, "F4"), (FIDELITY, "F3")),
     ((ADVERSARIAL, "F4"), (BUILDABILITY, "F1")),

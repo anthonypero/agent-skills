@@ -158,6 +158,13 @@ def project_synthesis(seats, registry, prompt_tokens, model=None, seat=None):
         "model": model,
         "prompt_tokens": tokens,
         "prior_tokens": SYNTHESIS_OUTPUT_PRIOR,
+        # The judge measured against its own window, the way every seat row is. The seat pre-flight
+        # has always done this and the judgment call was never in it (run 5, SF-11) — and the judge
+        # is the one prompt in the run that carries every report *and* the artifact *and* every
+        # reference, so it is the likeliest to overflow. This is the projection's warning; the
+        # measurement against the real composed prompt is `reconcile.py`'s, at the judge stage.
+        "context_limit": entry.get("context_limit"),
+        "context_overflow": _overflows(tokens, entry.get("context_limit")),
         "resolved": not guessed,
         "family": seat.get("family"),
         "tier": seat.get("tier"),
@@ -193,10 +200,14 @@ def project(seats, registry, budget_usd, now=None, with_synthesis=True, synthesi
             synthesis_seat=None):
     """The whole run's projection. `seats` are dicts with reviewer_id, model and prompt_tokens.
 
-    `with_synthesis` is False for a run whose judgment patch comes from the host in-session: that run
-    makes no synthesis call, so charging one against its budget gate is charging for a call that will
-    not happen. `synthesis_model` and `synthesis_seat` are the judge's own resolved model and the record that
-    chose it — see `project_synthesis`.
+    `with_synthesis` is False for a run that will make **no paid judgment call** — one judged by
+    the host in-session, and one judged by the harness agent on the subscription. Charging either
+    against the budget gate is charging for a call that will not happen. Which of the two it is is
+    a fact about the run and is in the manifest's `reconciler`; this module is told only that the
+    call is not coming, and it used to say "the host" in the projection of every harness-judge run,
+    which was a false statement in a record the reconciliation quotes. `synthesis_model` and
+    `synthesis_seat` are the judge's own resolved model and the record that chose it — see
+    `project_synthesis`.
     """
     rows = []
     for seat in seats:
@@ -214,7 +225,8 @@ def project(seats, registry, budget_usd, now=None, with_synthesis=True, synthesi
     else:
         synthesis_usd, synthesis_detail = None, {
             "model": None,
-            "note": "this run's judgment patch comes from the host, so no synthesis call is made",
+            "note": "this run makes no paid judgment call: its judgment comes from the host "
+                    "in-session or from the harness judge on the subscription",
         }
 
     total = sum(known) + (synthesis_usd or 0.0)
@@ -233,6 +245,10 @@ def project(seats, registry, budget_usd, now=None, with_synthesis=True, synthesi
         "synthesis_allowance_usd": synthesis_usd,
         "synthesis": synthesis_detail,
         "context_overflows": [row["reviewer_id"] for row in rows if row["context_overflow"]],
+        # Kept out of `context_overflows`, which is a list of **seats** the run drops before
+        # dispatch. The judge is not a seat and is not dropped: an overflowing judge is a
+        # judge-stage failure that the run still reaches, having paid for every seat first.
+        "judge_context_overflow": bool(synthesis_detail.get("context_overflow")),
     }
 
 
@@ -279,6 +295,16 @@ def render(projection):
     if projection["context_overflows"]:
         lines.append("  CONTEXT OVERFLOW: {0} — these seats are not dispatched and the run is under-seated".format(
             ", ".join(projection["context_overflows"])))
+    if projection.get("judge_context_overflow"):
+        detail = projection["synthesis"]
+        lines.append(
+            "  CONTEXT OVERFLOW on the judgment call: about {0:,} projected prompt tokens against "
+            "{1}'s limit of {2:,}.".format(
+                detail.get("prompt_tokens") or 0, detail.get("model") or "?",
+                int(detail.get("context_limit") or 0)))
+        lines.append(
+            "  The seats still run; the judge stage will refuse and write nothing. Pin a roomier "
+            "judge with --synthesis-model, or reconcile interactively.")
     return "\n".join(lines)
 
 

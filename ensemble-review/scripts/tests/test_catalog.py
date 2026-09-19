@@ -21,6 +21,13 @@ Three claims:
   the severity calibration, the all-`judgment-call` flag rule, and the `rulings` prohibition. The
   nine-lens assertion is deliberately **not** loosened to let it in: `agents/` holds exactly the
   nine lenses plus exactly this one non-lens persona.
+
+  **`judge.md` is neither**, and it is checked by its own class. It is a **harness agent
+  definition** rather than a persona: it is never dispatched through a connector, so it has no tier
+  in its `model` field and no empty `tools` list — it carries a concrete frontier Claude model id,
+  an effort, and the read tools it needs to go and get what `synthesis` is handed. What it is held
+  to is the pair of rules `reconcile.py` enforces against its patch, byte-identical to
+  `synthesis`'s, and the reference to `synthesis` in place of a second copy of the rubric.
 - **Every panel template is the same shape**, and names only lenses that exist. A template naming a
   missing lens fails at Resolve with a `PathError`, after the run directory is claimed and long
   after the operator has stopped watching.
@@ -42,7 +49,9 @@ sys.path.insert(0, TESTS_DIR)
 sys.path.insert(0, SCRIPTS_DIR)
 
 import run_panel  # noqa: E402
+from lib import judge as judge_lib  # noqa: E402
 from lib import paths as paths_lib  # noqa: E402
+from lib import reconcile_core as core  # noqa: E402
 from lib import report as report_lib  # noqa: E402
 from lib import seating as seating_lib  # noqa: E402
 
@@ -73,6 +82,12 @@ EXPECTED_LENSES = (
 # never seated on a panel, so it is not in `EXPECTED_LENSES` and no template may name it as a lens.
 NON_LENS_PERSONAS = ("synthesis",)
 
+# The one file in `agents/` that is not a persona at all. `judge.md` is a harness agent definition:
+# `install.sh` copies it into the harness agents directory, the orchestrating session spawns it by
+# name, and nothing here ever composes a prompt from it — so the persona shape rules do not apply
+# and it is excluded from `persona_files()` rather than loosening them.
+HARNESS_AGENTS = ("judge.md",)
+
 # Per persona, the `context` its frontmatter must name, in order. A lens is shown the output
 # contract; `synthesis` is shown the algorithm it is supplying half of, and then the same contract,
 # because it is arbitrating findings written against it.
@@ -86,9 +101,14 @@ DEFERRED_PANELS = ("code-review",)
 TIERS = ("frontier", "standard", "fast")
 
 
+def agent_files():
+    """Every markdown file in `agents/`: the personas and the harness agent definitions."""
+    return sorted(name for name in os.listdir(AGENTS_DIR) if name.endswith(".md"))
+
+
 def persona_files():
     """Every persona file in `agents/` — the nine lenses and the one non-lens."""
-    return sorted(name for name in os.listdir(AGENTS_DIR) if name.endswith(".md"))
+    return sorted(name for name in agent_files() if name not in HARNESS_AGENTS)
 
 
 def lens_files():
@@ -180,6 +200,10 @@ class PersonaFileTest(unittest.TestCase):
                    + ["{0}.md".format(name) for name in NON_LENS_PERSONAS]),
             "a file in agents/ that is neither a catalog lens nor a named non-lens persona")
 
+    def test_the_agents_directory_holds_exactly_the_harness_agents_the_skill_installs(self):
+        """The other half: a harness agent nobody installs is a file the package ships for nothing."""
+        self.assertEqual(sorted(set(agent_files()) - set(persona_files())), sorted(HARNESS_AGENTS))
+
     def test_no_shipped_template_seats_the_non_lens_persona_as_a_lens(self):
         """`synthesis` supplies the judgment; a panel that seated it would review with the judge."""
         for name in panel_files():
@@ -258,6 +282,86 @@ class PersonaFrontmatterTierTest(unittest.TestCase):
                     {"name": "bare", "seats": [{"lens": lens, "family": "openai"}]},
                     entry, frontmatter_fn=frontmatter_fn)
                 self.assertEqual(seats[0]["tier_source"], "persona")
+
+
+class HarnessJudgeAgentTest(unittest.TestCase):
+    """`agents/judge.md` — a harness agent definition, held to what makes its judgment safe."""
+
+    def setUp(self):
+        self.path = os.path.join(AGENTS_DIR, "judge.md")
+        self.frontmatter, self.body = report_lib.parse_agent_file(self.path)
+        self.rubric = self.body.split("\n# Rubric\n", 1)[1].split("\n# Output\n", 1)[0]
+
+    def test_it_is_pinned_to_a_concrete_frontier_claude_model_at_high_effort(self):
+        """Owner ruling, 2026-09-19. A tier name here would be meaningless: nothing seats this."""
+        self.assertEqual(self.frontmatter.get("model"), "claude-fable-5-1")
+        self.assertEqual(self.frontmatter.get("effort"), "high")
+
+    def test_its_name_is_the_name_install_sh_installs_it_under(self):
+        """The file is `judge.md` in the package and `ensemble-judge` in the harness, and the
+        frontmatter is what the orchestrating session spawns by. The two must agree or the printed
+        spawn instruction names an agent that is not there."""
+        self.assertEqual(self.frontmatter.get("name"), judge_lib.HARNESS_JUDGE_AGENT)
+        self.assertEqual(os.path.basename(self.path), judge_lib.HARNESS_JUDGE_AGENT_FILE)
+
+    def tools(self):
+        declared = self.frontmatter.get("tools")
+        if isinstance(declared, list):
+            return [str(tool).strip() for tool in declared]
+        return [tool.strip() for tool in str(declared).split(",") if tool.strip()]
+
+    def test_it_can_read_a_run_directory_and_write_exactly_one_file(self):
+        """`Write` is not optional: the agent's whole output is a file, because an inter-agent
+        message truncates near 5,500 characters and a judgment patch does not fit in one. The tool
+        list is an allowlist, so an agent without it produces nothing and the stage deadlocks."""
+        tools = self.tools()
+        self.assertIn("Read", tools, "it cannot read the reports without this")
+        self.assertIn("Write", tools, "it cannot produce a judgment patch at all without this")
+
+    def test_it_gets_no_tool_that_could_edit_the_artifact_it_is_judging(self):
+        """`Write` creates the one file it owns. `Edit`, a shell or a task tool would let the judge
+        change the document under review, or a report, or the reconciliation — and the scoping of
+        `Write` to one path is prompt-enforced, so the tool list is the only part that is not."""
+        for tool in self.tools():
+            with self.subTest(tool=tool):
+                self.assertIn(tool, ("Read", "Grep", "Glob", "Write"))
+
+    def test_the_one_path_it_may_write_is_stated_in_the_body(self):
+        """The tool list cannot express "this one path", so the body has to, in terms a reader can
+        check against `runs.staging_dir()`."""
+        self.assertIn("one `Write` call", self.body)
+        self.assertIn("exactly one file, at exactly the staging path you were given", self.body)
+
+    def test_it_carries_the_four_body_sections_in_order(self):
+        text = "\n" + self.body
+        positions = []
+        for section in BODY_SECTIONS:
+            heading = "\n" + section + "\n"
+            self.assertEqual(text.count(heading), 1, "expected exactly one {0} section".format(section))
+            positions.append(text.index(heading))
+        self.assertEqual(positions, sorted(positions), "the four sections are out of order")
+
+    def test_it_carries_the_two_rules_reconcile_py_enforces_against_it(self):
+        """Byte-identical to `synthesis`'s, because one validator enforces both against one floor."""
+        self.assertIn(SYNTHESIS_FLAG_RULE, self.rubric)
+        self.assertIn(SYNTHESIS_RULINGS_RULE, self.rubric)
+
+    def test_it_points_at_the_synthesis_rubric_rather_than_restating_it(self):
+        """One rubric for the judgment. Two copies of it would drift, and the drift would be
+        invisible: nothing compares the judgment a harness agent makes with the judgment the
+        persona would have made on the same clusters."""
+        self.assertIn("agents/synthesis.md", self.body)
+        self.assertIn("is not repeated here", self.body)
+
+    def test_its_author_is_the_one_reconcile_py_holds_it_to(self):
+        self.assertIn('"{0}"'.format(judge_lib.HARNESS_JUDGE_AUTHOR), self.body)
+        self.assertIn(judge_lib.HARNESS_JUDGE_AUTHOR, core.AUTHORS)
+        self.assertIn(judge_lib.HARNESS_JUDGE_AUTHOR, core.UNATTENDED_AUTHORS)
+
+    def test_it_writes_to_staging_and_never_into_the_run_directory(self):
+        """The harness-leg rule: no seat is *given* a path into a directory holding others' work."""
+        self.assertIn("staging path", self.body)
+        self.assertIn("Do not write into", self.body)
 
 
 # --- panel templates ---------------------------------------------------------------------------------
@@ -397,6 +501,40 @@ class PanelTemplateShapeTest(unittest.TestCase):
                     with self.subTest(panel=name, seat=seat.get("lens"), tier=tier):
                         self.assertTrue(entry["tiers"][tier].get(seat["family"]),
                                         "no cell for `{0}` at {1}".format(seat["family"], tier))
+
+
+class RegistryFamilyTest(unittest.TestCase):
+    """`models.json` says which family each model belongs to, and it must agree with the config.
+
+    The field is what relabels a `--model`-pinned seat, and the family is what every agreement
+    count in a reconciliation is computed over — so a registry that disagreed with the tier map
+    would produce cross-family clusters that are nothing of the kind, silently.
+    """
+
+    def setUp(self):
+        with open(os.path.join(SKILL_DIR, "templates", "models.json"), "r", encoding="utf-8") as handle:
+            self.registry = json.load(handle)["models"]
+        self.config = shipped_config()
+
+    def test_every_shipped_model_names_its_family(self):
+        for model, entry in sorted(self.registry.items()):
+            with self.subTest(model=model):
+                self.assertTrue(entry.get("family"), "{0} carries no `family`".format(model))
+
+    def test_the_registrys_family_is_the_family_the_config_seats_it_as(self):
+        for tier, cells in self.config["tiers"].items():
+            for family, model in cells.items():
+                with self.subTest(tier=tier, family=family):
+                    entry = self.registry.get(model) or {}
+                    self.assertEqual(entry.get("family"), family,
+                                     "{0} is seated as {1!r} at {2} and the registry calls it "
+                                     "{3!r}".format(model, family, tier, entry.get("family")))
+
+    def test_the_lookup_falls_back_to_the_config_when_the_registry_is_silent(self):
+        """A workspace registry written before the field existed still labels a pinned seat."""
+        model = self.config["tiers"]["frontier"]["glm"]
+        family, source = seating_lib.family_for_model(model, self.config, registry=None)
+        self.assertEqual((family, source), ("glm", "config"))
 
 
 class PanelTemplateResolutionTest(unittest.TestCase):

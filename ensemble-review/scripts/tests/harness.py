@@ -19,6 +19,8 @@ FAKE_BACKEND = os.path.join(TESTS_DIR, "fake_backend.py")
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
+from lib import judge as judge_lib  # noqa: E402
+
 SLOW_MODEL = "test/slow-model"
 FAST_MODEL = "test/fast-model"
 THIRD_MODEL = "test/third-model"
@@ -115,12 +117,34 @@ class Workspace(object):
         environment["FAKE_BACKEND_PLAN"] = self.plan_path
         environment["FAKE_BACKEND_LOG"] = self.log_path
         environment["ENSEMBLE_REVIEW_TEST_KEY"] = "not-a-real-key"
+        # **Whether a harness is present is a property of the machine, and no test may read the
+        # real one.** `judge_lib.harness_present()` asks whether `ensemble-judge` is installed in
+        # the harness agents directory, and that decides the default reconciler for every
+        # unattended run. Pointed at an empty directory under this workspace, the answer is a firm
+        # "no" whether or not the developer running the suite has ever run `install.sh`. A test
+        # that wants the other answer calls `install_harness_judge()`.
+        environment[judge_lib.HARNESS_AGENTS_DIR_ENV] = self.agents_dir()
         environment.update(extra or {})
         return environment
 
     def apply_env(self):
         """Set the fake connector's environment on this process, for an in-process entry point."""
-        os.environ.update({k: v for k, v in self.env().items() if k.startswith("FAKE_BACKEND_") or k == "ENSEMBLE_REVIEW_TEST_KEY"})
+        keys = ("FAKE_BACKEND_", "ENSEMBLE_REVIEW_TEST_KEY", judge_lib.HARNESS_AGENTS_DIR_ENV)
+        os.environ.update({k: v for k, v in self.env().items() if k.startswith(keys)})
+
+    def agents_dir(self):
+        """This workspace's stand-in for `~/.claude/agents`. Not created until something needs it."""
+        return os.path.join(self.root, "harness-agents")
+
+    def install_harness_judge(self):
+        """Put the shipped judge agent where `judge_lib.harness_present()` looks. Returns the path."""
+        directory = self.agents_dir()
+        if not os.path.isdir(directory):
+            os.makedirs(directory)
+        destination = os.path.join(directory, judge_lib.HARNESS_JUDGE_AGENT + ".md")
+        shutil.copyfile(os.path.join(SKILL_DIR, "agents", judge_lib.HARNESS_JUDGE_AGENT_FILE),
+                        destination)
+        return destination
 
     def calls(self, model=None):
         if not os.path.isfile(self.log_path):

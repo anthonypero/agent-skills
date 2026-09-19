@@ -864,9 +864,10 @@ class HostModeTest(JudgeStageTestCase):
         self.assertIn("a judgment patch is required", err)
 
     def test_an_explicit_reconciler_flag_overrides_what_the_run_recorded(self):
+        """`--approve-budget` because a host run priced no judgment call — see `BudgetGateTest`."""
         self.run_panel(extra=["--reconciler", "host"])
         code, _out, err = self.judge({harness.SLOW_MODEL: [{"body": patch()}]},
-                                     extra=["--reconciler", "synthesis"])
+                                     extra=["--reconciler", "synthesis", "--approve-budget"])
         self.assertEqual(code, 0, err)
         self.assertTrue(self.wrote("reconciliation.json"))
 
@@ -1041,6 +1042,177 @@ class PrintedCommandTest(PipelineTest):
         code, _out, _err = self.panel(extra=["--autonomous"])
         self.assertEqual(code, 3)
         self.assertFalse(os.path.isfile(os.path.join(self.run_dir, "reconciliation.json")))
+
+
+class BudgetGateTest(JudgeStageTestCase):
+    """A direct judgment call is a paid call with nothing in front of it, until now.
+
+    The cost pre-flight lives in `run_panel.py`, so a run that reaches the judge stage through the
+    panel is projected and gated and one that reaches it by invoking `reconcile.py` directly is
+    neither. The judgment call is the dearest single call most runs make — 45% of run 4's entire
+    spend — so the hole was worth closing, and the gate is the simplest correct shape: this run's
+    own manifest must already carry a projection that priced one.
+    """
+
+    def test_a_direct_call_on_a_run_that_priced_none_is_refused_before_it_is_made(self):
+        self.run_panel(extra=["--reconciler", "host"])
+        self.assertIsNone(self.manifest()["projection"]["synthesis_allowance_usd"])
+
+        code, _out, err = self.judge({harness.SLOW_MODEL: [{"body": patch()}]},
+                                     extra=["--reconciler", "synthesis"])
+        self.assertEqual(code, reconcile.EXIT_BUDGET)
+        self.assertIn("nothing has priced it", err)
+        self.assertEqual(self.workspace.calls(), [], "refused before the paid call, not after")
+        self.assertFalse(self.wrote("judgment.json"))
+        self.assertFalse(self.wrote("reconciliation.json"))
+
+    def test_approve_budget_is_the_operator_saying_they_have_weighed_it(self):
+        self.run_panel(extra=["--reconciler", "host"])
+        code, _out, err = self.judge({harness.SLOW_MODEL: [{"body": patch()}]},
+                                     extra=["--reconciler", "synthesis", "--approve-budget"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.workspace.calls()), 1)
+
+    def test_a_run_the_panel_already_priced_needs_no_flag(self):
+        """The ordinary unattended path must not have gained a step."""
+        self.run_panel()
+        self.assertIsNotNone(self.manifest()["projection"]["synthesis_allowance_usd"])
+        code, _out, err = self.judge({harness.SLOW_MODEL: [{"body": patch()}]})
+        self.assertEqual(code, 0, err)
+
+    def test_a_host_run_never_trips_it_because_it_makes_no_call(self):
+        """The gate is on the call, not on reconciling: a host writes the patch itself."""
+        self.run_panel(extra=["--reconciler", "host"])
+        path = os.path.join(self.run_dir, "judgment.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(patch(author="host"), handle)
+        code, _out, err = self.judge({})
+        self.assertEqual(code, 0, err)
+
+
+class JudgePromptContextLimitTest(JudgeStageTestCase):
+    """The judgment prompt measured against the judge model's window, which nothing did (SF-11).
+
+    The per-report cap bounds one seat's share of the prompt and not the composed whole: four
+    capped reports plus the artifact, every reference and the provisional clusters can overflow
+    together. The seat pre-flight has measured every seat against its own window since stage 2a and
+    the judgment call was in no such check at all.
+    """
+
+    def _tighten_the_judges_window(self, limit=10):
+        """Shrink the judge model's context limit **after** the panel has run.
+
+        Doing it before would drop the `consistency-kimi` seat at Project as a context overflow,
+        which is a different mechanism with a different outcome. What is under test here is the
+        judge stage's own check, so the window is tightened between the two stages.
+        """
+        with open(self.workspace.registry, "r", encoding="utf-8") as handle:
+            registry = json.load(handle)
+        registry["models"][harness.SLOW_MODEL]["context_limit"] = limit
+        with open(self.workspace.registry, "w", encoding="utf-8") as handle:
+            json.dump(registry, handle)
+
+    def test_an_overflowing_judgment_prompt_writes_nothing_and_exits_three(self):
+        self.run_panel()
+        self._tighten_the_judges_window()
+        code, _out, err = self.judge({harness.SLOW_MODEL: [{"body": patch()}]})
+        self.assertEqual(code, reconcile.EXIT_PATCH)
+        self.assertIn("context limit", err)
+        self.assertEqual(self.workspace.calls(), [], "measured before the call, not after paying")
+        self.assertFalse(self.wrote("judgment.json"))
+        self.assertFalse(self.wrote("reconciliation.json"))
+
+    def test_the_reason_lands_on_the_manifests_judge_record(self):
+        self.run_panel()
+        self._tighten_the_judges_window()
+        self.judge({harness.SLOW_MODEL: [{"body": patch()}]})
+        record = self.manifest()["judge"]
+        self.assertEqual(record["status"], "refused")
+        self.assertIn("context limit", " ".join(record["errors"]))
+        self.assertIsNone(record["cost_usd"], "nothing was spent, so nothing is recorded as spent")
+
+    def test_the_message_says_what_to_do_about_it(self):
+        self.run_panel()
+        self._tighten_the_judges_window()
+        _code, _out, err = self.judge({harness.SLOW_MODEL: [{"body": patch()}]})
+        self.assertIn("--synthesis-model", err)
+        self.assertIn("--reconciler host", err)
+
+    def test_a_prompt_that_fits_records_its_size(self):
+        self.run_panel()
+        code, _out, err = self.judge({harness.SLOW_MODEL: [{"body": patch()}]})
+        self.assertEqual(code, 0, err)
+        self.assertGreater(self.manifest()["judge"]["prompt_tokens"], 0)
+
+    def test_a_model_with_no_recorded_limit_never_refuses(self):
+        """Unknown is not the same as zero: a registry that has not learned a window must not gate."""
+        self.run_panel()
+        with open(self.workspace.registry, "r", encoding="utf-8") as handle:
+            registry = json.load(handle)
+        registry["models"][harness.SLOW_MODEL]["context_limit"] = None
+        with open(self.workspace.registry, "w", encoding="utf-8") as handle:
+            json.dump(registry, handle)
+        code, _out, err = self.judge({harness.SLOW_MODEL: [{"body": patch()}]})
+        self.assertEqual(code, 0, err)
+        self.assertGreater(self.manifest()["judge"]["prompt_tokens"], 0,
+                           "the size is worth recording even when the window is unknown")
+
+
+class ReportElisionTest(JudgeStageTestCase):
+    """The per-report cap: head and tail with the middle marked, and recorded on `manifest.judge`.
+
+    It was a bare head slice with no marker and nothing in the manifest, while the repair quote at
+    60,000 characters has elided the middle and noted it since stage 2b. The two are the same
+    mechanism and now behave the same way: a judge that arbitrated three quarters of a report is a
+    fact about the run's judgment, and it used to be visible nowhere at all.
+    """
+
+    def setUp(self):
+        super(ReportElisionTest, self).setUp()
+        self.cap = judge_lib.REPORT_CHAR_CAP
+        judge_lib.REPORT_CHAR_CAP = 400
+        self.addCleanup(setattr, judge_lib, "REPORT_CHAR_CAP", self.cap)
+
+    def test_the_middle_is_elided_and_the_marker_says_how_much(self):
+        text, record = judge_lib.elide_report("x" * 1000, limit=400)
+        self.assertIn("600 characters elided from the middle", text)
+        self.assertTrue(text.startswith("x" * 280), "the head is kept")
+        self.assertTrue(text.endswith("x" * 120), "and so is the tail, which a head slice loses")
+        self.assertEqual(record["elided_chars"], 600)
+        self.assertEqual(record["chars"], 1000)
+
+    def test_a_report_under_the_cap_is_untouched(self):
+        text, record = judge_lib.elide_report("short", limit=400)
+        self.assertEqual(text, "short")
+        self.assertIsNone(record)
+
+    def test_the_prompt_carries_the_marker_and_the_caller_gets_the_record(self):
+        elisions = []
+        message = judge_lib.build_user_message(
+            run_id=RUN_ID, request={"clusters": []},
+            reports={"consistency-kimi": {"findings": ["y" * 5000]}},
+            artifact_text="a", artifact_label="a.md", artifact_revision="rev",
+            elisions=elisions)
+        self.assertIn("elided from the middle", message)
+        self.assertEqual([entry["reviewer_id"] for entry in elisions], ["consistency-kimi"])
+
+    def test_an_elision_is_recorded_on_the_manifests_judge_record(self):
+        self.run_panel()
+        code, _out, err = self.judge({harness.SLOW_MODEL: [{"body": patch()}]})
+        self.assertEqual(code, 0, err)
+        elisions = self.manifest()["judge"]["report_elisions"]
+        self.assertTrue(elisions, "a 400-character cap over two real reports elided nothing")
+        for entry in elisions:
+            with self.subTest(seat=entry["reviewer_id"]):
+                self.assertEqual(entry["cap"], 400)
+                self.assertGreater(entry["elided_chars"], 0)
+
+    def test_nothing_is_recorded_when_nothing_was_cut(self):
+        judge_lib.REPORT_CHAR_CAP = self.cap
+        self.run_panel()
+        code, _out, err = self.judge({harness.SLOW_MODEL: [{"body": patch()}]})
+        self.assertEqual(code, 0, err)
+        self.assertIsNone(self.manifest()["judge"]["report_elisions"])
 
 
 def _capture(entry_point, argv):

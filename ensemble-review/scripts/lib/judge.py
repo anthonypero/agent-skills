@@ -5,10 +5,19 @@ decisions can be tested without a call. `reconcile.py` owns the call itself, thr
 `prepare_call()` and `attempt_loop()`, and remains the only writer of both reconciliation files in
 either mode.
 
-**Who judges.** `reconciler` is `host`, `synthesis` or `default`, and `default` means host when a
-human is attached and `synthesis` when nobody is. "Nobody is attached" is the same test the budget
-gate already turns on — `--autonomous`, or stdin is not a tty — and it is here rather than in
+**Who judges.** `reconciler` is `host`, `synthesis`, `harness-judge` or `default`, and `default`
+means host when a human is attached and, when nobody is, the **harness judge** where one is
+installed and the `synthesis` persona where none is. "Nobody is attached" is the same test the
+budget gate already turns on — `--autonomous`, or stdin is not a tty — and it is here rather than in
 `run_panel.py` so the panel and the reconciler cannot disagree about whether this run has a human.
+
+**The harness judge** is `agents/judge.md`, installed by `install.sh` into the harness agents
+directory as `ensemble-judge`, pinned to frontier Claude at `high` effort. Owner ruling, 2026-09-19:
+the judgment call lands on a family no seat holds, which is the same-family correlation two
+adversarial seats found, and it costs the run nothing because it runs on the subscription. A script
+cannot spawn a harness agent, so `run_panel.py` prints the spawn instruction and stops at the judge
+stage; `reconcile.py` then ingests the patch the agent wrote, exactly as it ingests one a host
+wrote, and holds it to the same floor it holds `synthesis` to.
 
 **What `synthesis` is shown.** Steps 4 through 7 arbitrate severity, adjudicate false positives and
 check that quoted text is real, and none of that is possible against the reports alone. So the user
@@ -24,23 +33,59 @@ does. The same asymmetry governs dispositions: an all-`judgment-call` cluster is
 """
 
 import json
+import os
 import sys
 
 from . import report as report_lib
 
-RECONCILERS = ("host", "synthesis", "default")
+RECONCILERS = ("host", "synthesis", "harness-judge", "default")
 
 SYNTHESIS_PERSONA = "synthesis"
 SYNTHESIS_AUTHOR = "synthesis"
+
+# The harness judge: the shipped agent definition, the name it installs under, and the `author`
+# string its patch carries. The author is not a label — `reconcile_core` keys the mechanical floor
+# on it — so it is named once here and read everywhere else.
+HARNESS_JUDGE_AGENT_FILE = "judge.md"
+HARNESS_JUDGE_AGENT = "ensemble-judge"
+HARNESS_JUDGE_AUTHOR = "harness-judge"
+
+# Every author a judgment patch may claim, and the two that are held to the mechanical floor: no
+# `rulings`, and an all-`judgment-call` cluster is always `flag-for-human`. `host` is the one author
+# with an owner to answer to, which is the whole of the asymmetry.
+AUTHORS = ("host", SYNTHESIS_AUTHOR, HARNESS_JUDGE_AUTHOR)
+UNATTENDED_AUTHORS = (SYNTHESIS_AUTHOR, HARNESS_JUDGE_AUTHOR)
+
+# Where a harness keeps its agent definitions. The environment variable exists so the tests can
+# answer "is a harness present" from a directory they control rather than from the machine the
+# suite happens to run on — a test whose result depends on whether the developer has run
+# `install.sh` is not a test.
+HARNESS_AGENTS_DIR_ENV = "ENSEMBLE_REVIEW_HARNESS_AGENTS_DIR"
+DEFAULT_HARNESS_AGENTS_DIR = os.path.join("~", ".claude", "agents")
 
 # How much of one report is inlined. A report is the reviewer's whole argument and the persona is
 # arbitrating it, so the cap is high enough never to bite on a real report and low enough that one
 # pathological seat cannot push the prompt past every model's context limit on its own.
 REPORT_CHAR_CAP = 120000
 
+# How a capped report is cut: head and tail with the middle elided, the same shape
+# `report.quote_for_repair` gives the repair quote. A bare head slice drops the method notes and the
+# last findings without saying so, and the judge cannot arbitrate what it cannot see it is missing.
+REPORT_HEAD_FRACTION = 0.7
+
 
 class JudgeError(Exception):
     """The judgment call cannot be composed or seated. The caller turns this into exit 1."""
+
+
+class JudgePromptTooLong(JudgeError):
+    """The composed judgment prompt does not fit the judge model's context window.
+
+    A judge-stage failure, not a seat failure: nothing is written, the reason is recorded on
+    `manifest.judge`, and the caller exits 3. The per-report cap bounds one seat's share of the
+    prompt and not the composed whole — four capped reports plus the artifact, every reference and
+    the provisional clusters can still exceed the window, and until this existed nothing checked.
+    """
 
 
 # --- who judges -----------------------------------------------------------------------------------
@@ -61,19 +106,48 @@ def is_autonomous(flag=False, stream=None):
         return True
 
 
-def resolve_reconciler(requested=None, declared=None, autonomous=False):
+def harness_agents_dir():
+    """The directory a harness keeps its agent definitions in, expanded."""
+    return os.path.expanduser(os.environ.get(HARNESS_AGENTS_DIR_ENV) or DEFAULT_HARNESS_AGENTS_DIR)
+
+
+def harness_judge_path(agents_dir=None):
+    """Where the installed harness judge lives, whether or not it is there."""
+    return os.path.join(agents_dir or harness_agents_dir(), HARNESS_JUDGE_AGENT + ".md")
+
+
+def harness_present(agents_dir=None):
+    """Whether this machine has the harness judge installed.
+
+    The question "is a harness present" has no general answer from inside a Python process, and
+    guessing at one from environment variables a host may or may not set would make the default
+    reconciler depend on how the script was launched. What is checkable is narrower and is the
+    thing that actually matters: whether the agent the judge stage would ask for exists, which
+    `install.sh` is what puts there.
+    """
+    return os.path.isfile(harness_judge_path(agents_dir))
+
+
+def resolve_reconciler(requested=None, declared=None, autonomous=False, harness=False):
     """Who supplies the judgment patch, by the spec's order: CLI, then the run's, then `default`.
 
     `declared` is what the panel template said and the manifest recorded. `default` resolves here
-    and nowhere else: host when a human is attached, `synthesis` when nobody is.
+    and nowhere else: host when a human is attached, and when nobody is, the harness judge where
+    one is installed and the `synthesis` persona where none is (owner ruling, 2026-09-19).
+
+    `harness` is passed by the caller rather than probed here, so that a decision about the machine
+    is made once, at Resolve, and recorded in the manifest — `reconcile.py` reading the manifest
+    back must not re-derive it from a home directory that may since have changed.
     """
     for value in (requested, declared):
-        if value in ("host", "synthesis"):
+        if value in AUTHORS:
             return value
         if value is not None and value not in RECONCILERS:
             raise JudgeError(
                 "unknown reconciler {0!r}; it is one of {1}".format(value, ", ".join(RECONCILERS)))
-    return SYNTHESIS_AUTHOR if autonomous else "host"
+    if not autonomous:
+        return "host"
+    return HARNESS_JUDGE_AUTHOR if harness else SYNTHESIS_AUTHOR
 
 
 # --- where the judgment call is seated ---------------------------------------------------------
@@ -186,14 +260,43 @@ def _seat(family, tier, family_source, tier_source):
 
 # --- what the persona is shown -------------------------------------------------------------------
 
+def elide_report(text, limit=None):
+    """One report cut to the cap, head and tail, with the middle marked. Returns (text, record).
+
+    `limit` defaults to `REPORT_CHAR_CAP` and is read at call time rather than bound at import, so
+    the cap is one constant a test can move.
+
+    `record` is None when nothing was cut. It used to be a bare head slice with no marker at all,
+    which is the one thing a cap must not be: the judge would arbitrate a report whose last
+    findings and method notes had silently gone, with nothing in the prompt or the manifest saying
+    so. The repair quote at 60,000 characters has elided the middle and noted it since stage 2b;
+    this is the same behaviour at the judge's own cap.
+    """
+    limit = REPORT_CHAR_CAP if limit is None else limit
+    text = text or ""
+    if len(text) <= limit:
+        return text, None
+    head = int(limit * REPORT_HEAD_FRACTION)
+    tail = limit - head
+    dropped = len(text) - limit
+    marker = "\n…[{0} characters elided from the middle of this report]…\n".format(dropped)
+    record = {"chars": len(text), "cap": limit, "elided_chars": dropped,
+              "head_chars": head, "tail_chars": tail}
+    return text[:head] + marker + text[-tail:], record
+
+
 def build_user_message(run_id, request, reports, artifact_text, artifact_label, artifact_revision,
-                       references=None):
+                       references=None, elisions=None):
     """The synthesis persona's user message: references, artifact, reports, provisional clusters.
 
     Order is deliberate. The references come first because they are what a severity argued with a
     citation is argued against; the artifact next, because steps 4 to 7 check quoted text against
     it; the reports next, in full, because arbitration is over their reasoning and not over their
     headline severities; and the provisional clusters last, because they are the question.
+
+    `elisions` is an optional list the caller owns, the way `attempt_loop` takes `attempts`: any
+    report the per-report cap cut appends a record to it, and `reconcile.py` puts the list on
+    `manifest.judge`, so a reader can see that the judge did not read one seat's whole argument.
     """
     blocks = []
     blocks.append(
@@ -228,8 +331,15 @@ def build_user_message(run_id, request, reports, artifact_text, artifact_label, 
                   "already out of the clusters.".format(len(reports)))
     blocks.append("")
     for reviewer_id in sorted(reports):
+        body, elision = elide_report(_dump(reports[reviewer_id]))
+        if elision is not None and elisions is not None:
+            elisions.append(dict(elision, reviewer_id=reviewer_id))
         blocks.append("===== BEGIN REPORT: {0} =====".format(reviewer_id))
-        blocks.append(_dump(reports[reviewer_id])[:REPORT_CHAR_CAP])
+        blocks.append(body)
+        if elision is not None:
+            blocks.append("(This report was {0} characters and is capped at {1}; {2} were elided "
+                          "from the middle, as marked above.)".format(
+                              elision["chars"], elision["cap"], elision["elided_chars"]))
         blocks.append("===== END REPORT: {0} =====".format(reviewer_id))
         blocks.append("")
 
@@ -274,10 +384,126 @@ def build_repair_prompt(original_user_prompt, raw_output, errors):
     ])
 
 
+# --- does the composed prompt fit? -----------------------------------------------------------------
+
+def check_prompt_fits(system_prompt, user_prompt, context_limit, model, approx_tokens):
+    """Raise `JudgePromptTooLong` when the composed judgment prompt exceeds the model's window.
+
+    The seat pre-flight measures every seat's prompt against its model's `context_limit` and the
+    judgment call was never in that check (run 5, SF-11). The per-report cap is not the same thing:
+    it bounds one seat's share, and four capped reports plus the artifact, every reference and the
+    provisional clusters can still overflow together. Measured here, where the prompt actually
+    exists, rather than estimated from the seats' sizes.
+
+    `approx_tokens` is passed in — `lib/budget.py`'s four-characters-per-token approximation — so
+    this module stays free of the budget import and the projection and the check agree by
+    construction. An entry with no `context_limit` means the registry has not learned one, which is
+    not the same as a limit of zero: unknown never refuses, and the size is still measured and
+    returned, because `manifest.judge.prompt_tokens` is worth recording either way.
+    """
+    tokens = approx_tokens(len(system_prompt or "") + len(user_prompt or ""))
+    try:
+        limit = int(context_limit)
+    except (TypeError, ValueError):
+        return tokens
+    if limit <= 0 or tokens <= limit:
+        return tokens
+    raise JudgePromptTooLong(
+        "the composed judgment prompt is about {0:,} tokens against {1}'s context limit of "
+        "{2:,}.\n"
+        "  The per-report cap bounds one seat's share of the prompt and not the whole of it: the "
+        "artifact,\n"
+        "  every reference and the provisional clusters are in there too. Nothing was written and "
+        "no paid\n"
+        "  call was made. Seat the judge on a model with more room (--synthesis-model), or "
+        "reconcile\n"
+        "  interactively with --reconciler host.".format(tokens, model, limit))
+
+
+# --- the harness judge -------------------------------------------------------------------------
+
+def spawn_instruction(run_dir, staging_path, skill_dir, agent=HARNESS_JUDGE_AGENT,
+                      request_path=None):
+    """The exact instruction the orchestrating session needs to spawn the judge. Returns lines.
+
+    A script cannot spawn a harness agent, so this is where the judge stage stops on a run whose
+    reconciler is the harness judge. Everything the agent is told to read is named absolutely,
+    because the agent's own body says to read those paths and nothing else, and a relative path
+    resolved against a session's working directory is not the same promise.
+
+    **`request_path` is the worksheet, and it has to exist before this prints.** The provisional
+    clusters are what the agent answers: `reconcile.py`'s first pass computes them and writes
+    `judgment-request.json`, and the agent is told to stop rather than invent them if it is not
+    there. An instruction printed over a run directory that has no worksheet in it spawns an agent
+    that halts, which is the one failure this stage cannot report on its own — so both callers
+    print this only after that pass has run.
+    """
+    request_path = request_path or os.path.join(run_dir, "judgment-request.json")
+    return [
+        "Judge stage: this run's judgment comes from the harness judge, which a script cannot spawn.",
+        "The provisional clusters are computed and written; what is left is the judgment over them.",
+        "",
+        "  Spawn one subagent, and only one:",
+        "    agent:        {0}   (installed by install.sh; pinned to frontier Claude at high effort)".format(agent),
+        "    run dir:      {0}".format(run_dir),
+        "    package:      {0}".format(skill_dir),
+        "    worksheet:    {0}".format(request_path),
+        "    write to:     {0}".format(staging_path),
+        "",
+        "  Its brief is the paths above and nothing else: the agent definition already carries",
+        "  what to read, in what order, and what it may not do. It reads the worksheet's `P-n`",
+        "  clusters and every validated report, writes the judgment patch to the staging path —",
+        "  outside the run directory, private to it — and returns a digest.",
+        "",
+        "  Then ingest the patch, which is where the reconciliation is written:",
+    ]
+
+
+def harness_judge_record(status="ok", staging_path=None, judgment_path=None, errors=None,
+                         agent=HARNESS_JUDGE_AGENT, elisions=None):
+    """The seat-shaped record of a harness judgment, for `manifest.judge`.
+
+    The same shape `judge_record` writes for a paid call, with the money fields null because there
+    is no bill: the harness judge runs on the subscription. `cost_usd: null` is "no charge", which
+    is what `cost_usd_total` should read it as, rather than a zero that would look like a call that
+    was made and priced at nothing.
+    """
+    return {
+        "reviewer_id": agent,
+        "role": "judge",
+        "family": "claude",
+        "tier": None,
+        "tier_source": None,
+        "family_source": "harness-judge",
+        "model": None,
+        "connector": None,
+        "provider": "harness",
+        "leg": "harness",
+        "input_delivery": "materialized-paths",
+        "effort": None,
+        "max_tokens": None,
+        "status": status,
+        "errors": list(errors or []) or None,
+        "attempts": None,
+        "attempts_count": None,
+        "usage": None,
+        "reasoning_tokens": None,
+        "cost_usd": None,
+        "cost_sources": [],
+        "cost_estimated": False,
+        "upstream_unbilled_usd": None,
+        "elapsed_s": None,
+        "staging_path": staging_path,
+        "judgment_path": judgment_path,
+        "report_elisions": list(elisions or []) or None,
+    }
+
+
 # --- the manifest's record of the call ------------------------------------------------------------
 
 def judge_record(reviewer_id, family, tier, model, connector, provider, effort, cap, attempts,
-                 elapsed_s, status, errors=None, tier_source=None, family_source=None):
+                 elapsed_s, status, errors=None, tier_source=None, family_source=None,
+                 elisions=None, prompt_tokens=None):
     """The seat-shaped record of the judgment call, for `manifest.judge`.
 
     **It is not in `manifest.seats`, and that is load-bearing.** `seats` is the `unanimous`
@@ -322,6 +548,12 @@ def judge_record(reviewer_id, family, tier, model, connector, provider, effort, 
         "cost_estimated": "estimated" in cost_sources,
         "upstream_unbilled_usd": sum(unbilled) if unbilled else None,
         "elapsed_s": round(elapsed_s, 1) if elapsed_s is not None else None,
+        # What the judge was actually shown. `prompt_tokens` is the composed prompt measured
+        # against the model's window, and `report_elisions` names every report the per-report cap
+        # cut — a judge that arbitrated a report it saw three quarters of is a fact about this
+        # run's judgment, and it used to be visible nowhere at all.
+        "prompt_tokens": prompt_tokens,
+        "report_elisions": list(elisions or []) or None,
     }
 
 

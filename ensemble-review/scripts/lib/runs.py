@@ -207,6 +207,33 @@ def input_fingerprint(artifact_record, reference_records, panel, tier):
     return sha256_bytes(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8"))
 
 
+# --- seat-private staging ------------------------------------------------------------------------
+
+# Where a mind that writes its own file writes it. The harness leg's rule is that no seat is *given*
+# a path into the directory holding its siblings' reports, so a staging directory is per seat and
+# sits beside the run directory rather than inside it. It is in the project tree and not in the
+# session scratchpad, because a harness subagent cannot write to the scratchpad at all.
+#
+# Blinding here is prompt-enforced and this narrows exposure rather than removing it: a subagent
+# keeps file tools on the repository and could glob its way out. That is stated plainly in
+# `references/dispatch.md` and is why the leg is opt-in.
+STAGING_DIRNAME = ".ensemble-staging"
+
+
+def staging_dir(run_dir, seat_id):
+    """The seat-private staging directory for one seat of one run. Not created here."""
+    run_dir = os.path.abspath(run_dir)
+    return os.path.join(os.path.dirname(run_dir), STAGING_DIRNAME, os.path.basename(run_dir), seat_id)
+
+
+def make_staging_dir(run_dir, seat_id):
+    """`staging_dir`, created. Returns the path."""
+    path = staging_dir(run_dir, seat_id)
+    if not os.path.isdir(path):
+        os.makedirs(path)
+    return path
+
+
 # --- the manifest --------------------------------------------------------------------------------
 
 def manifest_path(run_dir):

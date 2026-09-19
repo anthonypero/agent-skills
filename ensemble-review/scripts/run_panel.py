@@ -67,6 +67,21 @@ any dispatch could be, is a stale lease: it is demoted to `failed` with `failure
 `--skip-claude` leaves the claude seats to the host session, which spawns them as harness
 subagents with the same persona body. Those seats are recorded in the manifest as pending on the
 harness leg. It is off by default: without it every seat, claude included, runs through OpenRouter.
+
+**The judge stage** is the last thing this script does, and what it does there depends on who
+judges. An autonomous run judged by `synthesis` runs Judge and Reconcile itself, because there is
+nobody to type the second command. A run judged by the **harness judge** — the default unattended
+judge wherever `install.sh` has put `ensemble-judge` in the harness agents directory — runs
+`reconcile.py`'s first pass, which writes the worksheet of provisional clusters the agent answers
+and prints the spawn instruction over it, and then stops: a script cannot spawn a harness agent.
+Every other run stops after Collect and prints the `reconcile.py` line, because the judgment is
+the host's to write.
+
+`--smoke-test <model>` pins **every** seat to one model, drops the family target to 1, marks the
+manifest `smoke_test: true` and makes the reconciliation open by saying the run is not evidence. It
+exists to prove the pipeline end to end for cents, and it is still priced and still gated by the
+budget — a flag that turned off the one control in front of the money would be the opposite of
+what it is for.
 """
 
 import argparse
@@ -87,6 +102,7 @@ sys.path.insert(0, SCRIPTS_DIR)
 import dispatch  # noqa: E402
 from lib import budget as budget_lib  # noqa: E402
 from lib import judge as judge_lib  # noqa: E402
+from lib import panels as panels_lib  # noqa: E402
 from lib import paths as paths_lib  # noqa: E402
 from lib import registry as registry_lib  # noqa: E402
 from lib import report as report_lib  # noqa: E402
@@ -136,7 +152,15 @@ DISPATCH_MODEL_UNAVAILABLE = 5
 
 
 def load_panel(name_or_path, paths):
-    """A panel template: an operator path when `--panel` names a file, else the workspace cascade."""
+    """A panel template: an operator path when `--panel` names a file, else the workspace cascade.
+
+    **Every key is checked before the template is used for anything.** `lib/panels.py` holds the
+    vocabulary and raises `TemplateError` on the first unrecognized key, which `main` turns into a
+    composition error, exit 1 — before the run directory is claimed, before a seat is priced, and
+    before a call is made. Owner ruling, 2026-09-19: a template is written by an agent, so a
+    silent `min_famalies` would run the panel at the default and spend the money before anybody
+    read the file.
+    """
     if os.path.isfile(name_or_path):
         path = os.path.abspath(name_or_path)
         paths.note_operator_path("panel", path)
@@ -147,7 +171,9 @@ def load_panel(name_or_path, paths):
         except paths_lib.PathError as failure:
             sys.exit("{0}\n  Panels available: {1}".format(failure, ", ".join(available_panels(paths)) or "none"))
     with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle), path
+        panel = json.load(handle)
+    panels_lib.validate(panel, path)
+    return panel, path
 
 
 def panel_from_artifact(artifact):
@@ -261,6 +287,21 @@ def persona_frontmatter(paths):
         frontmatter, _body = report_lib.parse_agent_file(found["path"])
         return frontmatter
     return read
+
+
+def _registry_for_labels(paths, args):
+    """The registry, or None, for the family relabel alone — never for the gate.
+
+    The registry **gate** runs after the run directory is claimed, and that ordering is documented:
+    a refusal for an unpriceable model leaves the directory holding what it wrote. Seating happens
+    before the claim and wants one field from the same file, so it reads it leniently here. A
+    registry that will not load is not an error at this point; it is an error a few lines later,
+    with a better message and the right consequences.
+    """
+    try:
+        return registry_lib.load(paths.registry(args.models))
+    except (paths_lib.PathError, registry_lib.RegistryError):
+        return None
 
 
 def parse_model_pins(values):
@@ -403,7 +444,9 @@ def parse_args(argv):
     parser.add_argument("--min-families", type=int, default=None, dest="min_families",
                         help="Target distinct families, overriding the panel's (default: the panel's, else {0}). A target, not a precondition: a run below it proceeds and the reconciliation's method caveat says so".format(DEFAULT_MIN_FAMILIES))
     parser.add_argument("--model", action="append", default=[], dest="models_pinned", metavar="SEAT=MODEL",
-                        help="Pin one seat to a concrete model id, e.g. --model fidelity-openai=openai/gpt-6-astra. Repeatable; beats every tier source")
+                        help="Pin one seat to a concrete model id, e.g. --model fidelity-openai=openai/gpt-6-astra. Repeatable; beats every tier source. The seat's family label is relabelled from the model")
+    parser.add_argument("--smoke-test", default=None, metavar="MODEL", dest="smoke_test",
+                        help="Prove the pipeline, not the artifact: pin EVERY seat to this one model, set the family target to 1, mark the manifest `smoke_test` and say in the reconciliation that the run is not evidence. Still priced and still gated by the budget")
     parser.add_argument("--max-tokens", type=int, default=registry_lib.DEFAULT_MAX_TOKENS,
                         help="Completion cap sent on every call; a model's registry floor raises it for that seat (default: {0})".format(registry_lib.DEFAULT_MAX_TOKENS))
     parser.add_argument("--budget-usd", type=float, default=DEFAULT_BUDGET_USD,
@@ -454,7 +497,7 @@ def main(argv=None):
                          "resolved": panel.get("name") or args.panel, "reason": None}
         else:
             panel, panel_path, inference = infer_panel(args.artifact, args.refs, paths)
-    except paths_lib.PathError as failure:
+    except (paths_lib.PathError, panels_lib.TemplateError) as failure:
         sys.stderr.write("composition error: {0}\n".format(failure))
         return EXIT_COMPOSITION
     panel_name = panel.get("name") or args.panel or DEFAULT_PANEL
@@ -469,6 +512,15 @@ def main(argv=None):
             "against their source-of-truth references.\n".format(
                 panel_name, panel.get("description") or "", panel.get("routes_to") or "/code-review"))
         return EXIT_COMPOSITION
+
+    if args.smoke_test:
+        print("=" * 72)
+        print("SMOKE TEST — every seat is pinned to {0}.".format(args.smoke_test))
+        print("This run proves the pipeline, not the artifact: one model behind every lens, a")
+        print("family target of 1, and no cross-family corroboration available at any tier. The")
+        print("manifest carries `smoke_test: true` and the reconciliation says the run is not")
+        print("evidence. It is still priced and still gated by the budget.")
+        print("=" * 72)
 
     if inference["reason"]:
         print("panel inferred: {0} (the {1} template needs references this run does not have)".format(
@@ -491,6 +543,11 @@ def main(argv=None):
             panel, config_entry,
             cli_tier=args.tier,
             pinned=parse_model_pins(args.models_pinned),
+            pin_all=args.smoke_test,
+            # Read only to relabel a pinned seat's family, and read leniently: the registry **gate**
+            # is further down, after the claim, and moving it up here to satisfy a label would
+            # change which refusals leave a run directory behind.
+            registry=_registry_for_labels(paths, args),
             frontmatter_fn=persona_frontmatter(paths))
         paths.driver_ref(config_entry.get("type", "openai_compat"))
         # Every seat's system message carries it, so it is required, and its root belongs in the
@@ -588,8 +645,14 @@ def main(argv=None):
     # attached and `synthesis` when nobody is — the same test the budget gate turns on, which is
     # why both read it from `lib/judge.py` rather than each asking stdin its own question.
     autonomous = judge_lib.is_autonomous(args.autonomous)
+    # Whether the harness judge is installed. It decides an unresolved `default` and nothing else,
+    # and the **answer** — the resolved `reconciler` — is what the manifest records, so
+    # `reconcile.py` reads a decision rather than a premise. It asks the same question of the same
+    # machine when it has to resolve a `default` of its own.
     try:
-        reconciler = judge_lib.resolve_reconciler(args.reconciler, panel.get("reconciler"), autonomous)
+        reconciler = judge_lib.resolve_reconciler(
+            args.reconciler, panel.get("reconciler"), autonomous,
+            harness=judge_lib.harness_present())
     except judge_lib.JudgeError as failure:
         sys.stderr.write("composition error: {0}\n".format(failure))
         return EXIT_COMPOSITION
@@ -764,10 +827,22 @@ def _judge(args, run_dir, reconciler, code, synthesis_model=None):
     invocation produces the reconciliation. Every other run stops after Collect and prints the
     command, because the judgment is the host's to write and the host is sitting right there.
 
+    **A run whose judgment comes from the harness judge stops here too, and it runs `reconcile.py`'s
+    first pass before it does.** A script cannot spawn a harness agent — there is no API for it, and
+    inventing one would be inventing a second dispatch path — but the agent cannot judge clusters
+    nobody has computed, and the only thing that computes them is that first pass. So the child is
+    run for its worksheet, `judgment-request.json`, and it is the child that prints the spawn
+    instruction over it. Printing the instruction without the worksheet spawned an agent that halts.
+
     The panel's own exit code wins over the reconciler's when the panel already failed — a run that
     halted on an auth failure has not become a patch problem — and otherwise the reconciler's code
     is returned, so a run whose reconciliation did not get written does not exit 0.
     """
+    if reconciler == judge_lib.HARNESS_JUDGE_AUTHOR and args.reconcile != "off":
+        if code == EXIT_TERMINAL:
+            return code
+        return _harness_judge_stage(args, run_dir, code)
+
     if args.reconcile == "off" or reconciler != judge_lib.SYNTHESIS_AUTHOR:
         print("")
         print("Next: reconcile. `reconcile.py` is the only writer of both reconciliation files.")
@@ -790,6 +865,34 @@ def _judge(args, run_dir, reconciler, code, synthesis_model=None):
     return _apply(args, run_dir, code)
 
 
+def _harness_judge_stage(args, run_dir, code):
+    """Run `reconcile.py`'s first pass, which writes the worksheet and prints the spawn instruction.
+
+    **Two things have to happen here and only one of them is a print.** The agent answers the
+    provisional clusters, and `judgment-request.json` is where they are: it is written by
+    `reconcile.py`'s no-patch pass and by nothing else. So this runs that pass rather than
+    reproducing either half of it — the clustering would be a second implementation of the
+    algorithm, and the instruction would be a second copy of a contract `reconcile.py` also has to
+    print when it is invoked directly.
+
+    Exit 3 from the child is the expected stop: "a judgment patch is required", which is the whole
+    point of the stage. Anything else is a real failure — an unresolvable artifact, a run
+    directory this process cannot read — and is returned, because a run that could not even write
+    the worksheet must not exit 0 with a spawn instruction nobody can follow.
+    """
+    child = _reconcile_argv(args, run_dir, judge=False)
+    print("")
+    print("-" * 72)
+    result = subprocess.run(child, capture_output=True, text=True)
+    if result.stdout:
+        print(result.stdout.rstrip())
+    if result.stderr:
+        sys.stderr.write(result.stderr)
+    if result.returncode == EXIT_UNDER_SEATED:
+        return code
+    return result.returncode or code
+
+
 def _reconcile_argv(args, run_dir, judge):
     """The `reconcile.py` invocation, whether this run makes it or prints it for the host.
 
@@ -801,6 +904,11 @@ def _reconcile_argv(args, run_dir, judge):
 
     `judge` adds the two flags that say a synthesis judgment is wanted now. They are deliberately
     absent from the printed form: that line is for a host who is about to write the patch itself.
+
+    The **harness-judge** stage runs this same bare invocation, with neither flag, because its
+    first pass is what writes the worksheet and prints the spawn instruction. The `--judgment
+    <staging>` line an operator runs afterwards is printed by that child, not built here: it names
+    a path the child computed.
     """
     argv = [sys.executable, RECONCILE, "--run-dir", run_dir]
     if judge:
@@ -913,9 +1021,16 @@ def _reseated(seat, entry, run_cap):
 # --- manifest ------------------------------------------------------------------------------------
 
 def _min_families_target(args, panel):
-    """`--min-families`, else the panel's, else the default. A target the run is measured against, never a gate."""
+    """`--min-families`, else the panel's, else the default. A target the run is measured against, never a gate.
+
+    `--smoke-test` sets it to 1 below everything else it cannot override: a run with one model
+    behind every seat has one family by construction, and holding it to a target of 2 would print
+    a shortfall warning about a shortfall the operator asked for.
+    """
     if args.min_families is not None:
         return args.min_families
+    if args.smoke_test:
+        return 1
     target = panel.get("min_families")
     return DEFAULT_MIN_FAMILIES if target is None else target
 
@@ -930,18 +1045,28 @@ def _run_tier(tier_default, seats):
 
     A panel whose seats carry their own tiers has no single answer, and this says so rather than
     picking one: `resolved` is null, `unanimous` false, and `per_seat` lists what each one ran at.
+
+    **`--model` is never the run's tier source.** A seat records `tier_source: "--model"` because
+    the pin beat every tier level *for that seat*, and this block used to take the highest such
+    source across the panel — so run 4 read `tier.source: "--model"` although every seat resolved
+    `frontier` from `--tier` and exactly one seat was pinned. The tier and the model pin are
+    different decisions. The pinned seats are named in `model_pins` instead, and `source` is the
+    highest level that decided the tier itself, which is null only when every seat was pinned.
     """
     pairs = [(seat.get("tier"), seat.get("tier_source")) for seat in seats if seat.get("tier")]
     tiers = {tier for tier, _source in pairs}
     per_seat = {seat["reviewer_id"]: seat.get("tier") for seat in seats}
+    pins = [seat["reviewer_id"] for seat in seats if seat.get("tier_source") == "--model"]
+    tier_levels = [name for name in seating_lib.TIER_SOURCES if name != "--model"]
     if len(tiers) == 1:
         tier = pairs[0][0]
         # The highest-precedence level that decided any seat, by the seating module's own order.
         sources = {source for _tier, source in pairs if source}
-        source = next((name for name in seating_lib.TIER_SOURCES if name in sources), None)
-        return {"resolved": tier, "source": source, "unanimous": True, "per_seat": per_seat}
+        source = next((name for name in tier_levels if name in sources), None)
+        return {"resolved": tier, "source": source, "unanimous": True, "per_seat": per_seat,
+                "model_pins": pins}
     return {"resolved": None, "source": "per-seat", "unanimous": False,
-            "requested": tier_default, "per_seat": per_seat}
+            "requested": tier_default, "per_seat": per_seat, "model_pins": pins}
 
 
 def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats, dispatched, harness,
@@ -984,6 +1109,12 @@ def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
             "upstream_unbilled_usd": None,
             "elapsed_s": None,
             "substitution": seat.get("substitution"),
+            # A seat pinned to a concrete model carries the family that model belongs to, and this
+            # is the record of the template's word being overruled by the model's own. Null on
+            # every unpinned seat, and on a pinned one whose model belongs to the family the
+            # template asked for anyway.
+            "family_relabel": seat.get("family_relabel"),
+            "model_pinned": bool(seat.get("pinned")),
         })
         if harness_seat:
             seat_records[-1]["note"] = ("dispatched by the host session as a harness subagent; "
@@ -1021,6 +1152,11 @@ def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
         # decided it. See `_run_tier`.
         "tier": _run_tier(tier_default, seats),
         "max_tokens_requested": args.max_tokens,
+        # A run that proves the pipeline rather than the artifact. Read by
+        # `reconcile_core.method_caveat`, which says so at the top of the reconciliation, and it is
+        # a top-level field rather than a note on the seats because it governs the whole document.
+        "smoke_test": bool(args.smoke_test),
+        "smoke_test_model": args.smoke_test,
         "budget_usd": args.budget_usd,
         # Filled at Project, a few lines after this manifest is written, and left null on a run that
         # never reached the pre-flight. Carries the per-seat table, the totals, the budget and the

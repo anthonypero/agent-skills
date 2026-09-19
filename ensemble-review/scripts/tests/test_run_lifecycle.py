@@ -264,6 +264,31 @@ class ProjectionTest(unittest.TestCase):
         self.assertEqual(projection["context_overflows"], ["adversarial-xai"])
         self.assertEqual(projection["projection_usd"], 0.0, "an overflowing seat is never dispatched, so never priced")
 
+    def test_the_judgment_call_is_measured_against_its_own_window_too(self):
+        """Run 5's SF-11: the seat pre-flight measured every seat and never the judge, and the
+        judge's prompt is the one that carries every report *and* the artifact *and* every
+        reference. It is not in `context_overflows` — that list is seats the run drops before
+        dispatch, and an overflowing judge is a stage the run still reaches."""
+        workspace = harness.Workspace(models={
+            harness.FAST_MODEL: {"input_price_per_token": 1e-07, "output_price_per_token": 5e-07,
+                                 "context_limit": 60000, "output_token_prior": 100}})
+        self.addCleanup(workspace.close)
+        projection = budget_lib.project(
+            [{"reviewer_id": "adversarial-xai", "model": harness.FAST_MODEL, "prompt_tokens": 50000}],
+            registry_lib.load(workspace.registry), 5.0,
+            with_synthesis=True, synthesis_model=harness.FAST_MODEL)
+        self.assertEqual(projection["context_overflows"], [], "the seat itself fits")
+        self.assertTrue(projection["judge_context_overflow"],
+                        "1.5x a 50,000-token seat prompt is 75,000 against a 60,000 window")
+        self.assertIn("CONTEXT OVERFLOW on the judgment call", budget_lib.render(projection))
+
+    def test_a_judgment_call_that_fits_raises_no_flag(self):
+        projection = budget_lib.project(
+            [{"reviewer_id": "adversarial-xai", "model": harness.FAST_MODEL, "prompt_tokens": 1000}],
+            self.registry, 5.0, with_synthesis=True, synthesis_model=harness.FAST_MODEL)
+        self.assertFalse(projection["judge_context_overflow"])
+        self.assertNotIn("CONTEXT OVERFLOW", budget_lib.render(projection))
+
 
 # --- the whole script -----------------------------------------------------------------------------
 

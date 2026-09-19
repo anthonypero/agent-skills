@@ -38,10 +38,11 @@ CATALOGUE_URL = "https://openrouter.ai/api/v1/models"
 TIMEOUT = 60
 
 # What a refresh is allowed to overwrite. `output_token_prior`, `prior_source`, `min_max_tokens`,
-# `measured_output_price` and `measured_output_price_source` are deliberately absent: they are
-# measurements and operator decisions, not catalogue facts. `measured_output_price` in particular is
-# what a frozen run actually paid per output token, which is what makes the gap between the
-# catalogue's price and a routed call's price visible at all.
+# `family`, `measured_output_price` and `measured_output_price_source` are deliberately absent:
+# they are measurements and operator decisions, not catalogue facts. `measured_output_price` in
+# particular is what a frozen run actually paid per output token, which is what makes the gap
+# between the catalogue's price and a routed call's price visible at all, and `family` is this
+# skill's own vocabulary rather than the catalogue's author slug.
 REFRESHED_FIELDS = ("input_price_per_token", "output_price_per_token", "context_limit", "effort_vocabulary")
 
 
@@ -96,6 +97,12 @@ def refresh(registry_data, catalogue, add=(), now=None):
         models[model] = {
             "input_price_per_token": None,
             "output_price_per_token": None,
+            # Which family this model belongs to. Not a catalogue fact — the catalogue knows the
+            # author slug and this skill's families are its own vocabulary — so it is left null for
+            # the operator to fill, and a refresh never touches it. `seating.family_for_model`
+            # falls back to a reverse lookup over the config's tier map when it is null, which is
+            # what answers for every model a shipped config actually seats.
+            "family": None,
             "context_limit": None,
             "effort_vocabulary": None,
             "output_token_prior": DEFAULT_PRIOR,

@@ -36,6 +36,14 @@ not depend on how the template happens to be written:
    other seats in both directions. It resolves last and therefore always adds a family the panel did
    not have.
 
+**A fifth pass seats nobody and only relabels.** A seat pinned to a concrete model id — by
+`--model` or by `--smoke-test` — takes the family that model actually belongs to, read from the
+registry and then from the config's tier map. The four passes above run first and use the family
+the template asked for; this corrects the label afterwards, records the difference in
+`family_relabel`, and leaves `requested` (and therefore `reviewer_id`) untouched. The family is
+what every agreement count is computed over, so a seat labelled `kimi` while running DeepSeek
+produces cross-family clusters that are nothing of the kind.
+
 An unsatisfiable constraint does **not** fail the run. The seat falls back to the **least-held**
 family — fewest seats already on it, ties broken by declaration order — and records
 `substitution: {kind: "constraint_unsatisfied", ...}`. `reconcile.py` names every recorded
@@ -117,11 +125,39 @@ def _frontmatter_tier(frontmatter, config_entry):
     return None
 
 
-def resolve(panel, config_entry, cli_tier=None, pinned=None, frontmatter_fn=None, connector=None):
+def family_for_model(model, config_entry=None, registry=None):
+    """Which family a concrete model id belongs to. Returns `(family, source)`, or `(None, None)`.
+
+    Two sources, in order. The **registry** is asked first: `models.json` carries a `family` per
+    model, which is the only statement of the fact that does not depend on a tier map a project may
+    have edited. The **config's tier map** is the fallback, by reverse lookup over every tier, and
+    it answers for a workspace registry written before the field existed.
+
+    Unknown is a real answer and is not an error: a model that is in neither is a model this run can
+    still dispatch, and mislabelling it would be worse than leaving the label the template gave it.
+    """
+    if not model:
+        return None, None
+    entry = registry.get(model) if registry is not None else None
+    family = (entry or {}).get("family")
+    if family:
+        return family, "registry"
+    for cells in ((config_entry or {}).get("tiers") or {}).values():
+        for candidate, cell in (cells or {}).items():
+            if cell == model:
+                return candidate, "config"
+    return None, None
+
+
+def resolve(panel, config_entry, cli_tier=None, pinned=None, frontmatter_fn=None, connector=None,
+            pin_all=None, registry=None):
     """Resolve every seat of a panel. Returns the seat records, in template order.
 
     `pinned` maps a seat id (`<lens>-<requested>`) to a concrete model id — `--model` on the command
-    line. `frontmatter_fn(lens)` returns that lens's persona frontmatter, or None.
+    line. `pin_all` is `--smoke-test`: one model id for every seat, which is how a run proves the
+    pipeline for cents without proving anything about the artifact. `frontmatter_fn(lens)` returns
+    that lens's persona frontmatter, or None. `registry` is consulted only to relabel a pinned
+    seat's family; a caller with none simply gets the config's answer.
     """
     pinned = dict(pinned or {})
     connector = connector or config_entry.get("type", "openai_compat")
@@ -137,8 +173,9 @@ def resolve(panel, config_entry, cli_tier=None, pinned=None, frontmatter_fn=None
             raise SeatingError("seat {0} of panel {1!r} is missing a `lens` or a `family`".format(
                 index + 1, panel.get("name") or "ad-hoc"))
         identity = reviewer_id(lens, requested, raw.get("suffix") or "")
+        seat_pin = pinned.pop(identity, None) or pin_all
         tier, tier_source = resolve_tier(
-            raw, panel, config_entry, cli_tier, identity in pinned,
+            raw, panel, config_entry, cli_tier, bool(seat_pin),
             frontmatter_fn(lens) if frontmatter_fn else None)
         seats.append({
             "reviewer_id": identity,
@@ -147,10 +184,16 @@ def resolve(panel, config_entry, cli_tier=None, pinned=None, frontmatter_fn=None
             "family": None,
             "tier": tier,
             "tier_source": tier_source,
-            "model": pinned.pop(identity, None),
+            "model": seat_pin,
+            # Whether a concrete model id was pinned onto this seat, by `--model` or `--smoke-test`.
+            # The family label is relabelled from it below, which is the whole reason this is
+            # recorded rather than inferred later from `model`: a seat whose resolved model happens
+            # to equal its family's cell was not pinned.
+            "pinned": bool(seat_pin),
             "connector": connector,
             "effort": None,
             "substitution": None,
+            "family_relabel": None,
         })
 
     if pinned:
@@ -177,7 +220,42 @@ def resolve(panel, config_entry, cli_tier=None, pinned=None, frontmatter_fn=None
         if not seat["model"]:
             seat["model"] = model_at(config_entry, seat["tier"], seat["family"])
         seat["effort"] = (config_entry.get("effort") or {}).get(seat["model"])
+    _relabel_pinned_families(seats, config_entry, registry)
     return seats
+
+
+def _relabel_pinned_families(seats, config_entry, registry):
+    """Pass 5, and it seats nobody: a pinned seat's `family` is relabelled from its actual model.
+
+    A `--model` pin used to leave `family` at whatever the template said. Run 4's consistency seat
+    reported `family: kimi` while its model and every one of its attempts named
+    `deepseek/deepseek-v4-pro-0813`, and the judge's own method caveat called the discrepancy out
+    as something it could not explain from its inputs — which is exactly right, and exactly the
+    thing a manifest must not make a reviewer guess at. The family is what every agreement count in
+    the reconciliation is computed over, so a wrong label is not cosmetic: it is a cross-family
+    cluster that is nothing of the kind.
+
+    It runs **after** the four seating passes and never during them. The passes decide who sits
+    where, using the family the template asked for; this only corrects the label on a seat whose
+    model was chosen by hand. `requested` is left alone, so `reviewer_id` — minted from it — does
+    not move, and the difference is recorded in `family_relabel` the way a re-seat is recorded in
+    `substitution`.
+    """
+    for seat in seats:
+        if not seat.get("pinned") or not seat.get("model"):
+            continue
+        family, source = family_for_model(seat["model"], config_entry, registry)
+        if not family or family == seat["family"]:
+            continue
+        seat["family_relabel"] = {
+            "from": seat["family"],
+            "to": family,
+            "model": seat["model"],
+            "source": source,
+            "reason": "this seat was pinned to {0}, which is the {1!r} family per the {2}; the "
+                      "template asked for {3!r}".format(seat["model"], family, source, seat["family"]),
+        }
+        seat["family"] = family
 
 
 # --- the four passes -------------------------------------------------------------------------------

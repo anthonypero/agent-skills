@@ -274,13 +274,13 @@ class GapClusterTest(unittest.TestCase):
     def test_a_fork_tagged_judgment_call_is_forced_to_a_human(self):
         _document, errors, _context = self.dispose(judgment_call(tags=["fork"]), "fix-now")
         self.assertEqual(len(errors), 1, errors)
-        self.assertIn("the synthesis persona always flags a judgment call", errors[0])
+        self.assertIn("an unattended judge always flags a judgment call", errors[0])
 
     def test_an_untagged_judgment_call_is_forced_to_a_human_exactly_as_before(self):
         """The fixture's 44 untagged calls read this way, so its dispositions do not move."""
         _document, errors, _context = self.dispose(judgment_call(), "fix-now")
         self.assertEqual(len(errors), 1, errors)
-        self.assertIn("the synthesis persona always flags a judgment call", errors[0])
+        self.assertIn("an unattended judge always flags a judgment call", errors[0])
 
     def test_a_mixed_cluster_keeps_the_ruling(self):
         """One finding tagged `gap` does not make the fork collapsed beside it disappear.
@@ -296,7 +296,7 @@ class GapClusterTest(unittest.TestCase):
         ]))
         _document, errors, _context = core.reconcile(run_dir, self.patch("fix-now"))
         self.assertEqual(len(errors), 1, errors)
-        self.assertIn("the synthesis persona always flags a judgment call", errors[0])
+        self.assertIn("an unattended judge always flags a judgment call", errors[0])
 
     def test_a_gap_tagged_literal_edit_is_untouched_by_any_of_this(self):
         document, errors, _context = self.dispose(finding(tags=["gap"]), "fix-now")

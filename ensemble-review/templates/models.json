@@ -7,6 +7,7 @@
     "anthropic/claude-sonnet-5": {
       "input_price_per_token": 2e-06,
       "output_price_per_token": 1e-05,
+      "family": "claude",
       "context_limit": 1000000,
       "effort_vocabulary": [
         "max",
@@ -27,6 +28,7 @@
     "openai/gpt-6-astra": {
       "input_price_per_token": 1e-05,
       "output_price_per_token": 5e-05,
+      "family": "openai",
       "context_limit": 1050000,
       "effort_vocabulary": [
         "max",
@@ -47,6 +49,7 @@
     "openai/gpt-5.6-sol": {
       "input_price_per_token": 2e-06,
       "output_price_per_token": 1e-05,
+      "family": "openai",
       "context_limit": 1050000,
       "effort_vocabulary": [
         "max",
@@ -68,6 +71,7 @@
     "openai/gpt-5.6-luna": {
       "input_price_per_token": 2e-07,
       "output_price_per_token": 1.2e-06,
+      "family": "openai",
       "context_limit": 1050000,
       "effort_vocabulary": [
         "max",
@@ -89,6 +93,7 @@
     "moonshotai/kimi-k3": {
       "input_price_per_token": 2.1e-06,
       "output_price_per_token": 1.095e-05,
+      "family": "kimi",
       "context_limit": 1048576,
       "effort_vocabulary": [
         "max",
@@ -107,6 +112,7 @@
     "z-ai/glm-5.3": {
       "input_price_per_token": 9.1e-07,
       "output_price_per_token": 2.86e-06,
+      "family": "glm",
       "context_limit": 1310720,
       "effort_vocabulary": [
         "max",
@@ -125,6 +131,7 @@
     "z-ai/glm-5.3-flash": {
       "input_price_per_token": 9e-08,
       "output_price_per_token": 3e-07,
+      "family": "glm",
       "context_limit": 1310720,
       "effort_vocabulary": [
         "max",
@@ -143,6 +150,7 @@
     "x-ai/grok-4.6": {
       "input_price_per_token": 2e-06,
       "output_price_per_token": 6e-06,
+      "family": "xai",
       "context_limit": 500000,
       "effort_vocabulary": [
         "xhigh",
@@ -162,6 +170,7 @@
     "google/gemini-3.8-flash": {
       "input_price_per_token": 7.5e-07,
       "output_price_per_token": 3.75e-06,
+      "family": "google",
       "context_limit": 1048576,
       "effort_vocabulary": [
         "high",
@@ -180,6 +189,7 @@
     "google/gemini-3.6-flash": {
       "input_price_per_token": 7.5e-07,
       "output_price_per_token": 3.75e-06,
+      "family": "google",
       "context_limit": 1048576,
       "effort_vocabulary": [
         "high",
@@ -199,6 +209,7 @@
     "deepseek/deepseek-v4-pro-0813": {
       "input_price_per_token": 5.7816e-07,
       "output_price_per_token": 1.73448e-06,
+      "family": "deepseek",
       "context_limit": 1048576,
       "effort_vocabulary": [
         "max",
@@ -217,6 +228,7 @@
     "deepseek/deepseek-v4.1-flash": {
       "input_price_per_token": 1.5e-07,
       "output_price_per_token": 6e-07,
+      "family": "deepseek",
       "context_limit": 1048576,
       "effort_vocabulary": [
         "max",

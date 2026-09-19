@@ -22,7 +22,15 @@ import os
 import re
 import unicodedata
 
+from . import judge as judge_lib
 from . import report as report_lib
+
+# Who may author a judgment patch, and which of them are held to the mechanical floor. Both tuples
+# live in `lib/judge.py`, which is the module that decides who judges; naming them again here would
+# be a second vocabulary for one contract, and the floor is exactly the set of authors with no
+# owner to answer to.
+AUTHORS = judge_lib.AUTHORS
+UNATTENDED_AUTHORS = judge_lib.UNATTENDED_AUTHORS
 
 SEVERITY_ORDER = {"blocker": 0, "should-fix": 1, "nice-to-have": 2}
 SEVERITY_RANK = {"blocker": 2, "should-fix": 1, "nice-to-have": 0}
@@ -614,10 +622,11 @@ def validate_patch_shape(patch, manifest, reports):
     if patch.get("run_id") != manifest.get("run_id"):
         errors.append("judgment: `run_id` {0!r} does not match the manifest's {1!r}".format(patch.get("run_id"), manifest.get("run_id")))
     author = patch.get("author")
-    if author not in ("host", "synthesis"):
-        errors.append("judgment: `author` must be \"host\" or \"synthesis\"")
-    if author == "synthesis" and patch.get("rulings"):
-        errors.append("judgment: a patch from `synthesis` may not carry `rulings`")
+    if author not in AUTHORS:
+        errors.append("judgment: `author` must be one of {0}".format(
+            ", ".join('"{0}"'.format(name) for name in AUTHORS)))
+    if author in UNATTENDED_AUTHORS and patch.get("rulings"):
+        errors.append("judgment: a patch from `{0}` may not carry `rulings`".format(author))
 
     known = {}
     for reviewer_id, data in reports.items():
@@ -800,21 +809,27 @@ def _merge_judgment(clusters, patch, manifest, seats_expected, seats_reporting, 
         if record.get("contradicted_by"):
             record["disposition"] = "flag-for-human"
 
-    # The `synthesis` persona always flags a design fork, and this is where that is enforced. An
-    # unattended persona disposing a fork is a human decision recorded as settled by nobody. A host
+    # An unattended judge always flags a design fork, and this is where that is enforced. An
+    # unattended mind disposing a fork is a human decision recorded as settled by nobody. A host
     # is not held to it: it has an owner to answer to and its `disposition_reason` is the trace,
     # which is why `rulings` stays optional and reserved for a decision of record.
+    #
+    # **Both unattended authors are held to it, and the harness judge above all.** It runs on a
+    # frontier Claude model with file tools, which makes it more capable than the `synthesis`
+    # persona and no more entitled: capability is not an owner, and the floor is about who answers
+    # for the decision rather than who is likeliest to get it right.
     #
     # A cluster whose judgment calls are all tagged `gap` is not a fork and is not forced anywhere:
     # it is a determinate fix that was filed under the wrong `change_kind`, and it goes on the fix
     # list like any other. `_needs_a_human_ruling` is where that reading lives.
-    if patch.get("author") == "synthesis":
+    if patch.get("author") in UNATTENDED_AUTHORS:
         for record in records:
             if _needs_a_human_ruling(record) and record["disposition"] != "flag-for-human":
                 errors.append(
-                    "cluster {0} ({1}) is all `judgment-call` and this patch from `synthesis` disposes it "
-                    "{2}; the synthesis persona always flags a judgment call".format(
-                        record["cluster"]["provisional_id"], _describe(record["members"]), record["disposition"]))
+                    "cluster {0} ({1}) is all `judgment-call` and this patch from `{3}` disposes it "
+                    "{2}; an unattended judge always flags a judgment call".format(
+                        record["cluster"]["provisional_id"], _describe(record["members"]),
+                        record["disposition"], patch.get("author")))
     if errors:
         return None, errors
 
@@ -881,10 +896,30 @@ def method_caveat(supplied, manifest):
       `requires_references` is true, so the panel that ran may not be the panel the artifact's own
       name suggested. That substitution is recorded the same way a seat's is.
 
+    And one **prologue**, which is the only thing that goes in front of the supplied text: a smoke
+    test's warning that the run is not evidence. Appending it would put it below every appendix
+    above, where a reader who stopped at the supplied caveat would never reach it, and what it
+    says is that the supplied caveat describes a run that proves nothing about the artifact.
+
     Nothing else about the supplied text is changed.
     """
     text = (supplied or "").strip()
     appendices = []
+
+    # **Prepended, not appended, and it is the one thing here that is.** Every other appendix
+    # qualifies the supplied caveat and belongs after it; this one says the supplied caveat is
+    # about a run that proves nothing, so a reader who stops after the first paragraph has to have
+    # read it. A smoke test pins every seat to one model: the panel is not lens-diverse across
+    # minds, every agreement count is agreement with itself, and the run exists to prove the
+    # pipeline rather than to review the artifact.
+    prologue = None
+    if manifest.get("smoke_test"):
+        prologue = (
+            "**This run is a smoke test and is not evidence about the artifact.** Every seat was "
+            "pinned to one model with `--smoke-test`, so the family target was 1 and no cluster "
+            "here can carry cross-family corroboration at any tier: what the seats agree on is one "
+            "mind agreeing with itself under different lens prompts. It was run to prove the "
+            "pipeline end to end for cents. Do not cite its findings, its counts or its verdict.")
 
     lines = []
     for seat in manifest.get("seats") or []:
@@ -916,10 +951,13 @@ def method_caveat(supplied, manifest):
                               inference.get("heuristic"), inference.get("resolved"),
                               (inference.get("reason") or "").rstrip(".")))
 
-    if not appendices:
-        return text
-    appended = "\n\n".join(appendices)
-    return (text + "\n\n" + appended) if text else appended
+    body = text
+    if appendices:
+        appended = "\n\n".join(appendices)
+        body = (text + "\n\n" + appended) if text else appended
+    if prologue:
+        return (prologue + "\n\n" + body) if body else prologue
+    return body
 
 
 def _missing_seats_caveat(manifest):

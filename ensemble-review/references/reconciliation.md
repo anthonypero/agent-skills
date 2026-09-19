@@ -2,7 +2,7 @@
 
 The reviews are inputs. This is the product.
 
-`reconcile.py` is the **only writer** of `reconciliation.json` and `reconciliation.md`, in every mode. It computes the half of the algorithm a script can compute and takes the other half as a **judgment patch** at `<run-dir>/judgment.json`, supplied by the host session interactively or by the `synthesis` persona autonomously. Two minds each holding a copy of the same seven steps is two implementations of one contract; one script plus one validated patch is one.
+`reconcile.py` is the **only writer** of `reconciliation.json` and `reconciliation.md`, in every mode. It computes the half of the algorithm a script can compute and takes the other half as a **judgment patch** at `<run-dir>/judgment.json`, supplied by the host session interactively, by the `harness-judge` agent when one is installed, or by the `synthesis` persona when none is. Two minds each holding a copy of the same seven steps is two implementations of one contract; one script plus one validated patch is one.
 
 This file is loaded into the `synthesis` persona's system prompt, so everything below is a description of code that exists rather than of behaviour somebody intends. Where you find it disagreeing with `scripts/lib/reconcile_core.py`, the code is right and this file is a bug.
 
@@ -55,7 +55,7 @@ Before anything is tiered, every `quote` and every `literal_edit.old_text` is ch
 
 The check runs **after** the provisional ids are minted and never renumbers them: `P-n` is the patch's entire reference vocabulary, and a check that renumbered would invalidate every patch written against the previous run.
 
-`reconcile.py` resolves the artifact from the run's own `inputs/` copy first, then from the manifest's `artifact` path; `--artifact` overrides both. Neither resolving is exit 1, not a quiet skip. Only `--render-only`, which re-renders the Markdown from an already-checked `reconciliation.json`, runs without it. A quote the validator truncated at its 300-character cap is matched as the prefix it is, by the truncation marker on the raw string.
+`reconcile.py` resolves the artifact in three steps, and this is the order `_resolve_artifact` takes: **`--artifact` first**, then the run's own `inputs/` copy, then the manifest's `artifact` path. Neither resolving is exit 1, not a quiet skip. Only `--render-only`, which re-renders the Markdown from an already-checked `reconciliation.json`, runs without it. A quote the validator truncated at its 300-character cap is matched as the prefix it is, by the truncation marker on the raw string.
 
 ## Step 3 — the tier table
 
@@ -77,7 +77,7 @@ Two cross-family agreements outrank three same-family agreements, and both count
 
 One JSON object at `<run-dir>/judgment.json`, validated against `schemas/judgment-patch.schema.json`. Run `reconcile.py --run-dir <dir>` with no patch first: it writes `<run-dir>/judgment-request.json` — one entry per provisional cluster with its members, the key that joined them, its provisional tier and the fields it owes — and exits 3. That file is the worksheet.
 
-Required at the top level: `schema_version` (`"1"`), `run_id` (must match the manifest), `author` (`host` or `synthesis`), `generated_at` (ISO 8601 with offset), `dispositions`, and `method_caveat`. Every other array may be omitted when empty. Unknown fields are rejected; a field whose name begins with an underscore is the one exception the validator makes, for a working note nothing may rely on.
+Required at the top level: `schema_version` (`"1"`), `run_id` (must match the manifest), `author` (`host`, `synthesis` or `harness-judge`), `generated_at` (ISO 8601 with offset), `dispositions`, and `method_caveat`. Every other array may be omitted when empty. Unknown fields are rejected; a field whose name begins with an underscore is the one exception the validator makes, for a working note nothing may rely on.
 
 ### Cluster references
 
@@ -109,7 +109,7 @@ The rule: the cluster takes the highest severity whose reasoning survives scruti
 
 `{cluster, disposition, disposition_reason}` — `fix-now`, `flag-for-human` or `defer` — for **every** cluster. Name the reviewers on each side where they differ.
 
-**A `judgment-call` change kind is `flag-for-human`, and the rule binds the two authors differently.** An interactive **host** may dispose such a cluster some other way and say why in `disposition_reason`: it has an owner to answer to, and that reason is trace enough. The **`synthesis` persona** has no such latitude and `reconcile.py` enforces it — a cluster whose members are all `judgment-call`, in a patch whose `author` is `synthesis`, disposed anything other than `flag-for-human`, is a patch error and nothing is written. An unattended persona disposing a design fork is a human decision recorded as settled by nobody.
+**A `judgment-call` change kind is `flag-for-human`, and the rule binds the authors differently.** An interactive **host** may dispose such a cluster some other way and say why in `disposition_reason`: it has an owner to answer to, and that reason is trace enough. The two **unattended** authors — `synthesis` and `harness-judge` — have no such latitude and `reconcile.py` enforces it: a cluster whose members are all `judgment-call`, in a patch from either of them, disposed anything other than `flag-for-human`, is a patch error and nothing is written. An unattended mind disposing a design fork is a human decision recorded as settled by nobody, and the harness judge is held to it exactly as the persona is — it is a frontier model with file tools, which makes it more capable and no more entitled, because capability is not an owner.
 
 The one exception is the tag. A cluster whose judgment calls are **every one of them** tagged `gap` is a determinate fix filed under the wrong `change_kind`, and it goes on the fix list like anything else. Untagged says nothing either way, and the safe reading of silence is the one that asks.
 
@@ -127,7 +127,7 @@ This is the only field that can put reviewer-written text into a document unatte
 
 ### `rulings`
 
-`{cluster, ruling, owner_to_confirm}` — a stated ruling on a judgment-call cluster, so an owner has something concrete to confirm or overrule. **The host's alone.** A patch whose `author` is `synthesis` carrying a non-empty `rulings` is a hard error: nothing is written and nobody is re-asked. `rulings` is reserved for a real decision of record — where the host overrides the direction the reviewers proposed, or the owner has settled the fork — and is never required merely because a cluster is a judgment call.
+`{cluster, ruling, owner_to_confirm}` — a stated ruling on a judgment-call cluster, so an owner has something concrete to confirm or overrule. **The host's alone.** A patch from either unattended author carrying a non-empty `rulings` is a hard error: nothing is written and nobody is re-asked. `rulings` is reserved for a real decision of record — where the host overrides the direction the reviewers proposed, or the owner has settled the fork — and is never required merely because a cluster is a judgment call.
 
 ### `altitude_splits`
 
@@ -156,7 +156,7 @@ Nothing is written when any of these fails. The failing entries are named; inter
 
 - The schema: required fields, enums, `additionalProperties: false`.
 - `schema_version` is `"1"` and `run_id` matches the manifest.
-- `author` is `host` or `synthesis`, and a `synthesis` patch carries no `rulings`.
+- `author` is `host`, `synthesis` or `harness-judge`, it matches the run's own recorded reconciler when that reconciler is unattended, and neither unattended author's patch carries `rulings`.
 - Every `{reviewer_id, finding_id}` pair names a finding in a validated report.
 - At most one entry per cluster in each array — two entries for one cluster would silently last-wins, and the loser is a judgment somebody wrote down that the product never carried.
 - Every `singleton_labels` entry carries a label from the enum and a non-empty reason; every disposition and severity is in its enum.
@@ -169,11 +169,12 @@ Nothing is written when any of these fails. The failing entries are named; inter
 python3 scripts/reconcile.py --run-dir <run-dir>                              # worksheet, exit 3
 python3 scripts/reconcile.py --run-dir <run-dir> --judgment <run-dir>/judgment.json
 python3 scripts/reconcile.py --run-dir <run-dir> --reconciler synthesis        # the persona judges
+python3 scripts/reconcile.py --run-dir <run-dir> --judgment <staging>/judgment.json   # ingest the harness judge
 python3 scripts/reconcile.py --run-dir <run-dir> --render-only                 # re-render the Markdown
 ```
 
-`--judgment` defaults to `<run-dir>/judgment.json` when that file exists, so the second form is usually just the first form run again.
+`--judgment` defaults to `<run-dir>/judgment.json` when that file exists and then to the harness judge's staging path, so both of the middle forms are usually just the first form run again.
 
-`--reconciler` is `host`, `synthesis` or `default`; `default` is what the run recorded in its manifest, and it means host when a human is attached and `synthesis` when nobody is. In `synthesis` mode with no patch on disk, the persona is dispatched through `dispatch.py`'s own machinery — the same driver, the same doubled-cap length retry on a truncation, the same registry gate, the same per-call cost record — and its patch is validated in full **before** `judgment.json` is written, so an invalid patch never reaches disk. The call is recorded in the manifest as `judge`, with its model, its attempts and its cost, and its cost is added to `cost_usd_total`.
+`--reconciler` is `host`, `synthesis`, `harness-judge` or `default`; `default` is what the run recorded in its manifest, and it means host when a human is attached and, when nobody is, the harness judge where `ensemble-judge` is installed and `synthesis` where it is not. In `harness-judge` mode this script makes **no call at all**: with no patch on disk it writes the worksheet, prints the spawn instruction over it and exits 3, and the agent's patch — written to a seat-private staging path outside the run directory — is then ingested and held to its author. `run_panel.py` reaches the same two things by running this pass, so the worksheet always exists before the instruction that names it. In `synthesis` mode with no patch on disk, the persona is dispatched through `dispatch.py`'s own machinery — the same driver, the same doubled-cap length retry on a truncation, the same registry gate, the same per-call cost record — and its patch is validated in full **before** `judgment.json` is written, so an invalid patch never reaches disk. The call is recorded in the manifest as `judge`, with its model, its attempts and its cost, and its cost is added to `cost_usd_total`.
 
-**Exit codes:** `0` both files written and every expected seat validated; `1` usage, including no resolvable artifact and an artifact whose hash does not match the manifest's `artifact_revision`; `2` zero reporting seats, or a provider auth failure on the judgment call; `3` a patch is required, or did not validate after its repair, or the run reconciled with a missing seat — in which case both files **are** written first, with the missing seat named in them, and the code is a CI signal that the run was under-seated rather than an abort.
+**Exit codes:** `0` both files written and every expected seat validated; `1` usage, including no resolvable artifact and an artifact whose hash does not match the manifest's `artifact_revision`; `2` zero reporting seats, or a provider auth failure on the judgment call; `3` a patch is required, or did not validate after its repair, or the composed judgment prompt does not fit the judge model's context window, or the run reconciled with a missing seat — in which case both files **are** written first, with the missing seat named in them, and the code is a CI signal that the run was under-seated rather than an abort; `4` a direct judgment call this run's manifest never priced, which `--approve-budget` overrides.

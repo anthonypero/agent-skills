@@ -1,12 +1,12 @@
 #!/bin/sh
 # First-run setup for ensemble-review. Standard library only; nothing is installed.
 #
-#   ./install.sh                        # check python and the key, then seed the model registry
+#   ./install.sh                        # check python and the key, install the judge, seed the registry
 #   ./install.sh --workspace <project>  # seed that project's own registry instead of the package's
 #   ./install.sh --dry-run              # show what the refresh would change, write nothing
-#   ./install.sh --check-only           # python and the key; no catalogue call at all
+#   ./install.sh --check-only           # python, the key and the judge's state; no catalogue call
 #
-# Three checks, in the order they can fail:
+# Four steps, in the order they can fail:
 #
 # 1. **python3, 3.10 or newer.** Every script here is standard-library Python 3 with no dependency
 #    to install, so this is the whole runtime requirement.
@@ -15,7 +15,14 @@
 #    `$OPENROUTER_API_KEY` in the environment. This prints **which** path answered and never the
 #    value — the skills repo is public, and a key echoed into a terminal is a key in a scrollback.
 #    A connector whose config sets `api_key_secret: null` skips the vault leg, as it does at dispatch.
-# 3. **The model registry is seeded.** `templates/models.json` holds, per concrete model id, what a
+# 3. **The harness judge is installed.** `agents/judge.md` is copied to
+#    `~/.claude/agents/ensemble-judge.md`, which is what makes it spawnable by name and what makes
+#    `harness-judge` the default judgment supplier on an unattended run. It is a copy rather than a
+#    symlink so the installed agent does not change under a running session when the package moves,
+#    and it is idempotent: an identical file already there is left alone and the script says so.
+#    `--check-only` and `--dry-run` both report whether it is there and install nothing.
+#    `$ENSEMBLE_REVIEW_HARNESS_AGENTS_DIR` overrides the directory, which is how this is tested.
+# 4. **The model registry is seeded.** `templates/models.json` holds, per concrete model id, what a
 #    token costs, how much context it has, which effort strings it accepts and how many completion
 #    tokens one seat spends on it. The cost pre-flight is unimplementable without it, and a resolved
 #    seat the registry cannot price is a composition error that refuses the run.
@@ -41,7 +48,7 @@ fail() {
 }
 
 usage() {
-    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 }
 
@@ -117,12 +124,50 @@ PYTHON
 
 printf 'key:      resolved from %s (value not shown)\n' "$KEY_SOURCE"
 
+# --- 3. the harness judge -------------------------------------------------------------------------
+
+# The judgment supplier for an unattended run when a harness is present: a fixed, named agent on
+# frontier Claude, on a family no seat holds. Owner ruling, 2026-09-19. Its presence at this exact
+# path is also the signal `lib/judge.py` reads to decide whether a harness is there at all, which is
+# why the install and the detection name one path between them.
+JUDGE_SRC="$SKILL_DIR/agents/judge.md"
+AGENTS_DIR=${ENSEMBLE_REVIEW_HARNESS_AGENTS_DIR:-${HOME:-}/.claude/agents}
+JUDGE_DEST="$AGENTS_DIR/ensemble-judge.md"
+
+[ -f "$JUDGE_SRC" ] || fail "the package is missing agents/judge.md; the harness judge cannot be installed."
+
+# `--check-only` and `--dry-run` both report and write nothing. They mean different things
+# elsewhere — one skips the catalogue call, the other makes it and discards the diff — and they
+# mean the same thing here, because "write nothing" is what a dry run is for and installing an
+# agent behind that flag is the surprise the flag exists to prevent.
+if [ -n "$CHECK_ONLY" ] || [ -n "$DRY_RUN" ]; then
+    WHY="--check-only"
+    [ -n "$DRY_RUN" ] && WHY="--dry-run"
+    if [ -f "$JUDGE_DEST" ] && cmp -s "$JUDGE_SRC" "$JUDGE_DEST"; then
+        printf 'judge:    installed at %s (not touched, %s)\n' "$JUDGE_DEST" "$WHY"
+    elif [ -f "$JUDGE_DEST" ]; then
+        printf 'judge:    out of date at %s — would be replaced (nothing written, %s)\n' "$JUDGE_DEST" "$WHY"
+    else
+        printf 'judge:    NOT installed at %s — would be installed (nothing written, %s)\n' "$JUDGE_DEST" "$WHY"
+    fi
+fi
+
 if [ -n "$CHECK_ONLY" ]; then
     printf 'registry: not touched (--check-only)\n'
     exit 0
 fi
 
-# --- 3. the model registry ------------------------------------------------------------------------
+if [ -z "$DRY_RUN" ]; then
+    if [ -f "$JUDGE_DEST" ] && cmp -s "$JUDGE_SRC" "$JUDGE_DEST"; then
+        printf 'judge:    already installed at %s (nothing moved)\n' "$JUDGE_DEST"
+    else
+        mkdir -p "$AGENTS_DIR" || fail "could not create the harness agents directory at $AGENTS_DIR"
+        cp "$JUDGE_SRC" "$JUDGE_DEST" || fail "could not install the harness judge to $JUDGE_DEST"
+        printf 'judge:    installed ensemble-judge at %s\n' "$JUDGE_DEST"
+    fi
+fi
+
+# --- 4. the model registry ------------------------------------------------------------------------
 
 set -- "$SKILL_DIR/scripts/refresh_models.py"
 [ -n "$WORKSPACE" ] && set -- "$@" --workspace "$WORKSPACE"

@@ -37,14 +37,14 @@
       }
     },
     "panel": { "type": "string", "description": "Template name or \"ad-hoc\"" },
-    "reconciler": { "type": "string", "enum": ["host", "synthesis"], "description": "The author of the judgment patch, not the writer of this file" },
+    "reconciler": { "type": "string", "enum": ["host", "synthesis", "harness-judge"], "description": "The author of the judgment patch, not the writer of this file" },
     "judgment": {
       "type": "object",
       "additionalProperties": false,
       "required": ["path", "author", "generated_at"],
       "properties": {
         "path": { "type": "string" },
-        "author": { "type": "string", "enum": ["host", "synthesis"] },
+        "author": { "type": "string", "enum": ["host", "synthesis", "harness-judge"] },
         "generated_at": { "type": ["string", "null"] }
       }
     },

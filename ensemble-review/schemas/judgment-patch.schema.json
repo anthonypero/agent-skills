@@ -9,7 +9,7 @@
   "properties": {
     "schema_version": { "const": "1" },
     "run_id": { "type": "string", "minLength": 1, "description": "Must match the manifest; a mismatch is a hard error" },
-    "author": { "type": "string", "enum": ["host", "synthesis"] },
+    "author": { "type": "string", "enum": ["host", "synthesis", "harness-judge"], "description": "Who supplied this patch. Not a label: `synthesis` and `harness-judge` are held to the mechanical floor (no `rulings`, an all-judgment-call cluster is always flag-for-human) and `host` is not, because only a host has an owner to answer to." },
     "generated_at": { "type": "string", "description": "ISO 8601 with offset" },
     "note": { "type": "string", "description": "Free prose for the human reading the patch. Not carried into the product" },
     "claim_joins": {
