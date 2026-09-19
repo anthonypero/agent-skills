@@ -503,3 +503,44 @@ def strip_fence(text):
     if start != -1 and end > start:
         return stripped[start:end + 1]
     return stripped
+
+
+# --- the repair re-ask's quote -------------------------------------------------------------------
+
+# The ceiling on how much of an invalid response a repair re-ask quotes back, and the share of it
+# spent on the head. About 15,000 tokens: enough to carry a whole 20-finding report verbatim — the
+# first unattended run's accepted `consistency-kimi` report is 57 KB — and an order of magnitude
+# below the 200,000 characters this used to allow. Shared by the seat's repair prompt in
+# `dispatch.py` and the judgment patch's in `lib/judge.py`, because one cap is the point.
+REPAIR_QUOTE_CHARS = 60000
+REPAIR_QUOTE_HEAD_FRACTION = 0.65
+
+
+def quote_for_repair(raw_output, limit=None):
+    """The previous response as a repair re-ask quotes it back. Returns (text, note_or_None).
+
+    The repair re-ask is the **one** prompt that quotes the model's own output — the stage 2a rule
+    keeps the length retry from doing it — and it still needs a ceiling. The ceiling used to be
+    200,000 characters, about 50,000 tokens, which is not a cap so much as a promise to pay for one:
+    the original prompt is re-sent whole alongside it.
+
+    The first unattended run came close enough to show the shape of the failure without tripping it.
+    `consistency-kimi` burned 101,504 completion tokens on its second attempt, of which 97,562 were
+    reasoning tokens that never enter the text, so the unterminated JSON it did return was about
+    15,000 characters and the re-ask cost roughly 4,000 extra prompt tokens. Had the same 101,504
+    tokens been *content*, the old ceiling would have quoted 50,000 of them back.
+
+    Head and tail rather than head alone: a JSON object that failed to parse is usually broken at its
+    end, and the tail is where the validator's character offset points.
+    """
+    limit = REPAIR_QUOTE_CHARS if limit is None else limit
+    text = raw_output or ""
+    if len(text) <= limit:
+        return text, None
+    head = int(limit * REPAIR_QUOTE_HEAD_FRACTION)
+    tail = limit - head
+    dropped = len(text) - limit
+    marker = "\n…[{0} characters elided from the middle of your previous response]…\n".format(dropped)
+    note = ("the previous response was {0} characters; {1} elided from the middle of the repair "
+            "quote (cap {2})".format(len(text), dropped, limit))
+    return text[:head] + marker + text[-tail:], note

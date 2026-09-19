@@ -78,12 +78,15 @@ A template is a starting point, not a wall: compose seats ad hoc, or drop an edi
 
 Two things are measured and the rest is projected, so they are kept apart. The seed's estimate — 40–50k input plus "a few k output" — is wrong by 5–10x, because **reasoning tokens bill as output** and four of five frontier models cannot turn reasoning off.
 
-**Measured**, from the two 2026-09-18 dogfood runs:
+**Measured**, from the two 2026-09-18 dogfood runs and the first unattended run on 2026-09-19:
 
 | Panel | Composition | Cost |
 | --- | --- | --- |
 | Four frontier seats **with** a Claude frontier seat | Fable 5.1, GPT-6 Astra, Kimi K3, GLM-5.3 | **$4.80** by manifest, $5.13 by dashboard once failed attempts counted. The Fable seat alone was $3.03. 698 s |
 | Four standard seats, **no Claude** | the shipped `spec-review` panel at `standard` | **$1.47** against a ~$1.00 projection built on prompt size alone. 794 s |
+| Four standard seats, **no Claude**, unattended end to end | the shipped `spec-review` panel at `standard`, judgment by `synthesis` on `openai/gpt-5.6-sol` | **$2.75** billed against a $2.30 projection, confirmed to the cent against the credit ledger. 3,286 s |
+
+The third row is `reviews/v3-spec/2026-09-19-1`, the v3 spec reviewed by its own skill: four seats, of which `buildability-glm` was lost to a transient `IncompleteRead` and never reported, leaving three families and **28 clusters**. Exit **3**, the under-seated signal from that missing seat. Of the $2.75, the judgment call was **$0.41** — a 127k-token prompt, larger than any reviewer's, which is why the judge is priced on its own model rather than on a seated one. A further $1.82 of upstream inference was run on an errored attempt and not billed.
 
 **Projected by the shipped formula**, which is a different number from the one v2 printed: these are `lib/budget.py` run against `templates/models.json` and `templates/config.json` for a **60,000-token prompt**, the figure the stage 2a cost delta is quoted against, with the judgment call seated by the same `judge_lib.synthesis_seat()` the judge stage uses and priced on **its own** model. The two money columns are the two reconcilers — an interactive run whose host writes the judgment patch makes no synthesis call and is not charged for one.
 

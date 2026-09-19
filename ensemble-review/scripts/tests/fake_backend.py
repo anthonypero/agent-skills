@@ -16,12 +16,15 @@ A call spec:
      "raw": "…",                                   # content verbatim, instead of `body`
      "prompt_tokens": 1000, "completion_tokens": 500, "reasoning_tokens": 100,
      "cost": 0.01,
-     "raise": "auth" | "transient" | "error" | "unavailable"}
+     "raise": "auth" | "transient" | "error" | "unavailable" | "incomplete"}
 
 `"unavailable"` is a 404 naming the model, which is what a provider answers when it will not serve
-that model at all — the row the re-seat-once path turns on.
+that model at all — the row the re-seat-once path turns on. `"incomplete"` is
+`http.client.IncompleteRead`, the provider closing the connection mid-body, which is what took the
+first unattended run's `buildability-glm` seat down.
 """
 
+import http.client
 import json
 import os
 import sys
@@ -30,6 +33,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backends import AuthFailure  # noqa: E402
+from backends import openai_compat  # noqa: E402
 
 DEFAULT_MAX_TOKENS = 32000
 
@@ -105,6 +109,8 @@ def dispatch_detailed(system_prompt, user_prompt, model, backend_entry, json_sch
         raise RuntimeError("provider error: scripted failure")
     if failure == "unavailable":
         raise _Rejected(404, "No endpoints found for {0}.".format(model))
+    if failure == "incomplete":
+        raise http.client.IncompleteRead(b"x" * spec.get("partial_bytes", 528))
 
     if "raw" in spec:
         text = spec["raw"]
@@ -118,12 +124,18 @@ def dispatch_detailed(system_prompt, user_prompt, model, backend_entry, json_sch
         "cost": spec.get("cost", 0.01),
         "completion_tokens_details": {"reasoning_tokens": spec.get("reasoning_tokens", 100)},
     }
+    if "cost_details" in spec:
+        usage["cost_details"] = spec["cost_details"]
     finish = spec.get("finish_reason", "stop")
+    cost_usd, cost_source = _cost(usage)
+    upstream_unbilled = _upstream_unbilled(usage, cost_usd)
     return {
         "text": text,
         "usage": usage,
         "reasoning_tokens": usage["completion_tokens_details"]["reasoning_tokens"],
-        "cost_usd": usage["cost"],
+        "cost_usd": cost_usd,
+        "cost_source": cost_source,
+        "upstream_unbilled_usd": upstream_unbilled,
         "model": model,
         "provider": "fake",
         "connector": "fake_backend",
@@ -139,7 +151,9 @@ def dispatch_detailed(system_prompt, user_prompt, model, backend_entry, json_sch
             "validation_errors": None,
             "usage": usage,
             "reasoning_tokens": usage["completion_tokens_details"]["reasoning_tokens"],
-            "cost_usd": usage["cost"],
+            "cost_usd": cost_usd,
+            "cost_source": cost_source,
+            "upstream_unbilled_usd": upstream_unbilled,
             "elapsed_s": 0.0,
             "notes": [],
             "response_id": "fake-{0}".format(index),
@@ -149,3 +163,19 @@ def dispatch_detailed(system_prompt, user_prompt, model, backend_entry, json_sch
 
 def dispatch(system_prompt, user_prompt, model, backend_entry, json_schema, http_request_fn):
     return dispatch_detailed(system_prompt, user_prompt, model, backend_entry, json_schema, http_request_fn)["text"]
+
+
+def _cost(usage):
+    """The shipped driver's own cost rule, **called** rather than mirrored.
+
+    A copy here would be a copy that drifts: a mutation to `openai_compat._cost` that this file
+    reimplemented would leave every test passing against the double while the real driver did
+    something else. Calling it means the scripted `cost_details` rows exercise the shipped
+    accounting, and the only thing this module still owns is what the provider is pretending to say.
+    """
+    return openai_compat._cost(usage, None)
+
+
+def _upstream_unbilled(usage, billed):
+    """The shipped driver's rule, called for the same reason `_cost` is."""
+    return openai_compat._upstream_unbilled(usage, billed)

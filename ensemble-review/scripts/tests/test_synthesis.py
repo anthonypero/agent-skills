@@ -27,6 +27,7 @@ import dispatch  # noqa: E402
 from lib import budget as budget_lib  # noqa: E402
 from lib import judge as judge_lib  # noqa: E402
 from lib import paths as paths_lib  # noqa: E402
+from lib import reconcile_core as core  # noqa: E402
 from lib import registry as registry_lib  # noqa: E402
 from lib import runs as runs_lib  # noqa: E402
 
@@ -335,6 +336,43 @@ class JudgeAccountingTest(JudgeStageTestCase):
         record = self.manifest()["judge"]
         self.assertEqual(record["status"], "failed")
         self.assertAlmostEqual(record["cost_usd"], 0.8, places=6)
+
+    def test_the_judge_record_carries_the_cost_source_a_seat_record_carries(self):
+        self.run_panel()
+        self.judge({harness.SLOW_MODEL: [{"body": patch(), "cost": 0.25}]})
+        record = self.manifest()["judge"]
+        self.assertEqual(record["cost_sources"], ["provider"])
+        self.assertFalse(record["cost_estimated"])
+        self.assertIsNone(record["upstream_unbilled_usd"],
+                          "nothing unbilled reads as null, never as zero")
+
+    def test_unbilled_upstream_spend_on_the_judgment_call_reaches_the_manifest(self):
+        """`_upstream_unbilled_total` sums this key off the judge record; the producer must emit it."""
+        self.run_panel()
+        self.judge({harness.SLOW_MODEL: [
+            {"body": patch(), "cost": 0,
+             "cost_details": {"upstream_inference_cost": 1.816461}},
+        ]})
+        manifest = self.manifest()
+        record = manifest["judge"]
+        self.assertEqual(record["cost_usd"], 0.0, "the billed figure stands")
+        self.assertAlmostEqual(record["upstream_unbilled_usd"], 1.816461, places=6)
+        self.assertAlmostEqual(record["attempts"][0]["upstream_unbilled_usd"], 1.816461, places=6)
+        seats_cost = sum(seat["cost_usd"] for seat in manifest["seats"])
+        self.assertAlmostEqual(manifest["cost_usd_total"], seats_cost, places=6,
+                               msg="unbilled inference never enters the run total")
+
+    def test_the_judges_unbilled_spend_reaches_the_method_caveat(self):
+        """End to end through the real producer, rather than a hand-built judge record."""
+        self.run_panel()
+        self.judge({harness.SLOW_MODEL: [
+            {"body": patch(), "cost": 0,
+             "cost_details": {"upstream_inference_cost": 1.816461}},
+        ]})
+        manifest = self.manifest()
+        manifest["projection"] = {"projection_usd": 0.01, "budget_usd": 5.0, "estimate": True}
+        caveat = core.method_caveat("", manifest)
+        self.assertIn("a further $1.82 of upstream inference was run and not billed", caveat)
 
 
 class RepairTest(JudgeStageTestCase):

@@ -860,15 +860,23 @@ def _merge_judgment(clusters, patch, manifest, seats_expected, seats_reporting, 
 def method_caveat(supplied, manifest):
     """The patch's caveat, plus everything about the run the judgment supplier could not know.
 
-    Three appendices, each drawn from the manifest and none of them from the patch:
+    Five appendices, each drawn from the manifest and none of them from the patch:
 
     - **Seat substitutions.** A re-seated seat changes what the agreement counts mean — the panel
       that ran is not quite the panel that was composed. An unsatisfiable constraint and a runtime
       re-seat are both decided by `run_panel.py` after the patch's author has read the reports.
+    - **Missing seats.** A seat the panel composed and the run did not hear back from, named with
+      the reason the manifest recorded. The judgment supplier sees the reports that landed; it
+      cannot see which of the composed seats are absent, or why.
     - **The family target.** `min_families` is a target, not a precondition: a run that misses it
       proceeds and says so here. **One reporting family is `lens-diverse only`** — several lenses,
       one mind, and no cross-family corroboration available at any tier, which is the single fact
-      that most changes how the tier table should be read.
+      that most changes how the tier table should be read. A run that met its target but lost a seat
+      still gets both counts, because a met target over a short panel is worth stating.
+    - **Projected against billed cost.** Run 3 projected $2.30 and was billed $2.75 with nothing
+      comparing the two. Nothing meters spend as seats return — that gap is the spec's — so the
+      after-the-fact comparison is the only place it is visible at all. The figure is the **billed**
+      cost, and a run carrying unbilled upstream inference says so in one clause.
     - **The inferred panel.** A run with no references never infers a template whose
       `requires_references` is true, so the panel that ran may not be the panel the artifact's own
       name suggested. That substitution is recorded the same way a seat's is.
@@ -889,9 +897,17 @@ def method_caveat(supplied, manifest):
     if lines:
         appendices.append("Seat substitutions recorded in the manifest — " + "; ".join(lines) + ".")
 
-    families = _min_families_caveat(manifest)
+    absent = _missing_seats_caveat(manifest)
+    if absent:
+        appendices.append(absent)
+
+    families = _min_families_caveat(manifest, always=bool(absent))
     if families:
         appendices.append(families)
+
+    spend = _cost_caveat(manifest, always=bool(absent))
+    if spend:
+        appendices.append(spend)
 
     inference = manifest.get("panel_inference")
     if isinstance(inference, dict) and inference.get("reason"):
@@ -906,12 +922,41 @@ def method_caveat(supplied, manifest):
     return (text + "\n\n" + appended) if text else appended
 
 
-def _min_families_caveat(manifest):
-    """One sentence when the run missed its family target, and nothing at all when it met it.
+def _missing_seats_caveat(manifest):
+    """The composed seats that did not report, named with the reason and the stage.
+
+    Only an **explicit** failure counts. A seat record carrying no status at all is a manifest this
+    function does not understand, and asserting a missing seat over it would put a fact in the
+    reconciliation that the run never established. A harness seat still `pending` is not missing
+    either: the host has simply not rendered it yet.
+    """
+    lines = []
+    for seat in manifest.get("seats") or []:
+        if seat.get("status") not in ("failed", "timeout"):
+            continue
+        reason = (seat.get("failure_reason")
+                  or (seat.get("error") or "").strip().splitlines()[-1:] or ["no reason recorded"])
+        reason = reason if isinstance(reason, str) else reason[0]
+        lines.append("`{0}` ({1}, {2}) — {3}".format(
+            seat.get("reviewer_id"), seat.get("lens") or "lens unrecorded",
+            seat.get("model") or seat.get("family") or "model unrecorded", reason.rstrip(".")))
+    if not lines:
+        return None
+    return ("Seats that did not report — {0} of {1} composed seat(s) are absent from every cluster "
+            "below: {2}. Their lenses were not applied to this artifact at all.".format(
+                len(lines), len(manifest.get("seats") or []), "; ".join(lines)))
+
+
+def _min_families_caveat(manifest, always=False):
+    """One sentence when the run missed its family target, or when `always` asks for it anyway.
 
     Both counts are reported, because they answer different questions: `seated` says what the panel
     was composed to reach and `reporting` says what it actually reached, and a panel that seated four
     families and heard back from one is a different document from one that only ever had one.
+
+    `always` is set when a seat is missing. Run 3 seated four families, lost one and still met its
+    target of two, so the counts said nothing — and a reader of the tier table had no way to know
+    that "three families agree" was three out of four rather than three out of three.
     """
     block = manifest.get("min_families")
     if not isinstance(block, dict):
@@ -922,19 +967,90 @@ def _min_families_caveat(manifest):
     if not isinstance(target, int):
         return None
     counts = [value for value in (seated, reporting) if isinstance(value, int)]
-    if not counts or min(counts) >= target:
+    if not counts:
+        return None
+    met = min(counts) >= target
+    if met and not always:
         return None
     reading = ("this run is **lens-diverse only** — several lenses, one family, so no cluster on it "
                "can carry cross-family corroboration"
                if reporting == 1 else
+               "the target is met, but over a short panel" if met else
                "cross-family corroboration is thinner than the panel asked for")
-    return ("Family diversity below the panel's target — `min_families` target {0}, {1} seated, {2} "
-            "reporting ({3}); {4}.".format(
+    return ("Family diversity {0} the panel's target — `min_families` target {1}, {2} seated, {3} "
+            "reporting ({4}); {5}.".format(
+                "against" if met else "below",
                 target,
                 seated if seated is not None else "unrecorded",
                 reporting if reporting is not None else "unrecorded",
                 ", ".join(block.get("families_reporting") or block.get("families_seated") or []) or "no family recorded",
                 reading))
+
+
+def _cost_caveat(manifest, always=False):
+    """Projected against actual, when the manifest carries both. Silent when it carries either alone.
+
+    The projection is a dispatch gate and nothing meters spend as seats return, so this comparison
+    is made after the fact or not at all. It is a **caveat** rather than an accounting line because
+    an overrun says something about the reading: a seat that cost three times its projection usually
+    did so by retrying, and a retried seat is one whose report came from a different attempt than
+    the one the panel was composed around.
+
+    **The figure is what the account was billed**, `cost_usd_total`, which is the number that
+    reconciles against a credit ledger — the first unattended run's $2.752117 against a `/credits`
+    delta of $2.752118. Inference the provider ran and did not charge for is real and is reported in
+    its own clause, and only when there is some: it explains why a seat took an hour without
+    pretending the run cost more than it did.
+
+    A run that came in **under** its projection says nothing, unless `always` — set when a seat is
+    missing, where the money that did not get spent is part of what the missing seat cost. A caveat
+    section that appends a line to every clean run is a caveat section readers stop reading.
+    """
+    projection = manifest.get("projection")
+    if not isinstance(projection, dict):
+        return None
+    projected = projection.get("projection_usd")
+    actual = manifest.get("cost_usd_total")
+    if projected is None or actual is None:
+        return None
+    try:
+        projected, actual = float(projected), float(actual)
+    except (TypeError, ValueError):
+        return None
+    if actual <= projected and not always:
+        return None
+    ratio = (actual / projected) if projected else None
+    reading = ("under the pre-flight" if actual <= projected else
+               "over the pre-flight by {0:.0f}%".format((ratio - 1) * 100) if ratio else
+               "over the pre-flight")
+    budget = projection.get("budget_usd")
+    unbilled = _upstream_unbilled_total(manifest)
+    return ("Cost — the pre-flight projected ${0:.2f} and the run was billed ${1:.2f}, {2}{3}{4}. "
+            "The projection is a dispatch gate: nothing meters spend as seats return, so an overrun "
+            "runs to completion.".format(
+                projected, actual, reading,
+                " against a budget of ${0:.2f}".format(float(budget)) if budget is not None else "",
+                "; a further ${0:.2f} of upstream inference was run and not billed".format(unbilled)
+                if unbilled else ""))
+
+
+def _upstream_unbilled_total(manifest):
+    """Inference the provider ran and did not charge for, over every seat and the judge.
+
+    Summed here rather than kept as a manifest field, because it belongs to the same read as the
+    billed total and nothing else asks for it. Zero and absent are the same answer.
+    """
+    total = 0.0
+    records = list(manifest.get("seats") or [])
+    judge = manifest.get("judge")
+    if isinstance(judge, dict):
+        records.append(judge)
+    for record in records:
+        try:
+            total += float(record.get("upstream_unbilled_usd") or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return total or None
 
 
 def _wrap(cluster, records):

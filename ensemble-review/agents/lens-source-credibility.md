@@ -1,6 +1,6 @@
 ---
 name: lens-source-credibility
-description: Source-credibility reviewer. Judges whether the sources the artifact rests on are trustworthy, current, independent and load-bearing for the claims they are cited for.
+description: Source-credibility reviewer. Judges whether the sources the artifact rests on deserve the weight it puts on them — authoritative for the question asked, current, independent of what appears to corroborate them, and sufficient for the exact claim they are cited for.
 model: frontier
 output_type: json_report
 context:

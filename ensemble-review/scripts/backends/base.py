@@ -44,14 +44,16 @@ call or the finish reason, and the manifest promises all of them. Ship both; `di
 | `text` | The model's content, **falling back to the `reasoning` field when `content` is empty** — DeepSeek returns everything there, and a driver that does not look is a seat that returned nothing |
 | `usage` | `{prompt_tokens, completion_tokens, total_tokens}` |
 | `reasoning_tokens` | From the provider's own count when it reports one; `None` when it does not. Never zero as a stand-in for unknown |
-| `cost_usd` | The provider's reported cost when it gives one, else computed from `backend_entry["prices"]` |
+| `cost_usd` | What the account was **billed** — the provider's own figure when the usage block carries one, zero included — else computed from `backend_entry["prices"]` |
+| `cost_source` | **Optional, defaults to `None`.** `provider` for a billed figure, `estimated` for one reconstructed from usage tokens at catalogue prices. A driver that omits it is accepted and warned about: the caller cannot tell a billed total from a reconstructed one without it |
+| `upstream_unbilled_usd` | **Optional, defaults to `None`.** Inference the provider reports running beyond what it billed — an errored generation, above all. Never added to `cost_usd`: the billed total has to reconcile against a credit balance. `None` when there is no divergence, never zero |
 | `model` | The id actually served, which is not always the id asked for |
 | `provider` | The upstream host the request was routed to — the audit trail for where the bytes went |
 | `connector` | The driver type that made the call |
 | `effort` | The effort parameter actually sent, or `None` |
 | `max_tokens` | The completion cap actually sent |
 | `finish_reason` | `stop`, `length`, … **`length` is not a reviewer error**: the caller retries once at double the cap with a fresh prompt before it ever reaches the repair path, so report it accurately or that retry never fires |
-| `attempts` | A one-entry list for the call this driver made: `{max_tokens_sent, finish_reason, usage, reasoning_tokens, cost_usd, elapsed_s, notes, response_id}`. The caller renumbers it, fills in the validation verdict and concatenates the seat's history — a driver makes one call and cannot know whether what it returned validated |
+| `attempts` | A one-entry list for the call this driver made: `{max_tokens_sent, finish_reason, usage, reasoning_tokens, cost_usd, elapsed_s, notes, response_id}`, plus `cost_source` and `upstream_unbilled_usd` on the same optional terms as above. The caller renumbers it, fills in the validation verdict and concatenates the seat's history — a driver makes one call and cannot know whether what it returned validated |
 | `notes` | Free strings about how the call was made — a fallback out of JSON mode, a retried body shape |
 
 ## Errors
@@ -66,6 +68,8 @@ A driver exports a `Rejected(status, body)` exception carrying both, which is wh
 possible from the outside; `openai_compat.Rejected` is the shipped one.
 """
 
+import sys
+
 REQUIRED_FUNCTIONS = ("dispatch", "dispatch_detailed")
 
 RESULT_FIELDS = (
@@ -75,13 +79,26 @@ RESULT_FIELDS = (
 
 ATTEMPT_FIELDS = ("max_tokens_sent", "finish_reason", "usage", "cost_usd")
 
+# The accounting fields, and they are **optional** on purpose. Making them required would fail
+# `check_driver` on every driver written before they existed — including a project's own workspace
+# connector, which is the one thing this contract exists to keep working. A driver that omits them
+# gets `None` for both, which is the honest answer: unknown source, no known divergence. It is also
+# warned about, because a caller that cannot tell a billed total from a reconstructed one is a
+# caller whose `cost_usd_total` means less than it appears to.
+OPTIONAL_RESULT_FIELDS = {"cost_source": None, "upstream_unbilled_usd": None}
+OPTIONAL_ATTEMPT_FIELDS = {"cost_source": None, "upstream_unbilled_usd": None}
 
-def check_driver(module):
+
+def check_driver(module, result=None, warn=None):
     """Every way `module` fails the contract above, as messages. Empty means it satisfies it.
 
-    Structural only — it says whether a driver exports the right shape, not whether it talks to its
-    provider correctly. Useful from a test, and from a project checking its own workspace driver
-    before a panel spends money discovering the same thing.
+    Structural over the module by default — it says whether a driver exports the right shape, not
+    whether it talks to its provider correctly. Useful from a test, and from a project checking its
+    own workspace driver before a panel spends money discovering the same thing.
+
+    The **optional accounting fields cannot be seen in a module**: they live in what one call
+    returns, and `check_driver` makes no call. Pass one `dispatch_detailed()` return as `result` and
+    the result contract is checked too, warnings included.
     """
     problems = []
     for name in REQUIRED_FUNCTIONS:
@@ -89,17 +106,30 @@ def check_driver(module):
             problems.append("no module-level `{0}()`".format(name))
     if not isinstance(getattr(module, "Rejected", None), type):
         problems.append("no `Rejected` exception carrying the provider's status and body")
+    if result is not None:
+        problems.extend(check_result(result, warn=warn))
     return problems
 
 
-def check_result(result):
-    """Every way one `dispatch_detailed()` return fails the contract, as messages."""
+def check_result(result, warn=None):
+    """Every way one `dispatch_detailed()` return fails the contract, as messages.
+
+    A missing **optional** accounting field is not a failure — a driver written before those fields
+    existed still satisfies the contract — but it is worth a line on stderr, because the caller then
+    has no way to tell a billed cost from a reconstructed one. Pass `warn=lambda _: None` to silence
+    it, which is what a caller checking many drivers in a loop wants.
+    """
+    warn = sys.stderr.write if warn is None else warn
     problems = []
     if not isinstance(result, dict):
         return ["the result is a {0}, expected a dict".format(type(result).__name__)]
     for field in RESULT_FIELDS:
         if field not in result:
             problems.append("the result has no `{0}`".format(field))
+    for field in sorted(OPTIONAL_RESULT_FIELDS):
+        if field not in result:
+            warn("driver contract: the result has no `{0}`; defaulting to {1!r}\n".format(
+                field, OPTIONAL_RESULT_FIELDS[field]))
     attempts = result.get("attempts")
     if not isinstance(attempts, list) or not attempts:
         problems.append("`attempts` must be a list holding one entry for the call that was made")
@@ -109,4 +139,21 @@ def check_result(result):
         for field in ATTEMPT_FIELDS:
             if field not in attempts[0]:
                 problems.append("`attempts[0]` has no `{0}`".format(field))
+        for field in sorted(OPTIONAL_ATTEMPT_FIELDS):
+            if field not in attempts[0]:
+                warn("driver contract: `attempts[0]` has no `{0}`; defaulting to {1!r}\n".format(
+                    field, OPTIONAL_ATTEMPT_FIELDS[field]))
     return problems
+
+
+def with_attempt_defaults(attempt):
+    """One driver attempt with the optional accounting fields filled in. Never mutates the input.
+
+    Applied at the one choke point where a driver's attempt becomes a manifest attempt, so a
+    third-party connector that predates these fields still produces manifest rows a reader can
+    scan without wondering whether an absent key means zero or unknown.
+    """
+    filled = dict(attempt)
+    for field, default in OPTIONAL_ATTEMPT_FIELDS.items():
+        filled.setdefault(field, default)
+    return filled

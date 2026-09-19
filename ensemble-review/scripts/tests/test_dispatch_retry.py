@@ -10,6 +10,7 @@ project's own workspace driver would be, and scripted per call through a plan fi
 import io
 import json
 import os
+import socket
 import sys
 import unittest
 
@@ -449,6 +450,323 @@ class AuthAndBackoffTest(DispatchTestCase):
 
 
 
+class IncompleteReadTest(DispatchTestCase):
+    """Run 3's `buildability-glm`: `IncompleteRead(528 bytes read)` after 147 s, and no retry.
+
+    `http.client.IncompleteRead` descends from `HTTPException`, not from `OSError`, so the old
+    transient set caught every socket failure and missed the one that actually happened — a provider
+    closing the connection part way through the body. Both halves are asserted here: the transport
+    retries it under framework §11, and a seat that still loses leaves an attempt record behind.
+    """
+
+    def test_a_mid_stream_incomplete_read_is_transient_and_recovers_on_the_retry(self):
+        slept, tries = [], []
+
+        def fake_urlopen(_request, timeout=None):
+            tries.append(timeout)
+            if len(tries) == 1:
+                raise dispatch.http.client.IncompleteRead(b"x" * 528)
+            return _Response('{"ok": true}')
+
+        saved = dispatch.urllib.request.urlopen
+        dispatch.urllib.request.urlopen = fake_urlopen
+        stderr, saved_err = io.StringIO(), sys.stderr
+        sys.stderr = stderr
+        try:
+            import backends.openai_compat as driver
+            request_fn = dispatch.make_http_request_fn(driver, sleep=slept.append)
+            status, body = request_fn("https://example.invalid", {}, b"{}", 10)
+        finally:
+            dispatch.urllib.request.urlopen = saved
+            sys.stderr = saved_err
+
+        self.assertEqual((status, body), (200, '{"ok": true}'))
+        self.assertEqual(slept, [1], "one retry was enough; the backoff must not run to the end")
+        self.assertEqual(len(tries), 2)
+        self.assertIn("IncompleteRead", " ".join(request_fn.transient_notes),
+                      "the exception class is what tells a flaky provider from a slow model")
+
+    def test_an_incomplete_read_that_never_recovers_exhausts_the_three_retries(self):
+        slept, tries = [], []
+
+        def fake_urlopen(_request, timeout=None):
+            tries.append(timeout)
+            raise dispatch.http.client.IncompleteRead(b"x" * 528)
+
+        saved = dispatch.urllib.request.urlopen
+        dispatch.urllib.request.urlopen = fake_urlopen
+        stderr, saved_err = io.StringIO(), sys.stderr
+        sys.stderr = stderr
+        try:
+            import backends.openai_compat as driver
+            request_fn = dispatch.make_http_request_fn(driver, sleep=slept.append)
+            with self.assertRaises(dispatch.http.client.IncompleteRead):
+                request_fn("https://example.invalid", {}, b"{}", 10)
+        finally:
+            dispatch.urllib.request.urlopen = saved
+            sys.stderr = saved_err
+
+        self.assertEqual(slept, [1, 4, 16], "framework §11: three retries at 1 s, 4 s, 16 s")
+        self.assertEqual(len(tries), 4)
+        self.assertIn("exhausted 3 retries", " ".join(request_fn.transient_notes))
+
+    def test_every_named_transient_class_is_actually_caught_by_the_set(self):
+        """The set is spelled out in `dispatch.py`; this asserts the spelling is not decorative."""
+        for exception in (dispatch.urllib.error.URLError("x"), socket.timeout(),
+                          TimeoutError(), ConnectionResetError(), ConnectionError(),
+                          dispatch.http.client.IncompleteRead(b""),
+                          dispatch.http.client.HTTPException()):
+            self.assertIsInstance(exception, dispatch.TRANSIENT_EXCEPTIONS,
+                                  "{0} is named in framework §11's policy".format(type(exception).__name__))
+
+    def test_a_seat_that_dies_in_the_transport_still_writes_its_attempt_record(self):
+        """No report, no cost — but never `attempts: null` over a seat that was called and failed."""
+        self.workspace.plan({harness.FAST_MODEL: [{"raise": "incomplete"}]})
+        code, err = self.run_seat(family="xai")
+        self.assertEqual(code, 3, err)
+        self.assertIn("IncompleteRead", err)
+
+        path = os.path.join(self.out, "consistency-xai.failed.json")
+        self.assertTrue(os.path.isfile(path), "a dispatch failure used to leave nothing on disk")
+        with open(path, "r", encoding="utf-8") as handle:
+            failed = json.load(handle)
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["failure_stage"], "dispatch")
+        self.assertIn("IncompleteRead", failed["errors"][0])
+
+        attempts = failed["_meta"]["attempts"]
+        self.assertEqual(len(attempts), 1, "the call that raised is still a call that was made")
+        self.assertEqual(attempts[0]["finish_reason"], "dispatch-error")
+        self.assertEqual(attempts[0]["max_tokens_sent"], registry_lib.DEFAULT_MAX_TOKENS)
+        self.assertIsNotNone(attempts[0]["elapsed_s"])
+        self.assertIn("exception: IncompleteRead", attempts[0]["notes"])
+        self.assertIn("IncompleteRead", attempts[0]["validation_errors"][0])
+
+
+class RepairQuoteCapTest(DispatchTestCase):
+    """The repair re-ask is the one prompt that quotes back, so it is the one that needs a ceiling."""
+
+    def test_a_response_inside_the_cap_is_quoted_whole(self):
+        text = "x" * (dispatch.REPAIR_QUOTE_CHARS - 1)
+        quoted, note = dispatch.quote_for_repair(text)
+        self.assertEqual(quoted, text)
+        self.assertIsNone(note)
+
+    def test_an_over_long_response_is_elided_from_the_middle_and_says_how_much(self):
+        text = "H" * 10000 + "M" * 200000 + "T" * 10000
+        quoted, note = dispatch.quote_for_repair(text)
+        self.assertLess(len(quoted), len(text))
+        self.assertLessEqual(len(quoted) - len("\n…[  characters elided from the middle of your previous response]…\n"),
+                             dispatch.REPAIR_QUOTE_CHARS + 16)
+        self.assertTrue(quoted.startswith("H"), "the head is kept")
+        self.assertTrue(quoted.endswith("T"), "so is the tail, which is where the parse error points")
+        self.assertIn("characters elided", quoted)
+        self.assertIn("cap {0}".format(dispatch.REPAIR_QUOTE_CHARS), note)
+
+    def test_the_cap_is_well_under_the_200000_characters_it_replaced(self):
+        self.assertLessEqual(dispatch.REPAIR_QUOTE_CHARS, 60000)
+
+    def test_the_repair_prompt_carries_the_elision_and_the_note_reaches_the_attempt(self):
+        oversized = '{"verdict": "fix-then-ship", "summary": "' + "y" * 150000
+        self.workspace.plan({harness.FAST_MODEL: [
+            {"raw": oversized, "cost": 0.1},
+            {"body": harness.valid_report(), "cost": 0.1},
+        ]})
+        code, err = self.run_seat(family="xai")
+        self.assertEqual(code, 0, err)
+        calls = self.workspace.calls(harness.FAST_MODEL)
+        self.assertEqual([c["is_repair"] for c in calls], [False, True])
+        self.assertLess(calls[1]["prompt_chars"], calls[0]["prompt_chars"] + dispatch.REPAIR_QUOTE_CHARS + 2000,
+                        "the repair prompt is the original plus a capped quote, not plus 150k characters")
+        notes = self.report("consistency-xai")["_meta"]["attempts"][1]["notes"]
+        self.assertTrue(any("elided from the middle of the repair quote" in note for note in notes), notes)
+
+    def test_a_length_truncation_is_still_never_quoted_back(self):
+        """Stage 2a's rule, re-asserted here because the cap is not what enforces it."""
+        self.workspace.plan({harness.FAST_MODEL: [
+            {"finish_reason": "length", "raw": "z" * 150000, "cost": 0.5},
+            {"body": harness.valid_report(), "cost": 0.1},
+        ]})
+        code, err = self.run_seat(family="xai", extra=["--max-tokens", "16000"])
+        self.assertEqual(code, 0, err)
+        calls = self.workspace.calls(harness.FAST_MODEL)
+        self.assertEqual([c["is_repair"] for c in calls], [False, False])
+        self.assertEqual(calls[0]["prompt_chars"], calls[1]["prompt_chars"],
+                         "the length retry sends a fresh prompt; the truncated bytes are discarded")
+
+
+class CostSourceTest(unittest.TestCase):
+    """`usage.cost` is the billed figure, zero included — settled against the credit ledger.
+
+    OpenRouter's `/credits` read `total_usage` 7.770718 before the first unattended run and
+    10.522836 after it: a delta of $2.752118 against the manifest's recorded $2.752117. The errored
+    attempt that reported `cost: 0` beside an `upstream_inference_cost` of $1.816461 was not billed
+    for it. The upstream figure is kept as `upstream_unbilled_usd` and never folded into the cost.
+    """
+
+    def setUp(self):
+        from backends import openai_compat
+        self.driver = openai_compat
+        self.prices = {"input": 2.1e-06, "output": 1.095e-05}
+
+    # The run's own row: `finish_reason: error`, billed 0, upstream $1.816461.
+    ERRORED = {
+        "prompt_tokens": 97967, "completion_tokens": 101504, "cost": 0,
+        "cost_details": {"upstream_inference_cost": 1.816461},
+    }
+
+    def test_a_billed_cost_is_taken_as_given(self):
+        cost, source = self.driver._cost({"cost": 0.883682464}, self.prices)
+        self.assertAlmostEqual(cost, 0.883682464, places=9)
+        self.assertEqual(source, "provider")
+
+    def test_a_billed_zero_beside_an_upstream_cost_stays_zero(self):
+        cost, source = self.driver._cost(self.ERRORED, self.prices)
+        self.assertEqual(cost, 0.0, "the ledger says an errored generation costs the account nothing")
+        self.assertEqual(source, "provider")
+
+    def test_the_unbilled_upstream_figure_is_recorded_separately(self):
+        self.assertAlmostEqual(self.driver._upstream_unbilled(self.ERRORED, 0.0), 1.816461, places=6)
+
+    def test_an_upstream_cost_equal_to_the_bill_is_not_unbilled_at_all(self):
+        """The ordinary row: both fields carry the same number and there is no divergence to report."""
+        usage = {"cost": 0.883682464,
+                 "cost_details": {"upstream_inference_cost": 0.883682464}}
+        self.assertIsNone(self.driver._upstream_unbilled(usage, 0.883682464))
+
+    def test_a_usage_block_with_no_cost_key_is_estimated_from_usage_and_labelled(self):
+        usage = {"prompt_tokens": 100000, "completion_tokens": 10000}
+        cost, source = self.driver._cost(usage, self.prices)
+        self.assertEqual(source, "estimated")
+        self.assertAlmostEqual(cost, 100000 * 2.1e-06 + 10000 * 1.095e-05, places=9)
+
+    def test_an_unpriced_model_with_no_reported_cost_is_unknown_not_zero(self):
+        self.assertEqual(self.driver._cost({"prompt_tokens": 10, "completion_tokens": 10}, None),
+                         (None, None))
+
+    def test_a_free_call_stays_a_reported_zero_and_is_never_estimated_over(self):
+        self.assertEqual(self.driver._cost({"cost": 0}, None), (0.0, "provider"))
+        self.assertEqual(self.driver._cost({"cost": 0, "prompt_tokens": 100000,
+                                            "completion_tokens": 10000}, self.prices),
+                         (0.0, "provider"))
+
+    def _meta_for(self, spec):
+        workspace = harness.Workspace()
+        self.addCleanup(workspace.close)
+        workspace.apply_env()
+        out = os.path.join(workspace.root, "run")
+        os.makedirs(out)
+        workspace.plan({harness.FAST_MODEL: [spec]})
+        code = dispatch.main([
+            "--persona", "lens-consistency", "--family", "xai",
+            "--artifact", workspace.artifact, "--out", out,
+            "--config", workspace.config, "--models", workspace.registry, "--tier", "standard",
+        ])
+        self.assertEqual(code, 0)
+        with open(os.path.join(out, "consistency-xai.json"), "r", encoding="utf-8") as handle:
+            return json.load(handle)["_meta"]
+
+    def test_the_source_reaches_the_attempt_record_and_the_seat_meta(self):
+        meta = self._meta_for({"body": harness.valid_report(), "cost": 0.25})
+        self.assertAlmostEqual(meta["cost_usd"], 0.25, places=6)
+        self.assertEqual(meta["cost_sources"], ["provider"])
+        self.assertFalse(meta["cost_estimated"])
+        self.assertEqual(meta["attempts"][0]["cost_source"], "provider")
+
+    def test_unbilled_upstream_spend_rolls_up_without_touching_the_cost(self):
+        meta = self._meta_for({"body": harness.valid_report(), "cost": 0,
+                               "cost_details": {"upstream_inference_cost": 1.816461}})
+        self.assertEqual(meta["cost_usd"], 0.0, "the billed total must reconcile against the ledger")
+        self.assertAlmostEqual(meta["upstream_unbilled_usd"], 1.816461, places=6)
+        self.assertAlmostEqual(meta["attempts"][0]["upstream_unbilled_usd"], 1.816461, places=6)
+
+    def test_a_call_with_nothing_unbilled_carries_a_null_rather_than_a_zero(self):
+        meta = self._meta_for({"body": harness.valid_report(), "cost": 0.25})
+        self.assertIsNone(meta["upstream_unbilled_usd"])
+        self.assertIsNone(meta["attempts"][0]["upstream_unbilled_usd"])
+
+
+class ShippedDriverAssemblyTest(unittest.TestCase):
+    """The **real** `openai_compat.dispatch_detailed`, against a fake `urlopen`.
+
+    Every other cost test in this file calls `_cost` directly or goes through the scripted double.
+    Neither reaches the line that puts the numbers into the result dict, so a mutation that dropped
+    `cost_source` or `upstream_unbilled_usd` from the assembly survived all of them. This drives the
+    shipped driver end to end over a hand-written OpenRouter response body.
+    """
+
+    ERRORED_BODY = {
+        "id": "gen-test",
+        "model": "moonshotai/kimi-k3",
+        "provider": "Moonshot AI",
+        "choices": [{"finish_reason": "error", "message": {"content": '{"verdict": "fix-then-'}}],
+        "usage": {
+            "prompt_tokens": 97967, "completion_tokens": 101504, "total_tokens": 199471,
+            "cost": 0, "is_byok": False,
+            "cost_details": {"upstream_inference_cost": 1.816461},
+            "completion_tokens_details": {"reasoning_tokens": 97562},
+        },
+    }
+
+    def _dispatch(self, body):
+        from backends import openai_compat
+
+        def request_fn(_url, _headers, _body_bytes, _timeout):
+            return 200, json.dumps(body)
+
+        return openai_compat.dispatch_detailed(
+            "system", "user", "moonshotai/kimi-k3",
+            {"base_url": "https://example.invalid/api/v1", "api_key": "k",
+             "max_tokens": 128000, "prices": {"input": 2.1e-06, "output": 1.095e-05}},
+            {"type": "json_object"}, request_fn)
+
+    def test_a_billed_zero_beside_an_upstream_cost_reaches_the_result_intact(self):
+        result = self._dispatch(self.ERRORED_BODY)
+        self.assertEqual(result["cost_usd"], 0.0, "the ledger says the errored generation was free")
+        self.assertEqual(result["cost_source"], "provider")
+        self.assertAlmostEqual(result["upstream_unbilled_usd"], 1.816461, places=6)
+        self.assertEqual(result["finish_reason"], "error")
+        self.assertEqual(result["reasoning_tokens"], 97562)
+
+    def test_the_same_numbers_reach_the_drivers_own_attempt_entry(self):
+        attempt = self._dispatch(self.ERRORED_BODY)["attempts"][0]
+        self.assertEqual(attempt["cost_usd"], 0.0)
+        self.assertEqual(attempt["cost_source"], "provider")
+        self.assertAlmostEqual(attempt["upstream_unbilled_usd"], 1.816461, places=6)
+        self.assertEqual(attempt["max_tokens_sent"], 128000)
+
+    def test_the_divergence_is_named_in_the_drivers_notes(self):
+        notes = " ".join(self._dispatch(self.ERRORED_BODY)["notes"])
+        self.assertIn("not billed", notes)
+        self.assertIn("1.816461", notes)
+
+    def test_an_ordinary_call_carries_the_billed_cost_and_nothing_unbilled(self):
+        body = json.loads(json.dumps(self.ERRORED_BODY))
+        body["choices"][0]["finish_reason"] = "stop"
+        body["usage"]["cost"] = 0.765174
+        body["usage"]["cost_details"]["upstream_inference_cost"] = 0.765174
+        result = self._dispatch(body)
+        self.assertAlmostEqual(result["cost_usd"], 0.765174, places=6)
+        self.assertIsNone(result["upstream_unbilled_usd"])
+        self.assertNotIn("not billed", " ".join(result["notes"]))
+
+    def test_a_usage_block_with_no_cost_key_is_estimated_by_the_shipped_driver(self):
+        body = json.loads(json.dumps(self.ERRORED_BODY))
+        body["choices"][0]["finish_reason"] = "stop"
+        del body["usage"]["cost"]
+        del body["usage"]["cost_details"]
+        result = self._dispatch(body)
+        self.assertEqual(result["cost_source"], "estimated")
+        self.assertAlmostEqual(result["cost_usd"], 97967 * 2.1e-06 + 101504 * 1.095e-05, places=9)
+        self.assertIn("estimated from", " ".join(result["notes"]))
+
+    def test_the_shipped_results_satisfy_the_contract_including_its_optional_fields(self):
+        from backends import base
+        silent = []
+        self.assertEqual(base.check_result(self._dispatch(self.ERRORED_BODY), warn=silent.append), [])
+        self.assertEqual(silent, [], "the shipped driver omits neither optional field")
+
+
 class DriverContractTest(unittest.TestCase):
     """`backends/base.py` states the connector contract; these assert it describes what ships.
 
@@ -475,6 +793,150 @@ class DriverContractTest(unittest.TestCase):
         result = driver.dispatch_detailed("system", "user", harness.FAST_MODEL,
                                           {"max_tokens": 1000}, {"type": "json_object"}, None)
         self.assertEqual(base.check_result(result), [])
+
+    def test_a_driver_that_omits_the_optional_accounting_fields_still_passes(self):
+        """A connector written before those fields existed is not a broken connector."""
+        from backends import base
+        legacy = {
+            "text": "{}", "usage": {}, "reasoning_tokens": None, "cost_usd": 0.1,
+            "model": "m", "provider": "p", "connector": "legacy", "effort": None,
+            "max_tokens": 1000, "finish_reason": "stop",
+            "attempts": [{"max_tokens_sent": 1000, "finish_reason": "stop",
+                          "usage": {}, "cost_usd": 0.1}],
+        }
+        warnings = []
+        self.assertEqual(base.check_result(legacy, warn=warnings.append), [],
+                         "the optional fields are optional, not required")
+        text = " ".join(warnings)
+        self.assertIn("cost_source", text, "but their absence is worth a line on stderr")
+        self.assertIn("upstream_unbilled_usd", text)
+        self.assertIn("defaulting to None", text)
+        self.assertEqual(len(warnings), 4, "two on the result, two on the attempt")
+
+    def test_check_driver_folds_in_the_result_contract_when_it_is_given_one(self):
+        """The optional fields live in a result, so a module alone can never reveal them."""
+        from backends import base
+        driver = load_driver(harness.FAKE_BACKEND)
+        warnings = []
+        self.assertEqual(base.check_driver(driver, warn=warnings.append), [])
+        self.assertEqual(warnings, [], "no result was supplied, so there is nothing to warn about")
+
+        legacy_result = {
+            "text": "{}", "usage": {}, "reasoning_tokens": None, "cost_usd": 0.1,
+            "model": "m", "provider": "p", "connector": "legacy", "effort": None,
+            "max_tokens": 1000, "finish_reason": "stop",
+            "attempts": [{"max_tokens_sent": 1000, "finish_reason": "stop", "usage": {}, "cost_usd": 0.1}],
+        }
+        self.assertEqual(base.check_driver(driver, result=legacy_result, warn=warnings.append), [])
+        self.assertIn("cost_source", " ".join(warnings))
+
+    def test_a_result_missing_a_required_field_is_still_a_failure(self):
+        from backends import base
+        broken = {"text": "{}", "attempts": [{}]}
+        problems = base.check_result(broken, warn=lambda _: None)
+        self.assertTrue(any("`cost_usd`" in p for p in problems))
+        self.assertTrue(any("`attempts[0]` has no `max_tokens_sent`" in p for p in problems))
+
+    def test_the_defaults_are_filled_in_where_a_driver_attempt_becomes_a_manifest_attempt(self):
+        from backends import base
+        filled = base.with_attempt_defaults({"max_tokens_sent": 1000, "cost_usd": 0.1})
+        self.assertIsNone(filled["cost_source"])
+        self.assertIsNone(filled["upstream_unbilled_usd"])
+        self.assertEqual(filled["cost_usd"], 0.1)
+
+    def test_a_driver_that_does_supply_them_is_not_overwritten(self):
+        from backends import base
+        filled = base.with_attempt_defaults({"cost_source": "provider", "upstream_unbilled_usd": 1.5})
+        self.assertEqual(filled["cost_source"], "provider")
+        self.assertEqual(filled["upstream_unbilled_usd"], 1.5)
+
+
+class ScriptedDriverDelegatesItsAccountingTest(unittest.TestCase):
+    """The double must **call** the shipped cost rule, not reimplement it.
+
+    A reimplementation with today's semantics is behaviourally invisible — no assertion about
+    outputs can tell the two apart — which is exactly why it is dangerous: the day the shipped rule
+    changes, every test still passes against a double that kept the old one. So this asserts the
+    delegation directly, by making the shipped functions return something unmistakable.
+    """
+
+    def setUp(self):
+        from backends import openai_compat
+        import fake_backend
+        self.real = openai_compat
+        self.fake = fake_backend
+
+    def test_the_double_calls_the_shipped_cost_rule(self):
+        saved = self.real._cost
+        self.real._cost = lambda usage, prices: ("SENTINEL", "sentinel-source")
+        self.addCleanup(setattr, self.real, "_cost", saved)
+        self.assertEqual(self.fake._cost({"cost": 0.01}), ("SENTINEL", "sentinel-source"),
+                         "the fake backend reimplemented `_cost` instead of calling it")
+
+    def test_the_double_calls_the_shipped_unbilled_rule(self):
+        saved = self.real._upstream_unbilled
+        self.real._upstream_unbilled = lambda usage, billed: "SENTINEL"
+        self.addCleanup(setattr, self.real, "_upstream_unbilled", saved)
+        self.assertEqual(self.fake._upstream_unbilled({}, 0.0), "SENTINEL",
+                         "the fake backend reimplemented `_upstream_unbilled` instead of calling it")
+
+    def test_the_two_agree_on_the_rows_the_plan_file_can_script(self):
+        rows = [
+            {"cost": 0.883682464},
+            {"cost": 0, "cost_details": {"upstream_inference_cost": 1.816461}},
+            {"cost": 0, "cost_details": {"upstream_inference_cost": 0}},
+            {"cost": 0.25, "cost_details": {"upstream_inference_cost": 0.25}},
+        ]
+        for usage in rows:
+            self.assertEqual(self.fake._cost(usage), self.real._cost(usage, None), usage)
+            billed = self.real._cost(usage, None)[0]
+            self.assertEqual(self.fake._upstream_unbilled(usage, billed),
+                             self.real._upstream_unbilled(usage, billed), usage)
+
+
+class JudgeRepairPromptTest(unittest.TestCase):
+    """`lib/judge.build_repair_prompt` had no test at all, and its own 200,000-character quote.
+
+    It matters more here than on a seat: the judgment call's prompt already runs to six figures of
+    tokens — the first unattended run's was 127,624 — so an uncapped quote of a rejected patch would
+    make the re-ask the dearest call in the run by a distance.
+    """
+
+    def setUp(self):
+        from lib import judge as judge_lib
+        from lib import report as report_lib
+        self.judge = judge_lib
+        self.report = report_lib
+
+    def test_a_short_patch_is_quoted_whole(self):
+        prompt = self.judge.build_repair_prompt("ORIGINAL", '{"clusters": []}', ["bad"])
+        self.assertIn('{"clusters": []}', prompt)
+        self.assertIn("ORIGINAL", prompt)
+        self.assertIn("===== YOUR PREVIOUS RESPONSE =====", prompt)
+
+    def test_an_over_long_patch_is_capped_at_the_shared_ceiling_with_the_elision_marker(self):
+        oversized = "H" * 10000 + "M" * 300000 + "T" * 10000
+        prompt = self.judge.build_repair_prompt("ORIGINAL", oversized, ["bad"])
+        self.assertLess(len(prompt), len(oversized),
+                        "the 200,000-character quote this replaced was not a cap")
+        self.assertIn("characters elided from the middle of your previous response", prompt)
+        quoted = prompt.split("===== YOUR PREVIOUS RESPONSE =====\n")[1].split(
+            "\n===== END PREVIOUS RESPONSE =====")[0]
+        self.assertLessEqual(len(quoted), self.report.REPAIR_QUOTE_CHARS + 200)
+        self.assertTrue(quoted.startswith("H"))
+        self.assertTrue(quoted.endswith("T"))
+
+    def test_it_uses_the_same_ceiling_as_the_seats_repair_prompt(self):
+        oversized = "z" * (self.report.REPAIR_QUOTE_CHARS * 3)
+        judge_quoted, _note = self.report.quote_for_repair(oversized)
+        self.assertIn(judge_quoted[:500], self.judge.build_repair_prompt("O", oversized, ["bad"]))
+        self.assertIn(judge_quoted[:500], dispatch.build_repair_prompt("O", oversized, ["bad"]))
+
+    def test_the_instructions_that_make_it_a_judgment_re_ask_survive_the_cap(self):
+        prompt = self.judge.build_repair_prompt("ORIGINAL", "x" * 400000, ["bad"])
+        self.assertIn("you may not emit `rulings`", prompt)
+        self.assertIn("Re-emit the WHOLE patch", prompt)
+        self.assertIn("- bad", prompt)
 
 
 class PersonaContextTest(unittest.TestCase):

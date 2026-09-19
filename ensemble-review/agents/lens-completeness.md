@@ -1,6 +1,6 @@
 ---
 name: lens-completeness
-description: Completeness reviewer. Sweeps the artifact for what is absent, thin, or asserted without support — the cases, sections, actors and quantities a document of this kind must cover and this one does not.
+description: Completeness reviewer. Sweeps the artifact for what is absent or thin — the sections, cases, actors, quantities and definitions a document of this kind must cover and this one does not — and for load-bearing claims carrying no support at all. Stops at present-or-absent: whether attached support bears the weight is the source-credibility lens's question.
 model: frontier
 output_type: json_report
 context:

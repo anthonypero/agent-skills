@@ -43,6 +43,7 @@ that is exactly the callback `attempt_loop` takes.
 """
 
 import argparse
+import http.client
 import json
 import os
 import socket
@@ -57,6 +58,7 @@ SKILL_DIR = os.path.dirname(SCRIPTS_DIR)
 sys.path.insert(0, SCRIPTS_DIR)
 
 from backends import AuthFailure, load_driver  # noqa: E402
+from backends import base as backends_base  # noqa: E402
 from lib import paths as paths_lib  # noqa: E402
 from lib import registry as registry_lib  # noqa: E402
 from lib import report as report_lib  # noqa: E402
@@ -72,6 +74,27 @@ TRANSIENT_BACKOFF_S = (1, 4, 16)
 TRANSIENT_STATUSES = (429,)
 AUTH_STATUSES = (401, 403)
 
+# **The transient exception set, and why it is spelled out rather than left at `OSError`.**
+# Run 3's `buildability-glm` seat died on `http.client.IncompleteRead(528 bytes read)` — the provider
+# closed the connection mid-body 147 seconds in. `IncompleteRead` descends from `HTTPException`, not
+# from `OSError`, so it fell straight past the retry loop, cost the seat its whole dispatch and
+# reached the manifest as a 147-second seat with `attempts: null` and a null cost. A connection torn
+# down mid-stream is the most ordinary transient failure there is, so the set names the whole
+# `HTTPException` branch alongside the socket branch. `ConnectionError`, `ConnectionResetError`,
+# `socket.timeout` and `urllib.error.URLError` are all already `OSError` subclasses; they are named
+# anyway because a reader of framework §11's policy should be able to find each one here rather than
+# have to know the standard library's hierarchy to see that it is covered.
+TRANSIENT_EXCEPTIONS = (
+    urllib.error.URLError,
+    socket.timeout,
+    TimeoutError,
+    ConnectionResetError,
+    ConnectionError,
+    http.client.IncompleteRead,
+    http.client.HTTPException,
+    OSError,
+)
+
 EXIT_COMPOSITION = 1
 EXIT_AUTH = 2
 EXIT_INVALID = 3
@@ -84,6 +107,12 @@ UNAVAILABLE_MARKERS = (
     "no endpoints", "not a valid model", "no allowed providers", "is not available",
     "does not exist", "not found", "unknown model", "model_not_found", "no providers",
 )
+
+# The repair re-ask's quote ceiling lives in `lib/report.py`, shared with the judgment patch's own
+# repair prompt in `lib/judge.py`: one cap, or the leg nobody remembered keeps the old 200,000.
+# Re-exported here because this is where the repair path reads.
+REPAIR_QUOTE_CHARS = report_lib.REPAIR_QUOTE_CHARS
+quote_for_repair = report_lib.quote_for_repair
 
 
 # --- secrets -----------------------------------------------------------------------------------
@@ -307,11 +336,12 @@ def build_user_prompt(artifact_path, reference_paths, artifact_label=None, refer
 
 
 def build_repair_prompt(original_user_prompt, raw_output, errors):
+    quoted, _note = quote_for_repair(raw_output)
     return "\n".join([
         original_user_prompt,
         "",
         "===== YOUR PREVIOUS RESPONSE =====",
-        (raw_output or "")[:200000],
+        quoted,
         "===== END PREVIOUS RESPONSE =====",
         "",
         "That response did not validate against the report schema. The validator reported:",
@@ -328,10 +358,16 @@ def build_repair_prompt(original_user_prompt, raw_output, errors):
 def make_http_request_fn(driver, sleep=time.sleep, backoff=TRANSIENT_BACKOFF_S):
     """The transport, with framework §11's retry policy wrapped around it.
 
-    429, 5xx and socket timeouts are transient: three tries at 1 s, 4 s, 16 s, same prompt, same cap.
-    401 and 403 are not, and raise `AuthFailure` so the caller can halt the run rather than spend
+    429, 5xx, socket timeouts and a connection torn down mid-body are transient: three tries at 1 s,
+    4 s, 16 s, same prompt, same cap — `TRANSIENT_EXCEPTIONS` is the set and says why it is spelled
+    out. 401 and 403 are not, and raise `AuthFailure` so the caller can halt the run rather than spend
     three more calls proving the key is still wrong. Every other 4xx is handed straight to the driver,
     which needs to see a `response_format` rejection to fall back out of JSON mode.
+
+    Every retry leaves a line on `http_request_fn.transient_notes`, naming the **exception class** and
+    the wait. `attempt_loop` drains that list onto the attempt the call belongs to, so the manifest
+    records that a seat which eventually landed spent two minutes on an `IncompleteRead` first — the
+    one fact a reader needs to tell a slow model from a flaky provider.
     """
     def http_request_fn(url, headers, body_bytes, timeout):
         last = None
@@ -348,25 +384,69 @@ def make_http_request_fn(driver, sleep=time.sleep, backoff=TRANSIENT_BACKOFF_S):
                     last = driver.Rejected(exc.code, body)
                 else:
                     raise driver.Rejected(exc.code, body)
-            except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as exc:
+            except TRANSIENT_EXCEPTIONS as exc:
                 last = exc
             if index < len(backoff):
-                sys.stderr.write("transient provider error ({0}); retrying in {1}s\n".format(last, backoff[index]))
+                http_request_fn.transient_notes.append(
+                    "transient {0} on try {1}; retried after {2}s".format(
+                        type(last).__name__, index + 1, backoff[index]))
+                sys.stderr.write("transient provider error ({0}: {1}); retrying in {2}s\n".format(
+                    type(last).__name__, last, backoff[index]))
                 sleep(backoff[index])
+        http_request_fn.transient_notes.append(
+            "transient {0} exhausted {1} retries at {2}".format(
+                type(last).__name__, len(backoff), ", ".join("{0}s".format(s) for s in backoff)))
         raise last
+
+    # The caller's drain point. A list on the function rather than a return value because the driver
+    # sits between the two and framework §9 fixes its signature: the transport cannot hand the caller
+    # anything the driver does not already carry.
+    http_request_fn.transient_notes = []
     return http_request_fn
 
 
 # --- attempt records ---------------------------------------------------------------------------
 
-def finish_attempt(attempt, number, errors, note=None):
-    """Stamp a driver attempt record with what only the caller knows: its number and its verdict."""
-    attempt = dict(attempt)
+def finish_attempt(attempt, number, errors, note=None, notes=None):
+    """Stamp a driver attempt record with what only the caller knows: its number and its verdict.
+
+    `notes` carries the caller's own observations about this call — the transport's transient
+    retries, the elision of an over-long quote — which the driver cannot see and the manifest has to
+    keep.
+    """
+    # The optional accounting fields are filled here, the one place a driver's attempt becomes a
+    # manifest attempt, so a connector that predates them still leaves rows a reader can scan.
+    attempt = backends_base.with_attempt_defaults(attempt)
     attempt["n"] = number
     attempt["validation_errors"] = "ok" if not errors else list(errors)
-    if note:
-        attempt["notes"] = list(attempt.get("notes") or []) + [note]
+    extra = list(notes or []) + ([note] if note else [])
+    if extra:
+        attempt["notes"] = list(attempt.get("notes") or []) + extra
     return attempt
+
+
+def dispatch_error_attempt(number, cap, exc, elapsed, notes=None):
+    """The attempt record for a call that raised instead of answering.
+
+    Without it a seat that died in the transport reaches the manifest with `attempts: null`, a null
+    cost and an `elapsed_s` of two and a half minutes — which reads as a seat nobody ever called.
+    The record carries the **exception class**, the cap that was sent, the wall time spent and every
+    transient retry the transport made before giving up.
+    """
+    return {
+        "n": number,
+        "max_tokens_sent": cap,
+        "finish_reason": "dispatch-error",
+        "validation_errors": ["dispatch failed: {0}: {1}".format(type(exc).__name__, exc)],
+        "usage": None,
+        "reasoning_tokens": None,
+        "cost_usd": None,
+        "cost_source": None,
+        "upstream_unbilled_usd": None,
+        "elapsed_s": round(elapsed, 2),
+        "notes": list(notes or []) + ["exception: {0}".format(type(exc).__name__)],
+        "response_id": None,
+    }
 
 
 def build_meta(attempts, tier, model, key_source, elapsed, effort, connector, provider, max_tokens):
@@ -378,6 +458,14 @@ def build_meta(attempts, tier, model, key_source, elapsed, effort, connector, pr
     costs = [a.get("cost_usd") for a in attempts if a.get("cost_usd") is not None]
     reasoning_tokens = sum(int(a.get("reasoning_tokens") or 0) for a in attempts)
     length_truncations = sum(1 for a in attempts if a.get("finish_reason") == "length")
+    # Every source that went into the total, so a reader can tell a billed figure from a reconstructed
+    # one without re-deriving it from the attempts. `estimated` anywhere makes the seat's total an
+    # estimate; see `openai_compat._cost` for what each source means.
+    cost_sources = sorted({a.get("cost_source") for a in attempts if a.get("cost_source")})
+    # Inference the provider says it ran and did not charge for — an errored generation, above all.
+    # Summed separately and never folded into `cost_usd`: the billed total has to reconcile against
+    # a credit balance, and this does not.
+    unbilled = [a.get("upstream_unbilled_usd") for a in attempts if a.get("upstream_unbilled_usd")]
     return {
         "tier": tier,
         "model": model,
@@ -392,6 +480,9 @@ def build_meta(attempts, tier, model, key_source, elapsed, effort, connector, pr
         "length_truncations": length_truncations,
         "usage": attempts[-1].get("usage") if attempts else {},
         "cost_usd": sum(costs) if costs else None,
+        "cost_sources": cost_sources,
+        "cost_estimated": "estimated" in cost_sources,
+        "upstream_unbilled_usd": sum(unbilled) if unbilled else None,
         "reasoning_tokens": reasoning_tokens,
         "driver_notes": [note for a in attempts for note in (a.get("notes") or [])],
         "attempts": attempts,
@@ -537,27 +628,44 @@ def attempt_loop(call, system_prompt, user_prompt, check, repair, warn=None, att
     repaired = False
     connector = call.connector
     provider = call.provider
+    pending_notes = []
 
     while True:
         call.entry["max_tokens"] = cap
+        # Drained per call, so each attempt's notes describe the transient retries *that* call made
+        # rather than the seat's running total.
+        notes_sink = getattr(call.http_request_fn, "transient_notes", None)
+        if notes_sink is not None:
+            del notes_sink[:]
+        started_call = time.time()
         try:
             result = call.driver.dispatch_detailed(
                 system_prompt, prompt, call.model, call.entry, {"type": "json_object"}, call.http_request_fn)
         except AuthFailure:
             raise
         except Exception as exc:  # noqa: BLE001 — the caller decides whether to flag-and-advance
+            # Recorded before it leaves. A caller holding the list gets an attempt carrying the
+            # exception class, the cap, the wall time and the transport's retries, so a seat that
+            # died in the transport is never accounted at zero attempts and a null cost.
+            attempts.append(dispatch_error_attempt(
+                len(attempts) + 1, cap, exc, time.time() - started_call,
+                pending_notes + list(notes_sink or [])))
             raise DispatchFailed(exc)
+        transient_notes = list(notes_sink or [])
 
         raw = result.get("text") or ""
         connector = result.get("connector") or connector
         provider = result.get("provider") or provider
         driver_attempt = (result.get("attempts") or [{}])[0]
+        call_notes = pending_notes + transient_notes
+        pending_notes = []
 
         if result.get("finish_reason") == "length" and not length_retried:
             doubled = cap * registry_lib.LENGTH_RETRY_MULTIPLIER
             attempts.append(finish_attempt(
                 driver_attempt, len(attempts) + 1, ["finish_reason: length — truncated completion"],
-                "truncated at {0}; retrying once at {1} with a fresh prompt".format(cap, doubled)))
+                "truncated at {0}; retrying once at {1} with a fresh prompt".format(cap, doubled),
+                notes=call_notes))
             warn("{0}: truncated at max_tokens={1}; one retry at {2} with a fresh prompt\n".format(
                 call.label, cap, doubled))
             length_retried = True
@@ -568,9 +676,10 @@ def attempt_loop(call, system_prompt, user_prompt, check, repair, warn=None, att
         try:
             parsed, errors = check(raw)
         except Exception as refusal:  # noqa: BLE001 — a validator that refuses outright, not an error here
-            attempts.append(finish_attempt(driver_attempt, len(attempts) + 1, ["refused: {0}".format(refusal)]))
+            attempts.append(finish_attempt(driver_attempt, len(attempts) + 1,
+                                           ["refused: {0}".format(refusal)], notes=call_notes))
             raise
-        attempts.append(finish_attempt(driver_attempt, len(attempts) + 1, errors))
+        attempts.append(finish_attempt(driver_attempt, len(attempts) + 1, errors, notes=call_notes))
 
         if not errors:
             break
@@ -581,6 +690,11 @@ def attempt_loop(call, system_prompt, user_prompt, check, repair, warn=None, att
             call.label, len(errors)))
         for error in errors:
             warn("  - {0}\n".format(error))
+        _quoted, elision = quote_for_repair(raw)
+        if elision:
+            # On the *next* attempt's record: it is that call's prompt the elision describes.
+            pending_notes.append(elision)
+            warn("  {0}\n".format(elision))
         prompt = repair(user_prompt, raw, errors)
 
     return CallResult(parsed, errors, attempts, cap, connector, provider, raw)
@@ -655,8 +769,12 @@ def main(argv=None):
         return parsed_report, report_lib.validate_report(parsed_report, lens=lens, ingest=True)
 
     started = time.time()
+    # Owned here, not inside `attempt_loop`, so a dispatch that raises still hands back the calls it
+    # made. The list is the only record of a seat that died in the transport.
+    attempts = []
     try:
-        outcome = attempt_loop(call, system_prompt, user_prompt, check, build_repair_prompt)
+        outcome = attempt_loop(call, system_prompt, user_prompt, check, build_repair_prompt,
+                               attempts=attempts)
     except AuthFailure as failure:
         sys.stderr.write("{0}: provider auth failure: {1}\n".format(reviewer_id, failure))
         sys.stderr.write("  auth failures are not transient; no further paid calls from this seat.\n")
@@ -664,7 +782,30 @@ def main(argv=None):
     except DispatchFailed as failure:
         # Exhausted transient retries, a provider error, a malformed body: this seat is missing,
         # stage `dispatch`. It is not exit 2 — only an auth failure halts the whole panel.
+        #
+        # It still writes `<reviewer-id>.failed.json`. Run 3's `buildability-glm` took this path and
+        # reached the manifest as `elapsed_s: 147.5` with `attempts: null`, `cost_usd: null` and
+        # nothing on disk to say what had been tried — a seat that looks as though it was never
+        # called. The attempt record below is what `run_panel.py` folds in so the manifest carries
+        # the exception class, the cap sent, the wall time and the transport's retries.
+        elapsed = time.time() - started
+        meta = build_meta(attempts, call.tier, call.model, call.key_source, elapsed, call.effort,
+                          call.connector, call.provider, call.cap)
+        failed_path = os.path.join(args.out, reviewer_id + ".failed.json")
+        report_lib.write_json(failed_path, {
+            "reviewer_id": reviewer_id,
+            "lens": lens,
+            "family": args.family,
+            "model": call.model,
+            "tier": call.tier,
+            "status": "failed",
+            "failure_stage": "dispatch",
+            "errors": ["dispatch failed: {0}: {1}".format(type(failure.cause).__name__, failure.cause)],
+            "raw_response": None,
+            "_meta": meta,
+        })
         sys.stderr.write("{0}: dispatch failed: {1}\n".format(reviewer_id, failure.cause))
+        sys.stderr.write("  attempt record kept at {0}\n".format(failed_path))
         if model_is_unavailable(failure.cause, call.model):
             sys.stderr.write("{0}: the provider will not serve {1}; this family is unreachable "
                              "for this run\n".format(reviewer_id, call.model))

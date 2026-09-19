@@ -26,6 +26,8 @@ does. The same asymmetry governs dispositions: an all-`judgment-call` cluster is
 import json
 import sys
 
+from . import report as report_lib
+
 RECONCILERS = ("host", "synthesis", "default")
 
 SYNTHESIS_PERSONA = "synthesis"
@@ -244,12 +246,19 @@ def build_user_message(run_id, request, reports, artifact_text, artifact_label, 
 
 
 def build_repair_prompt(original_user_prompt, raw_output, errors):
-    """The one repair re-ask, naming the failing entries. The only prompt that quotes back."""
+    """The one repair re-ask, naming the failing entries. The only prompt that quotes back.
+
+    The quote is capped by `report.quote_for_repair`, the same ceiling the seats' repair prompt uses.
+    It matters more here: the judgment call's own prompt already runs to six figures of tokens — the
+    first unattended run's was 127,624 — so a re-ask that also quoted 200,000 characters of rejected
+    patch would be the dearest call in the run by a distance.
+    """
+    quoted, _note = report_lib.quote_for_repair(raw_output)
     return "\n".join([
         original_user_prompt,
         "",
         "===== YOUR PREVIOUS RESPONSE =====",
-        (raw_output or "")[:200000],
+        quoted,
         "===== END PREVIOUS RESPONSE =====",
         "",
         "That patch was rejected. Each line names the entry that failed and why:",
@@ -279,6 +288,12 @@ def judge_record(reviewer_id, family, tier, model, connector, provider, effort, 
     same names, so a reader gets the same accounting from a different key.
     """
     costs = [a.get("cost_usd") for a in attempts if a.get("cost_usd") is not None]
+    # The same two accounting fields a seat record carries, derived the same way `dispatch.build_meta`
+    # derives them. They were missing here, which made `reconcile_core._upstream_unbilled_total` sum
+    # a key the producer never emitted: the judge's unbilled inference would silently have read as
+    # zero, and `cost_sources` had no answer at all for the one call the panel makes outside `seats`.
+    cost_sources = sorted({a.get("cost_source") for a in attempts if a.get("cost_source")})
+    unbilled = [a.get("upstream_unbilled_usd") for a in attempts if a.get("upstream_unbilled_usd")]
     return {
         "reviewer_id": reviewer_id,
         "role": "judge",
@@ -303,6 +318,9 @@ def judge_record(reviewer_id, family, tier, model, connector, provider, effort, 
         "usage": attempts[-1].get("usage") if attempts else None,
         "reasoning_tokens": sum(int(a.get("reasoning_tokens") or 0) for a in attempts) or None,
         "cost_usd": sum(costs) if costs else None,
+        "cost_sources": cost_sources,
+        "cost_estimated": "estimated" in cost_sources,
+        "upstream_unbilled_usd": sum(unbilled) if unbilled else None,
         "elapsed_s": round(elapsed_s, 1) if elapsed_s is not None else None,
     }
 

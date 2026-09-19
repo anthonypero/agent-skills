@@ -10,9 +10,11 @@ connector both of them load is `fake_backend.py`, scripted through a plan file.
 import io
 import json
 import os
+import socket
 import stat
 import subprocess
 import sys
+import time
 import unittest
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -425,6 +427,47 @@ class ContextOverflowTest(PanelTestCase):
         self.assertEqual({s["family"] for s in manifest["seats"]}, {"kimi", "xai"},
                          "the lens is not re-seated onto another family")
 
+    def test_the_recorded_projection_is_recomputed_over_the_seats_actually_dispatched(self):
+        """Otherwise the caveat compares one seat's billed spend against a two-seat projection."""
+        tight = harness.default_models()
+        tight[harness.SLOW_MODEL]["context_limit"] = 10
+        workspace = harness.Workspace(models=tight)
+        self.addCleanup(workspace.close)
+        workspace.apply_env()
+        workspace.plan({harness.FAST_MODEL: [{"body": harness.valid_report(), "cost": 0.05}]})
+        self.workspace = workspace
+
+        code, out, err = self.run_panel()
+        self.assertEqual(code, 3, err)
+        self.assertIn("CONTEXT OVERFLOW", out, "the operator is still shown the full pre-flight")
+
+        manifest = runs_lib.read_manifest(workspace.path("reviews", "2026-09-18-1"))
+        projection = manifest["projection"]
+        self.assertEqual([row["reviewer_id"] for row in projection["per_seat"]], ["adversarial-xai"],
+                         "the overflowing seat is out of the recorded table")
+        self.assertEqual(projection["excluded_seats"], ["consistency-kimi"])
+        self.assertEqual(projection["context_overflows"], ["consistency-kimi"],
+                         "the drop stays visible in the record rather than vanishing from it")
+        self.assertEqual(projection["decision"], "within-budget")
+
+    def test_the_recomputed_projection_is_what_the_cost_caveat_compares_against(self):
+        tight = harness.default_models()
+        tight[harness.SLOW_MODEL]["context_limit"] = 10
+        workspace = harness.Workspace(models=tight)
+        self.addCleanup(workspace.close)
+        workspace.apply_env()
+        workspace.plan({harness.FAST_MODEL: [{"body": harness.valid_report(), "cost": 0.05}]})
+        self.workspace = workspace
+        self.assertEqual(self.run_panel()[0], 3)
+
+        manifest = runs_lib.read_manifest(workspace.path("reviews", "2026-09-18-1"))
+        priced = [row["projected_usd"] for row in manifest["projection"]["per_seat"]]
+        self.assertEqual(len(priced), 1)
+        # The recorded total is the one seat's projection plus the synthesis allowance, and the
+        # allowance is priced off the largest prompt among the seats that remain.
+        self.assertLessEqual(priced[0], manifest["projection"]["projection_usd"])
+        self.assertAlmostEqual(manifest["cost_usd_total"], 0.05, places=6)
+
 
 class ManifestTest(PanelTestCase):
 
@@ -462,6 +505,117 @@ class ManifestTest(PanelTestCase):
         self.assertAlmostEqual(failed["cost_usd"], 0.8, places=6, msg="two attempts at $0.40")
         self.assertAlmostEqual(manifest["cost_usd_total"], 0.9, places=6,
                                msg="cost_usd_total includes the failed seat")
+
+    def test_the_manifest_records_the_resolved_tier_and_the_level_that_decided_it(self):
+        """Run 3 ran `--tier standard` and the manifest's only tier field was the *input* to seating."""
+        self.both_seats_report()
+        code, _out, err = self.run_panel()
+        self.assertEqual(code, 0, err)
+        manifest = runs_lib.read_manifest(self.workspace.path("reviews", "2026-09-18-1"))
+        self.assertEqual(manifest["tier"]["resolved"], "standard")
+        self.assertEqual(manifest["tier"]["source"], "--tier")
+        self.assertTrue(manifest["tier"]["unanimous"])
+        self.assertEqual(set(manifest["tier"]["per_seat"]), {"consistency-kimi", "adversarial-xai"})
+
+    def test_a_panel_without_a_cli_tier_records_the_level_that_did_decide(self):
+        self.both_seats_report()
+        argv_without_tier = ["--panel", self.workspace.panel, "--artifact", self.workspace.artifact,
+                             "--ref", self.workspace.reference,
+                             "--out", self.workspace.path("reviews", "no-cli-tier"),
+                             "--config", self.workspace.config, "--models", self.workspace.registry,
+                             "--autonomous", "--reconcile", "off"]
+        out_stream, err_stream = io.StringIO(), io.StringIO()
+        saved_out, saved_err = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = out_stream, err_stream
+        try:
+            code = run_panel.main(argv_without_tier)
+        finally:
+            sys.stdout, sys.stderr = saved_out, saved_err
+        self.assertEqual(code, 0, err_stream.getvalue())
+        manifest = runs_lib.read_manifest(self.workspace.path("reviews", "no-cli-tier"))
+        self.assertEqual(manifest["tier"]["resolved"], "standard")
+        self.assertEqual(manifest["tier"]["source"], "panel",
+                         "the test panel sets `tier`, so the panel is the level that decided it")
+
+    def test_the_manifest_records_the_projection_the_budget_gate_read(self):
+        """The pre-flight used to live on the console and die with it; nothing could compare it."""
+        self.both_seats_report()
+        code, out, err = self.run_panel()
+        self.assertEqual(code, 0, err)
+        manifest = runs_lib.read_manifest(self.workspace.path("reviews", "2026-09-18-1"))
+        projection = manifest["projection"]
+        self.assertTrue(projection["estimate"], "the recorded block is labelled an estimate too")
+        self.assertEqual(projection["budget_usd"], run_panel.DEFAULT_BUDGET_USD)
+        self.assertEqual({row["reviewer_id"] for row in projection["per_seat"]},
+                         {"consistency-kimi", "adversarial-xai"})
+        for key in ("projection_usd", "catalogue_usd", "overrun_allowance_usd",
+                    "repair_allowance_usd", "synthesis_allowance_usd"):
+            self.assertIn(key, projection)
+        self.assertEqual(projection["decision"], "within-budget")
+        self.assertIn("projected ${0:.2f}".format(projection["projection_usd"]), out,
+                      "the recorded number is the one the operator was shown")
+
+    def test_the_projection_and_the_actual_are_both_in_the_manifest_to_be_compared(self):
+        self.both_seats_report()
+        self.assertEqual(self.run_panel()[0], 0)
+        manifest = runs_lib.read_manifest(self.workspace.path("reviews", "2026-09-18-1"))
+        self.assertIsNotNone(manifest["projection"]["projection_usd"])
+        self.assertIsNotNone(manifest["cost_usd_total"])
+
+    def test_an_over_budget_refusal_still_records_what_it_refused_over(self):
+        self.both_seats_report()
+        code, _out, _err = self.run_panel(extra=["--budget-usd", "0.001"])
+        self.assertEqual(code, run_panel.EXIT_BUDGET)
+        manifest = runs_lib.read_manifest(self.workspace.path("reviews", "2026-09-18-1"))
+        self.assertEqual(manifest["projection"]["decision"], "refused-over-budget")
+        self.assertEqual(manifest["projection"]["budget_usd"], 0.001)
+        self.assertIsNone(manifest["cost_usd_total"], "no paid call was made")
+
+    def test_approving_an_over_budget_projection_is_recorded_as_such(self):
+        self.both_seats_report()
+        code, _out, err = self.run_panel(extra=["--budget-usd", "0.001", "--approve-budget"])
+        self.assertEqual(code, 0, err)
+        manifest = runs_lib.read_manifest(self.workspace.path("reviews", "2026-09-18-1"))
+        self.assertEqual(manifest["projection"]["decision"], "approved-over-budget")
+
+    def test_unbilled_upstream_spend_reaches_the_seat_and_stays_out_of_the_run_total(self):
+        """`cost_usd_total` reconciles against the credit ledger; unbilled inference must not enter it."""
+        self.workspace.plan({
+            harness.SLOW_MODEL: [{"body": harness.valid_report(), "cost": 0,
+                                  "cost_details": {"upstream_inference_cost": 1.816461}}],
+            harness.FAST_MODEL: [{"body": harness.valid_report(), "cost": 0.1}],
+        })
+        code, _out, err = self.run_panel()
+        self.assertEqual(code, 0, err)
+        manifest = runs_lib.read_manifest(self.workspace.path("reviews", "2026-09-18-1"))
+        seat = next(s for s in manifest["seats"] if s["reviewer_id"] == "consistency-kimi")
+        self.assertEqual(seat["cost_usd"], 0.0)
+        self.assertAlmostEqual(seat["upstream_unbilled_usd"], 1.816461, places=6)
+        self.assertAlmostEqual(manifest["cost_usd_total"], 0.1, places=6,
+                               msg="the run total is what the account was billed and nothing else")
+        other = next(s for s in manifest["seats"] if s["reviewer_id"] == "adversarial-xai")
+        self.assertIsNone(other["upstream_unbilled_usd"])
+
+    def test_a_seat_that_dies_in_the_transport_is_never_recorded_with_null_attempts(self):
+        """Run 3's `buildability-glm`: 147 seconds, `attempts: null`, `cost_usd: null`, no record."""
+        self.workspace.plan({
+            harness.SLOW_MODEL: [{"raise": "incomplete"}],
+            harness.FAST_MODEL: [{"body": harness.valid_report(), "cost": 0.1}],
+        })
+        code, out, err = self.run_panel()
+        self.assertEqual(code, 3, err)
+        run_dir = self.workspace.path("reviews", "2026-09-18-1")
+        self.assertTrue(os.path.isfile(os.path.join(run_dir, "consistency-kimi.failed.json")))
+        seat = next(s for s in runs_lib.read_manifest(run_dir)["seats"]
+                    if s["reviewer_id"] == "consistency-kimi")
+        self.assertEqual(seat["status"], "failed")
+        self.assertIsNotNone(seat["attempts"], "a called seat is never `attempts: null`")
+        self.assertEqual(len(seat["attempts"]), 1)
+        self.assertEqual(seat["attempts"][0]["finish_reason"], "dispatch-error")
+        self.assertIsNotNone(seat["attempts"][0]["elapsed_s"])
+        self.assertIn("IncompleteRead", seat["attempts"][0]["validation_errors"][0])
+        self.assertEqual(seat["dispatches"], 1)
+        del out
 
     def test_seats_read_the_inputs_copy_not_the_working_tree(self):
         self.both_seats_report()
@@ -607,6 +761,182 @@ class ResumeTest(PanelTestCase):
         self.assertIn("another process owns this seat", out)
         self.assertIn("held: 1", out, "a held seat has to reach the count, not just the log line")
         self.assertEqual(self.workspace.calls(), [], "a seat another process owns is left strictly alone")
+
+    def test_a_dispatching_seat_whose_owner_is_gone_is_re_claimed_as_a_stale_lease(self):
+        """Run 3's adversarial cluster SF-5: a seat that crashed mid-dispatch used to stay
+        `dispatching` forever, and resume could only hold it. The lease now names its owner, so a
+        resume can see that the owner is gone and demote the seat the way a missing report is."""
+        self.both_seats_report()
+        self.assertEqual(self.run_panel()[0], 0)
+        run_dir = self.workspace.path("reviews", "2026-09-18-1")
+        os.remove(os.path.join(run_dir, "consistency-kimi.json"))
+        runs_lib.update_seat(run_dir, "consistency-kimi", lambda seat: seat.update({
+            "status": "dispatching",
+            "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(time.time() - 600)),
+            # A pid on this host that cannot be running: pid 0 is never a user process.
+            "claimed_by": {"pid": 2 ** 22 + 7, "host": socket.gethostname()},
+        }))
+
+        self.workspace.reset_calls()
+        code, out, err = self.run_panel()
+        self.assertEqual(code, 0, err)
+        self.assertIn("re-claiming consistency-kimi: stale lease", out)
+        self.assertIn("is gone", out)
+        self.assertEqual(len(self.workspace.calls(harness.SLOW_MODEL)), 1,
+                         "the stale lease is re-dispatched, not held")
+        self.assertEqual(self.workspace.calls(harness.FAST_MODEL), [])
+        self.assertIn("Seats reporting: 2 of 2", out)
+
+    def test_a_dispatching_seat_older_than_the_ceiling_is_re_claimed_whoever_holds_it(self):
+        self.both_seats_report()
+        self.assertEqual(self.run_panel()[0], 0)
+        run_dir = self.workspace.path("reviews", "2026-09-18-1")
+        os.remove(os.path.join(run_dir, "consistency-kimi.json"))
+        stale = time.time() - runs_lib.LEASE_STALE_S - 60
+        runs_lib.update_seat(run_dir, "consistency-kimi", lambda seat: seat.update({
+            "status": "dispatching",
+            "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(stale)),
+            "claimed_by": {"pid": os.getpid(), "host": "some-other-host"},
+        }))
+
+        self.workspace.reset_calls()
+        code, out, err = self.run_panel()
+        self.assertEqual(code, 0, err)
+        self.assertIn("past the", out)
+        self.assertEqual(len(self.workspace.calls(harness.SLOW_MODEL)), 1)
+
+    def test_a_stale_lease_is_recorded_as_such_before_it_is_re_dispatched(self):
+        self.both_seats_report()
+        self.assertEqual(self.run_panel()[0], 0)
+        run_dir = self.workspace.path("reviews", "2026-09-18-1")
+        os.remove(os.path.join(run_dir, "consistency-kimi.json"))
+        claimed_at = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(time.time() - 600))
+        runs_lib.update_seat(run_dir, "consistency-kimi", lambda seat: seat.update({
+            "status": "dispatching", "claimed_at": claimed_at,
+            "claimed_by": {"pid": 2 ** 22 + 7, "host": socket.gethostname()},
+        }))
+
+        self.workspace.reset_calls()
+        # The re-dispatch fails, so the demotion the partition made is what the manifest still holds.
+        self.workspace.plan({
+            harness.SLOW_MODEL: [{"raise": "incomplete"}],
+            harness.FAST_MODEL: [{"body": harness.valid_report()}],
+        })
+        code, _out, err = self.run_panel()
+        self.assertEqual(code, 3, err)
+        seat = next(s for s in runs_lib.read_manifest(run_dir)["seats"]
+                    if s["reviewer_id"] == "consistency-kimi")
+        self.assertEqual(seat["stale_lease"]["claimed_at"], claimed_at)
+        self.assertEqual(seat["stale_lease"]["claimed_by"]["pid"], 2 ** 22 + 7)
+        self.assertIn("is gone", seat["stale_lease"]["reason"])
+
+    def test_a_dispatching_seat_whose_report_did_land_is_kept_not_re_dispatched(self):
+        """The owner died between writing the report and updating the manifest. Nothing to redo."""
+        self.both_seats_report()
+        self.assertEqual(self.run_panel()[0], 0)
+        run_dir = self.workspace.path("reviews", "2026-09-18-1")
+        runs_lib.update_seat(run_dir, "consistency-kimi", lambda seat: seat.update({
+            "status": "dispatching",
+            "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(time.time() - 600)),
+            "claimed_by": {"pid": 2 ** 22 + 7, "host": socket.gethostname()},
+        }))
+
+        self.workspace.reset_calls()
+        code, out, err = self.run_panel()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.workspace.calls(), [], "a report on disk is not re-purchased")
+        self.assertIn("the lease is spent", out)
+
+    def test_claim_seat_records_who_took_the_lease(self):
+        """Without an owner a resume cannot tell a live dispatch from a crashed one, and holds both."""
+        self.both_seats_report()
+        self.assertEqual(self.run_panel()[0], 0)
+        run_dir = self.workspace.path("reviews", "2026-09-18-1")
+        runs_lib.update_seat(run_dir, "consistency-kimi",
+                             lambda seat: seat.update({"status": "pending", "claimed_by": None}))
+        claimed, _seen = runs_lib.claim_seat(run_dir, "consistency-kimi")
+        self.assertTrue(claimed)
+        seat = next(s for s in runs_lib.read_manifest(run_dir)["seats"]
+                    if s["reviewer_id"] == "consistency-kimi")
+        self.assertEqual(seat["claimed_by"], {"pid": os.getpid(), "host": socket.gethostname()})
+        self.assertTrue(seat["claimed_at"])
+
+    def test_a_stale_lease_demotion_clears_the_owner_and_keeps_the_old_claim(self):
+        """A lease nobody holds must not read as one somebody does — and the evidence is kept."""
+        seat = {"status": "dispatching", "claimed_at": "2026-09-19T03:42:44-0400",
+                "claimed_by": {"pid": 4242, "host": "somewhere"}, "report": "x"}
+        run_panel._stale_lease("its owner is gone", "no report file")(seat)
+        self.assertEqual(seat["status"], "failed")
+        self.assertEqual(seat["failure_reason"], "stale-lease")
+        self.assertIsNone(seat["claimed_by"], "a cleared lease cannot be mistaken for a live one")
+        self.assertIsNone(seat["report"])
+        self.assertEqual(seat["stale_lease"]["claimed_at"], "2026-09-19T03:42:44-0400")
+        self.assertEqual(seat["stale_lease"]["claimed_by"], {"pid": 4242, "host": "somewhere"})
+        self.assertIn("its owner is gone", seat["stale_lease"]["reason"])
+        self.assertIn("no report file", seat["error"])
+
+    def test_a_foreign_host_claim_is_held_until_the_ceiling_however_dead_the_pid_looks(self):
+        """The pid check is local. A pid absent here says nothing about a process on another host."""
+        dead_here = 2 ** 22 + 1
+        recent = {"claimed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z",
+                                              time.localtime(time.time() - 3600)),
+                  "claimed_by": {"pid": dead_here, "host": socket.gethostname() + "-elsewhere"}}
+        stale, why = runs_lib.lease_is_stale(recent)
+        self.assertFalse(stale, why)
+        self.assertIn("owner is still running", why)
+
+        aged = dict(recent, claimed_at=time.strftime(
+            "%Y-%m-%dT%H:%M:%S%z", time.localtime(time.time() - runs_lib.LEASE_STALE_S - 60)))
+        stale, why = runs_lib.lease_is_stale(aged)
+        self.assertTrue(stale, "the ceiling is the backstop for a claim this host cannot check")
+        self.assertIn("past the", why)
+
+    def test_the_same_claim_on_this_host_is_stale_at_once(self):
+        """The companion to the test above: only the host string differs, and the answer flips."""
+        seat = {"claimed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z",
+                                            time.localtime(time.time() - 3600)),
+                "claimed_by": {"pid": 2 ** 22 + 1, "host": socket.gethostname()}}
+        stale, why = runs_lib.lease_is_stale(seat)
+        self.assertTrue(stale)
+        self.assertIn("is gone", why)
+
+    def test_a_pid_we_may_not_signal_counts_as_alive(self):
+        """`os.kill(pid, 0)` on another user's process raises PermissionError. That is not absence."""
+        def refuse(_pid, _signal):
+            raise PermissionError("not yours")
+
+        saved = runs_lib.os.kill
+        runs_lib.os.kill = refuse
+        self.addCleanup(setattr, runs_lib.os, "kill", saved)
+        self.assertTrue(runs_lib._pid_alive(4242),
+                        "stealing a running process's lease is worse than waiting out the ceiling")
+
+    def test_a_pid_that_is_absent_counts_as_gone(self):
+        def absent(_pid, _signal):
+            raise ProcessLookupError("no such process")
+
+        saved = runs_lib.os.kill
+        runs_lib.os.kill = absent
+        self.addCleanup(setattr, runs_lib.os, "kill", saved)
+        self.assertFalse(runs_lib._pid_alive(4242))
+
+    def test_a_lease_with_no_claim_time_at_all_is_stale(self):
+        stale, why = runs_lib.lease_is_stale({"status": "dispatching"})
+        self.assertTrue(stale)
+        self.assertIn("no claim time", why)
+
+    def test_a_live_lease_held_by_this_process_is_not_stale(self):
+        seat = {"claimed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "claimed_by": {"pid": os.getpid(), "host": socket.gethostname()}}
+        stale, _why = runs_lib.lease_is_stale(seat)
+        self.assertFalse(stale)
+
+    def test_a_dead_owner_inside_the_grace_window_is_not_yet_stale(self):
+        """The window between `claim_seat` writing the record and the subprocess starting."""
+        seat = {"claimed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "claimed_by": {"pid": 2 ** 22 + 7, "host": socket.gethostname()}}
+        stale, _why = runs_lib.lease_is_stale(seat)
+        self.assertFalse(stale, "a claim seconds old is a claim in flight, not an abandoned one")
 
     def test_a_seat_claimed_between_partition_and_dispatch_is_held_and_counted(self):
         """The narrow race the compare-and-set exists for, forced by claiming behind the partition."""

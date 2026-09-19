@@ -17,10 +17,12 @@ Three mechanisms, all of which exist because two processes can touch one run:
 Every structured write here is atomic: temp file plus `os.replace()`.
 """
 
+import datetime
 import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import time
 
@@ -28,6 +30,25 @@ READ_ONLY = 0o444
 LOCK_TIMEOUT_S = 30
 LOCK_POLL_S = 0.05
 LOCK_STALE_S = 300
+
+# **The seat lease.** `dispatching` means "a live process owns this seat", and the compare-and-set
+# keeps two resumes from both paying for one seat. What it did not say was how the claim ends when
+# the owner dies: a run killed mid-dispatch left its seats `dispatching` with no report, and every
+# later resume held them and reported them as owned by a process that no longer existed. The
+# adversarial seat of run 3 raised it (cluster SF-5) and it was right.
+#
+# A lease is stale when the claim is old enough that no dispatch could still be running, or when the
+# process that took it is demonstrably gone. The pid check is the fast path and the ceiling is the
+# backstop for a claim taken on another host or by a pid this host has since reused.
+#
+# The ceiling is four hours because a seat can legitimately run for a very long time: run 3's
+# `consistency-kimi` spent 3,286 s across three attempts, one of which alone took 1,801 s, and a
+# ceiling under that would steal a lease from a seat still working.
+LEASE_STALE_S = 4 * 60 * 60
+
+# A claim younger than this is never called stale on the pid check alone — it closes the window
+# between `claim_seat` writing the record and the dispatch subprocess actually starting.
+LEASE_GRACE_S = 60
 
 
 class RunError(Exception):
@@ -276,12 +297,79 @@ def update_seat(run_dir, reviewer_id, mutate, expect_status=None):
 
 
 def claim_seat(run_dir, reviewer_id, claimable=("pending", "failed")):
-    """Move one seat `pending`/`failed` -> `dispatching` before its first paid call."""
+    """Move one seat `pending`/`failed` -> `dispatching` before its first paid call.
+
+    The claim records **who** took it as well as when. Without an owner a later resume cannot tell a
+    seat a live process is working from a seat whose process died mid-dispatch, and has to hold both
+    forever; with one, `lease_is_stale` can answer in the ordinary case without waiting out the
+    four-hour ceiling.
+    """
     def mutate(seat):
         seat["status"] = "dispatching"
         seat["claimed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        seat["claimed_by"] = {"pid": os.getpid(), "host": socket.gethostname()}
 
     return update_seat(run_dir, reviewer_id, mutate, expect_status=claimable)
+
+
+def lease_is_stale(seat, now=None, stale_after_s=LEASE_STALE_S, grace_s=LEASE_GRACE_S):
+    """(stale, why) for a seat sitting in `dispatching`. Caller has already checked for a report.
+
+    Three ways a lease is stale, and one way it is not:
+
+    - the claim records no usable time at all, so nothing can be said for it;
+    - the owning process ran on this host and is gone, and the claim is past the grace window;
+    - the claim is older than the ceiling, whoever holds it.
+
+    Anything else is a live lease and the seat belongs to another process.
+    """
+    claimed_at = _parse_claim_time(seat.get("claimed_at"))
+    if claimed_at is None:
+        return True, "the lease records no claim time"
+
+    now = now if now is not None else time.time()
+    age = now - claimed_at
+    owner = seat.get("claimed_by")
+    if isinstance(owner, dict) and age > grace_s:
+        pid, host = owner.get("pid"), owner.get("host")
+        if host == socket.gethostname() and isinstance(pid, int) and not _pid_alive(pid):
+            return True, ("the process that claimed it {0:.0f}s ago (pid {1} on {2}) is gone".format(
+                age, pid, host))
+
+    if age > stale_after_s:
+        return True, "the lease is {0:.0f}s old, past the {1:.0f}s ceiling".format(age, stale_after_s)
+    return False, "the lease is {0:.0f}s old and its owner is still running".format(age)
+
+
+def _parse_claim_time(value):
+    """`claimed_at` as an epoch, or None. Written by `time.strftime('%Y-%m-%dT%H:%M:%S%z')`."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S%z")
+    except ValueError:
+        try:
+            parsed = datetime.datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return parsed.timestamp()
+
+
+def _pid_alive(pid):
+    """Whether this host still has that process. A pid we may not signal is alive, not gone."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
 
 
 def report_is_valid(run_dir, reviewer_id, validate_fn):

@@ -20,6 +20,11 @@ into the seat's `_meta.attempts` and fills in the `validation_errors` the driver
 The completion cap is `backend_entry["max_tokens"]` and is always explicit. `backend_entry` may also
 carry `reasoning_effort` (a string for this one call, or None) and `prices`
 (`{"input": …, "output": …}` per token) so cost is computed when the provider reports none.
+
+Every result and every attempt carries a `cost_source` beside its `cost_usd` — `provider` for the
+billed figure, `estimated` for one reconstructed from usage tokens at catalogue prices — and an
+`upstream_unbilled_usd` when the provider reports running more inference than it charged for. See
+`_cost` and `_upstream_unbilled`.
 """
 
 import json
@@ -121,13 +126,25 @@ def dispatch_detailed(system_prompt, user_prompt, model, backend_entry, json_sch
 
     usage = data.get("usage") or {}
     reasoning_tokens = _reasoning_tokens(usage)
-    cost_usd = _cost(usage, backend_entry.get("prices"))
+    cost_usd, cost_source = _cost(usage, backend_entry.get("prices"))
+    upstream_unbilled = _upstream_unbilled(usage, cost_usd)
+    if cost_source == "estimated":
+        notes.append(
+            "the provider reported no cost; ${0:.6f} estimated from {1} prompt and {2} completion "
+            "tokens at the registry's catalogue prices".format(
+                cost_usd, usage.get("prompt_tokens"), usage.get("completion_tokens")))
+    if upstream_unbilled is not None:
+        notes.append(
+            "the provider billed ${0:.6f} and reported upstream_inference_cost ${1:.6f}; the "
+            "difference was not billed".format(cost_usd or 0.0, upstream_unbilled))
 
     result = {
         "text": text,
         "usage": usage,
         "reasoning_tokens": reasoning_tokens,
         "cost_usd": cost_usd,
+        "cost_source": cost_source,
+        "upstream_unbilled_usd": upstream_unbilled,
         "model": data.get("model") or model,
         "provider": data.get("provider") or backend_entry.get("provider_name") or "openrouter",
         "connector": backend_entry.get("type", "openai_compat"),
@@ -144,6 +161,8 @@ def dispatch_detailed(system_prompt, user_prompt, model, backend_entry, json_sch
             "usage": usage,
             "reasoning_tokens": reasoning_tokens,
             "cost_usd": cost_usd,
+            "cost_source": cost_source,
+            "upstream_unbilled_usd": upstream_unbilled,
             "elapsed_s": round(elapsed, 2),
             "notes": list(notes),
             "response_id": data.get("id"),
@@ -169,23 +188,76 @@ def _reasoning_tokens(usage):
 
 
 def _cost(usage, prices):
-    """The provider's reported cost when it gives one; otherwise the registry's prices."""
-    reported = usage.get("cost")
-    try:
+    """(cost_usd, source) — what this call cost, and whether that number is billed or reconstructed.
+
+    Two sources, and the order is not a matter of taste:
+
+    - `provider` — the top-level `usage.cost`. **This is the billed figure and it is authoritative,
+      including when it is 0.** Settled against the ledger: OpenRouter's `/credits` read
+      `total_usage` 7.770718 before the first unattended run and 10.522836 after it, a delta of
+      $2.752118 against the manifest's recorded $2.752117. A `finish_reason: error` attempt that
+      reported `cost: 0` beside an `upstream_inference_cost` of $1.816461 was **not** billed for it.
+      An errored generation costs the account nothing, and a driver that substituted the upstream
+      figure would over-report every such call.
+    - `estimated` — the registry's catalogue prices against the reported tokens, and only when the
+      usage block carries no `cost` key at all. Catalogue prices are not what a routed call pays, so
+      it is labelled and `_meta.cost_estimated` flags any total built from one.
+
+    Returns `(None, None)` when there is neither a reported cost nor a price to reconstruct one from:
+    unknown, never zero. The upstream figure is not discarded — see `_upstream_unbilled`.
+    """
+    if "cost" in usage:
+        reported = _f(usage.get("cost"))
         if reported is not None:
-            return float(reported)
-    except (TypeError, ValueError):
-        pass
+            return reported, "provider"
+
+    estimated = _estimate_cost(usage, prices)
+    if estimated is not None:
+        return estimated, "estimated"
+    return None, None
+
+
+def _upstream_unbilled(usage, billed):
+    """`cost_details.upstream_inference_cost` when it exceeds what the account was billed, else None.
+
+    The divergence is real and worth keeping — it is how much inference the provider says it ran and
+    did not charge for, which on an errored generation is the whole of it. It is deliberately **not**
+    added to `cost_usd`: the ledger says the account paid the billed figure, and a total that
+    included this would over-report the run by $1.82 on exactly the row it was meant to explain.
+    Recorded beside the cost so the gap stays visible without inflating any number that has to
+    reconcile against a credit balance.
+    """
+    details = usage.get("cost_details")
+    if not isinstance(details, dict):
+        return None
+    upstream = _f(details.get("upstream_inference_cost"))
+    if upstream is None:
+        return None
+    if upstream > (billed if billed is not None else 0.0):
+        return upstream
+    return None
+
+
+def _estimate_cost(usage, prices):
+    """The registry's catalogue prices against the reported tokens. None when either is missing."""
     if not isinstance(prices, dict):
         return None
-    try:
-        input_price = float(prices.get("input"))
-        output_price = float(prices.get("output"))
-    except (TypeError, ValueError):
+    input_price = _f(prices.get("input"))
+    output_price = _f(prices.get("output"))
+    if input_price is None or output_price is None:
         return None
     prompt_tokens = int(usage.get("prompt_tokens") or 0)
     completion_tokens = int(usage.get("completion_tokens") or 0)
+    if not prompt_tokens and not completion_tokens:
+        return None
     return input_price * prompt_tokens + output_price * completion_tokens
+
+
+def _f(value):
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 class _Rejected(Exception):

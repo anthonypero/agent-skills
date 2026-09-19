@@ -57,9 +57,12 @@ the next available family **once**, recording a `substitution` the reconciliatio
 then names.
 
 Re-running against an existing run directory **resumes** it: only seats whose reports are absent or
-invalid are re-dispatched, a seat already `dispatching` is left alone and reported as held, and a run
-whose inputs no longer hash to the manifest's fingerprint is refused rather than mixed. `--fresh`
-forces a new claim instead.
+invalid are re-dispatched, a seat already `dispatching` under a **live** lease is left alone and
+reported as held, and a run whose inputs no longer hash to the manifest's fingerprint is refused
+rather than mixed. A seat left `dispatching` by a process that is gone, or under a claim older than
+any dispatch could be, is a stale lease: it is demoted to `failed` with `failure_reason:
+"stale-lease"` and re-claimed, so a run killed mid-dispatch is resumable instead of wedged.
+`--fresh` forces a new claim instead.
 
 `--skip-claude` leaves the claude seats to the host session, which spawns them as harness
 subagents with the same persona body. Those seats are recorded in the manifest as pending on the
@@ -373,6 +376,10 @@ def _fold_meta(record, meta):
     record["usage"] = meta.get("usage")
     record["reasoning_tokens"] = _accumulate(record.get("reasoning_tokens"), meta.get("reasoning_tokens"))
     record["cost_usd"] = _accumulate(record.get("cost_usd"), meta.get("cost_usd"))
+    # Inference the provider ran and did not charge for. Summed alongside `cost_usd` and never into
+    # it: `cost_usd_total` has to reconcile against the credit ledger, and this does not.
+    record["upstream_unbilled_usd"] = _accumulate(
+        record.get("upstream_unbilled_usd"), meta.get("upstream_unbilled_usd"))
 
 
 def _accumulate(before, now):
@@ -671,6 +678,10 @@ def main(argv=None):
                                     synthesis_seat=judge_seat)
     print(budget_lib.render(projection))
     print("")
+    # Written before the gate resolves, so even a run that refuses over budget leaves the numbers it
+    # refused over in the manifest rather than only on the console. `decision` is filled in at each
+    # of the gate's three exits below.
+    _record_projection(run_dir, projection, None)
 
     overflowed = set(projection["context_overflows"])
     if overflowed:
@@ -681,9 +692,24 @@ def main(argv=None):
                 "error": "the composed prompt exceeds this model's context limit; never re-seated, the run is under-seated",
             }))
         dispatched = [s for s in dispatched if s["reviewer_id"] not in overflowed]
+        # **Recomputed over the seats that will actually be dispatched.** The first projection is
+        # what the operator was shown and it lists every seat, the overflowing one included; the
+        # recorded one has to be the projection the run's billed spend is later compared against, or
+        # the method caveat measures actual cost for three seats against a projection for four. The
+        # synthesis allowance moves too: it is priced off the largest prompt in the panel, which may
+        # be the very seat that overflowed. `excluded_seats` keeps the drop visible in the record.
+        projection_seats = [row for row in projection_seats if row["reviewer_id"] not in overflowed]
+        projection = budget_lib.project(projection_seats, registry, args.budget_usd,
+                                        with_synthesis=with_synthesis, synthesis_model=synthesis_model,
+                                        synthesis_seat=judge_seat)
+        projection["context_overflows"] = sorted(overflowed)
+        projection["excluded_seats"] = sorted(overflowed)
+        _record_projection(run_dir, projection, None)
 
-    if budget_lib.over_budget(projection) and not args.approve_budget:
+    over = budget_lib.over_budget(projection)
+    if over and not args.approve_budget:
         if autonomous:
+            _record_projection(run_dir, projection, "refused-over-budget")
             refusal_path = os.path.join(run_dir, "budget-refusal.json")
             runs_lib.write_json_atomic(refusal_path, budget_lib.refusal_document(projection))
             sys.stderr.write(
@@ -694,8 +720,13 @@ def main(argv=None):
             return EXIT_BUDGET
         answer = input("This projection exceeds the budget. Dispatch anyway? [y/N] ").strip().lower()
         if answer not in ("y", "yes"):
+            _record_projection(run_dir, projection, "declined-over-budget")
             sys.stderr.write("not dispatched.\n")
             return EXIT_BUDGET
+        _record_projection(run_dir, projection, "approved-over-budget")
+    else:
+        _record_projection(run_dir, projection,
+                           "approved-over-budget" if over else "within-budget")
 
     # --- Dispatch --------------------------------------------------------------------------------
     to_dispatch, kept, held = _partition_for_dispatch(run_dir, dispatched, resuming)
@@ -889,6 +920,30 @@ def _min_families_target(args, panel):
     return DEFAULT_MIN_FAMILIES if target is None else target
 
 
+def _run_tier(tier_default, seats):
+    """`{resolved, source, unanimous, per_seat}` — the tier this run actually ran at.
+
+    `tier_default` is only the *input* to seat resolution: `--tier`, else the panel's, and null when
+    neither set one. Run 3 was dispatched `--tier standard`, every seat resolved to `standard`, and
+    a reader of the manifest had to infer that from four seat records because nothing said it at the
+    top level. `reconcile_core.method_caveat` and the reader after it both want one answer.
+
+    A panel whose seats carry their own tiers has no single answer, and this says so rather than
+    picking one: `resolved` is null, `unanimous` false, and `per_seat` lists what each one ran at.
+    """
+    pairs = [(seat.get("tier"), seat.get("tier_source")) for seat in seats if seat.get("tier")]
+    tiers = {tier for tier, _source in pairs}
+    per_seat = {seat["reviewer_id"]: seat.get("tier") for seat in seats}
+    if len(tiers) == 1:
+        tier = pairs[0][0]
+        # The highest-precedence level that decided any seat, by the seating module's own order.
+        sources = {source for _tier, source in pairs if source}
+        source = next((name for name in seating_lib.TIER_SOURCES if name in sources), None)
+        return {"resolved": tier, "source": source, "unanimous": True, "per_seat": per_seat}
+    return {"resolved": None, "source": "per-seat", "unanimous": False,
+            "requested": tier_default, "per_seat": per_seat}
+
+
 def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats, dispatched, harness,
                     inputs, fingerprint, tier_default, registry, min_families, seated_families,
                     inference, reconciler, autonomous, judge_seat=None):
@@ -926,6 +981,7 @@ def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
             "usage": None,
             "reasoning_tokens": None,
             "cost_usd": None,
+            "upstream_unbilled_usd": None,
             "elapsed_s": None,
             "substitution": seat.get("substitution"),
         })
@@ -960,8 +1016,16 @@ def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
         # workspace `config.json` deep-merged over the packaged one.
         "roots": paths.roots_block(),
         "tier_default": tier_default,
+        # The tier the run **resolved to**, beside the one it was asked for. `tier_default` is the
+        # input — `--tier`, else the panel's, else null; `tier` is the answer, with the level that
+        # decided it. See `_run_tier`.
+        "tier": _run_tier(tier_default, seats),
         "max_tokens_requested": args.max_tokens,
         "budget_usd": args.budget_usd,
+        # Filled at Project, a few lines after this manifest is written, and left null on a run that
+        # never reached the pre-flight. Carries the per-seat table, the totals, the budget and the
+        # decision the gate came to, so `cost_usd_total` has something to be compared against.
+        "projection": None,
         "skip_claude": args.skip_claude,
         # Resolved here rather than left as `default`, so `reconcile.py` reads a decision instead of
         # asking its own stdin a question the panel already answered.
@@ -989,6 +1053,21 @@ def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
         "cost_usd_total": None,
         "failures": [],
     }
+
+
+def _record_projection(run_dir, projection, decision):
+    """Put the pre-flight in the manifest, with the decision the budget gate came to.
+
+    Run 3 printed "projected $2.30 against a budget of $5.00", was billed $2.75, and left nothing in the
+    manifest to compare the two — the projection lived on the console and died with it. Nothing
+    metered the difference, and `reconcile_core.method_caveat` had no figure to name.
+
+    Written at Project, before the first paid call, and re-written once the gate resolves. No lock:
+    Project runs before any seat is claimed, so this is the only writer at this point in the run.
+    """
+    manifest = runs_lib.read_manifest(run_dir)
+    manifest["projection"] = dict(projection, decision=decision)
+    runs_lib.write_manifest(run_dir, manifest)
 
 
 def _adopt_recorded_substitutions(existing, seats):
@@ -1028,9 +1107,11 @@ def _merge_resume(manifest, existing):
             continue
         if before.get("status") in ("ok", "dispatching", "failed", "timeout", "skipped"):
             for field in ("status", "report", "verdict", "findings", "attempts", "repairs", "truncations",
-                          "usage", "reasoning_tokens", "cost_usd", "elapsed_s", "provider", "effort",
+                          "usage", "reasoning_tokens", "cost_usd", "upstream_unbilled_usd",
+                          "elapsed_s", "provider", "effort",
                           "max_tokens", "model", "connector", "substitution", "failure_reason", "error",
-                          "claimed_at", "string_truncations", "dispatches", "unavailable_model"):
+                          "claimed_at", "claimed_by", "stale_lease", "string_truncations", "dispatches",
+                          "unavailable_model"):
                 if field in before:
                     seat[field] = before[field]
     manifest["resumed_from"] = existing.get("generated_at")
@@ -1046,7 +1127,12 @@ def _partition_for_dispatch(run_dir, dispatched, resuming):
     reason recorded, so the claim that follows is an honest `failed -> dispatching` transition and the
     manifest stops asserting something the directory contradicts.
 
-    The one status this step will not touch is `dispatching`: that seat belongs to another process.
+    `dispatching` is the one status this step will not touch **while the lease behind it is live**.
+    A seat whose owning process is gone, or whose claim is older than any dispatch could be, is a
+    stale lease: it is demoted to `failed` with `failure_reason: "stale-lease"` and re-dispatched,
+    exactly as an `ok` seat with a missing report is. Held forever was the old behaviour and it meant
+    a run killed mid-dispatch could never be resumed — `--fresh` re-dispatched and re-paid for the
+    whole panel, which is not what resume is for. `runs_lib.lease_is_stale` decides.
     """
     manifest = runs_lib.read_manifest(run_dir)
     by_id = {seat.get("reviewer_id"): seat for seat in manifest.get("seats") or []}
@@ -1056,13 +1142,27 @@ def _partition_for_dispatch(run_dir, dispatched, resuming):
         reviewer_id = seat["reviewer_id"]
         record = by_id.get(reviewer_id) or {}
         status = record.get("status")
-        if status == "dispatching":
-            held.append((reviewer_id, "already `dispatching` — another process owns this seat"))
-            continue
         if status == "failed" and record.get("failure_reason") == "context-overflow":
             continue
 
         valid, why = runs_lib.report_is_valid(run_dir, reviewer_id, _validate)
+
+        if status == "dispatching":
+            # A report on disk settles it: the seat finished and the process died before it could
+            # update the manifest. Nothing to re-dispatch and nothing to hold.
+            if valid:
+                kept.append((reviewer_id, "a validated report is already on disk; the lease is spent"))
+                continue
+            stale, lease = runs_lib.lease_is_stale(record)
+            if not stale:
+                held.append((reviewer_id,
+                             "already `dispatching` — another process owns this seat ({0})".format(lease)))
+                continue
+            runs_lib.update_seat(run_dir, reviewer_id, _stale_lease(lease, why))
+            print("re-claiming {0}: stale lease — {1}".format(reviewer_id, lease))
+            to_dispatch.append(seat)
+            continue
+
         if valid:
             if resuming:
                 kept.append((reviewer_id, "a validated report is already on disk; not re-dispatched"))
@@ -1088,6 +1188,24 @@ def _demotion(why):
         seat["failure_reason"] = "report-missing-or-invalid"
         seat["error"] = ("the manifest recorded this seat as `ok`, but {0}. Resume re-dispatched "
                          "it.".format(why))
+    return mutate
+
+
+def _stale_lease(lease, why):
+    """Move a seat left `dispatching` by a dead process back to `failed`, so resume can re-claim it.
+
+    The claim is cleared along with the status: a lease nobody holds must not be readable as one
+    somebody does, and the re-dispatch writes a fresh one a moment later.
+    """
+    def mutate(seat):
+        seat["status"] = "failed"
+        seat["report"] = None
+        seat["failure_reason"] = "stale-lease"
+        seat["error"] = ("the manifest left this seat `dispatching` and {0}; {1}. Resume re-claimed "
+                         "it.".format(why, lease))
+        seat["stale_lease"] = {"claimed_at": seat.get("claimed_at"),
+                               "claimed_by": seat.get("claimed_by"), "reason": lease}
+        seat["claimed_by"] = None
     return mutate
 
 
