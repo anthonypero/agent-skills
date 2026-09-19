@@ -14,7 +14,15 @@ Run it once with no patch to get the provisional clusters and the questions they
 patch against `schemas/judgment-patch.schema.json`, then run it again. Nothing is written when the
 patch fails validation: the failing entries are named and the supplier is asked again.
 
-Exit codes: 0 written; 1 usage; 3 a judgment patch is required or could not be validated.
+The **pinned artifact is mandatory** in both of those modes: every `quote` and every
+`literal_edit.old_text` is verified against it and any member whose anchor is not real text is
+dropped from its cluster. It is resolved from the manifest's `artifact` path, and `--artifact`
+overrides that; neither resolving is a usage error. Only `--render-only`, which re-renders from an
+already-checked `reconciliation.json`, runs without it.
+
+Exit codes: 0 success, meaning both files were written and every expected seat validated; 1 usage;
+3 a judgment patch is required or could not be validated, or the run reconciled with a missing seat
+— which is emitted at wrap-up, after both files are written with the missing seat recorded in them.
 """
 
 import argparse
@@ -42,13 +50,12 @@ def validate_patch_document(patch):
 
 
 def validate_reconciliation_document(document):
-    """The top level against the schema, then every cluster against `definitions.cluster`."""
-    loaded = schema_lib.load(os.path.join(SCHEMA_DIR, "reconciliation.schema.json"))
-    errors = schema_lib.validate(document, loaded)
-    cluster_schema = loaded["definitions"]["cluster"]
-    for index, cluster in enumerate(document.get("clusters") or []):
-        errors.extend(schema_lib.validate(cluster, cluster_schema, "$.clusters[{0}]".format(index)))
-    return errors
+    """The whole document, clusters included — the cluster contract lives in the schema file itself.
+
+    It used to be parked in `definitions.cluster` and applied here in a second pass, which left any
+    other consumer validating `reconciliation.json` with no cluster checking at all.
+    """
+    return schema_lib.validate(document, schema_lib.load(os.path.join(SCHEMA_DIR, "reconciliation.schema.json")))
 
 
 # --- rendering ---------------------------------------------------------------------------------
@@ -94,6 +101,14 @@ def render_markdown(document, reports=None):
         lines.append("")
         for seat in document["missing_seats"]:
             lines.append("- `{0}` ({1}) — {2}: {3}".format(seat["reviewer_id"], seat.get("family") or "?", seat["stage"], seat["reason"]))
+        lines.append("")
+
+    if document.get("anchor_drops"):
+        lines.append("**Dropped anchors.** These members quoted text that is not in the pinned artifact and were dropped from their clusters before tiering:")
+        lines.append("")
+        for drop in document["anchor_drops"]:
+            lines.append("- `{0}` {1} (from `{2}`) — {3}".format(
+                drop["reviewer_id"], drop["finding_id"], drop.get("cluster") or "?", drop["reason"]))
         lines.append("")
 
     lines.append("## Verdict matrix")
@@ -277,7 +292,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Reconcile a panel run directory into reconciliation.json and reconciliation.md.")
     parser.add_argument("--run-dir", required=True, help="The run directory holding manifest.json and one <reviewer-id>.json per seat")
     parser.add_argument("--judgment", help="The judgment patch. Defaults to <run-dir>/judgment.json when that file exists")
-    parser.add_argument("--artifact", help="The pinned artifact, so every quote and old_text can be checked against real text")
+    parser.add_argument("--artifact", help="The pinned artifact. Defaults to the manifest's `artifact` path; required when that does not resolve, because the anchor check is not optional")
     parser.add_argument("--render-only", action="store_true", help="Re-render reconciliation.md from an existing reconciliation.json and write nothing else")
     args = parser.parse_args(argv)
 
@@ -307,10 +322,15 @@ def main(argv=None):
         default = os.path.join(run_dir, "judgment.json")
         patch_path = default if os.path.isfile(default) else None
 
-    artifact_text = None
-    if args.artifact:
-        with open(args.artifact, "r", encoding="utf-8") as handle:
-            artifact_text = handle.read()
+    artifact_path, why = _resolve_artifact(run_dir, args.artifact)
+    if artifact_path is None:
+        sys.stderr.write("{0}\n".format(why))
+        sys.stderr.write(
+            "the anchor check is not optional: every `quote` and every `literal_edit.old_text` is "
+            "verified against the pinned artifact. Pass --artifact <path>.\n")
+        return 1
+    with open(artifact_path, "r", encoding="utf-8") as handle:
+        artifact_text = handle.read()
 
     if patch_path is None:
         try:
@@ -323,9 +343,11 @@ def main(argv=None):
         report_lib.write_json(request_path, request)
         print("{0} provisional cluster(s) from {1} reporting seat(s); wrote {2}".format(
             len(request["clusters"]), len(context["seats_reporting"]), request_path))
-        if context["missing_seats"]:
-            for seat in context["missing_seats"]:
-                print("  missing seat {0}: {1} — {2}".format(seat["reviewer_id"], seat["stage"], seat["reason"]))
+        for seat in context["missing_seats"]:
+            print("  missing seat {0}: {1} — {2}".format(seat["reviewer_id"], seat["stage"], seat["reason"]))
+        for drop in context["anchor_drops"]:
+            print("  dropped {0} {1} from {2}: {3}".format(
+                drop["reviewer_id"], drop["finding_id"], drop.get("cluster") or "?", drop["reason"]))
         sys.stderr.write(
             "a judgment patch is required before anything can be written: answer every cluster in "
             "{0} against schemas/judgment-patch.schema.json, save it as {1}, and re-run with --judgment.\n".format(
@@ -351,7 +373,6 @@ def main(argv=None):
 
     document["judgment"]["path"] = os.path.relpath(patch_path, run_dir)
     document["generated_at"] = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
-    drops = document.pop("_anchor_drops", [])
 
     schema_errors = validate_reconciliation_document(document)
     if schema_errors:
@@ -365,19 +386,68 @@ def main(argv=None):
     print("{0} clusters — {1}".format(
         document["counts"]["clusters"],
         ", ".join("{0} {1}".format(count, tier) for tier, count in sorted(document["counts"]["by_tier"].items()))))
-    for drop in drops:
-        print("  dropped {0} {1}: {2}".format(drop["reviewer_id"], drop["finding_id"], drop["reason"]))
+    for drop in document.get("anchor_drops") or []:
+        print("  dropped {0} {1} from {2}: {3}".format(
+            drop["reviewer_id"], drop["finding_id"], drop.get("cluster") or "?", drop["reason"]))
     print("wrote {0} and {1}".format(
         os.path.join(run_dir, "reconciliation.json"), os.path.join(run_dir, "reconciliation.md")))
+
+    if document["missing_seats"]:
+        # Both files are written first: the reconciliation of an under-seated run is still the
+        # product, and the exit code is how the caller learns not every expected seat validated.
+        for seat in document["missing_seats"]:
+            sys.stderr.write("missing seat {0}: {1} — {2}\n".format(seat["reviewer_id"], seat["stage"], seat["reason"]))
+        sys.stderr.write("{0} of {1} expected seat(s) did not validate; the run is not a clean success.\n".format(
+            len(document["missing_seats"]), len(document["seats_expected"])))
+        return 3
     return 0
 
 
-def _safe_reports(run_dir):
+def _resolve_artifact(run_dir, override):
+    """The pinned artifact: `--artifact` wins, otherwise the manifest's own `artifact` path.
+
+    Returns (path, None) or (None, why). The manifest records the path the panel was dispatched
+    with, which is repo-relative, so it is tried against the working directory and then against the
+    ancestors of the run directory — enough to find it from anywhere inside the repo, and honest
+    about failing rather than reconciling with the check silently off.
+    """
+    if override:
+        if os.path.isfile(override):
+            return os.path.abspath(override), None
+        return None, "no such artifact: {0}".format(override)
+
     try:
         manifest = core.load_manifest(run_dir)
-    except core.ReconcileError:
+    except core.ReconcileError as failure:
+        return None, str(failure)
+    recorded = manifest.get("artifact")
+    if not recorded:
+        return None, "the manifest for this run records no `artifact` path"
+    if os.path.isabs(recorded):
+        return (os.path.abspath(recorded), None) if os.path.isfile(recorded) else (None, "the manifest's artifact {0} is not a readable file".format(recorded))
+
+    candidates = [os.path.abspath(recorded)]
+    directory = run_dir
+    while True:
+        candidates.append(os.path.join(directory, recorded))
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate), None
+    return None, "the manifest's artifact {0!r} was not found from the working directory or above {1}".format(recorded, run_dir)
+
+
+def _safe_reports(run_dir):
+    """Reports for the rendering, or nothing. Used by --render-only, which re-renders an already
+    validated document and must not die on a run directory the reconcile path would refuse."""
+    try:
+        manifest = core.load_manifest(run_dir)
+        return core.load_reports(run_dir, manifest)
+    except (core.ReconcileError, ValueError, OSError):
         return {}, []
-    return core.load_reports(run_dir, manifest)
 
 
 def _print_errors(headline, errors):

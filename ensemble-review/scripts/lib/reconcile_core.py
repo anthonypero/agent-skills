@@ -9,10 +9,12 @@ everything semantic (claim joins, splits, singleton labels, severity arbitration
 contradictions, canonical-edit acceptances, the method caveat) from a validated judgment patch.
 Nothing here decides what two findings mean; it decides what two strings share.
 
-Order matters and is fixed: collect → provisional clusters → provisional tiers → merge the patch's
-joins and splits → recompute tiers from post-merge membership → apply the patch's labels, severities,
-dispositions, contradictions and canonical edits → validate the patch against the post-merge state →
-mint final ids → compute the verdict.
+Order matters and is fixed: collect → provisional clusters → drop unreal anchors from them, when an
+artifact was pinned → provisional tiers → merge the patch's splits and then its joins → recompute
+tiers from post-merge membership → apply the patch's labels, severities, dispositions,
+contradictions and canonical edits → validate the patch against the post-merge state → mint final
+ids → compute the verdict. The anchor check runs after the ids are minted and never renumbers them:
+`P-n` is the judgment patch's whole reference vocabulary.
 """
 
 import json
@@ -31,9 +33,25 @@ SINGLETON_LABELS = ("blind-spot-catch", "family-specific-false-positive")
 LABELLED_TIERS = ("singleton", "corroborated-same-family")
 
 QUOTE_OVERLAP_MIN = 60
+
+# The judgment patch's contract, unchanged. The product's contract is versioned separately and is at
+# "2": `anchor_drops` is required, so a v1 reader would not find a field it is entitled to.
 SCHEMA_VERSION = "1"
+RECONCILIATION_SCHEMA_VERSION = "2"
 
 SKIP_FILES = ("manifest.json", "reconciliation.json", "judgment.json", "judgment-request.json", "budget-refusal.json")
+
+# Manifest seat status → the `missing_seats[].stage` enum the reconciliation schema allows. Only
+# consulted for a seat with no readable report, and deliberately exhaustive: see `missing_stage`.
+MISSING_STAGE = {
+    "pending": "dispatch",      # dispatched and never came back
+    "failed": "dispatch",       # the call itself failed
+    "dispatch": "dispatch",
+    "ok": "validation",         # the manifest says the seat reported; the file did not survive
+    "validation": "validation",
+    "timeout": "timeout",
+    "skipped": "skipped",
+}
 
 
 # --- normalization and the two mechanical keys ---------------------------------------------------
@@ -49,7 +67,9 @@ def normalize_location(value):
     text = text.lstrip()
     while text.startswith("§"):
         text = text[1:].lstrip()
-    text = re.sub(r"[^0-9a-z]+", " ", text, flags=re.UNICODE)
+    # `\W` is Unicode-aware by default on str patterns, so "Раздел 3" and "Κεφάλαιο 3" keep their
+    # words instead of both collapsing to "3" and matching each other. Underscores are already gone.
+    text = re.sub(r"\W+", " ", text)
     return text.strip()
 
 
@@ -114,11 +134,27 @@ def load_manifest(run_dir):
         return json.load(handle)
 
 
+def missing_stage(seat):
+    """Map a manifest seat status onto the four stages the product's `missing_seats` enum allows.
+
+    Explicit both ways: a status this table does not name is a manifest the script does not
+    understand, and guessing `dispatch` would report a seat as never dispatched on no evidence.
+    """
+    status = seat.get("status")
+    if status in MISSING_STAGE:
+        return MISSING_STAGE[status]
+    raise ReconcileError(
+        "manifest seat {0!r} has status {1!r}, which is not one of {2}; `missing_seats[].stage` "
+        "cannot be derived from it".format(seat.get("reviewer_id"), status, sorted(MISSING_STAGE)))
+
+
 def load_reports(run_dir, manifest):
     """Load and validate every `<reviewer-id>.json` in the run directory.
 
     Returns (reports, missing_seats). A seat listed in the manifest with no readable, valid report
-    is a missing seat and is named in the product; a seat is never silently dropped.
+    is a missing seat and is named in the product; a seat is never silently dropped. A report file
+    for a reviewer the manifest never resolved is the other error: `seats_expected` is exactly what
+    the manifest resolved, and an unexpected file would silently raise the `unanimous` bar.
     """
     expected = []
     for seat in manifest.get("seats") or []:
@@ -136,7 +172,7 @@ def load_reports(run_dir, manifest):
                 "reviewer_id": reviewer_id,
                 "lens": seat.get("lens"),
                 "family": seat.get("family"),
-                "stage": seat.get("status") if seat.get("status") in ("dispatch", "validation", "timeout", "skipped") else "dispatch",
+                "stage": missing_stage(seat),
                 "reason": "no report file at {0}.json".format(reviewer_id),
             })
             continue
@@ -154,18 +190,26 @@ def load_reports(run_dir, manifest):
             continue
         reports[reviewer_id] = data
 
-    # A report file for a seat the manifest never resolved is still evidence; take it, and say so.
+    # A report file for a seat the manifest never resolved is a run directory that does not match
+    # its manifest. It is not an extra expected seat: `seats_expected` is the `unanimous`
+    # denominator, and a stray file would raise that bar with no seat behind it.
+    stray = []
     for name in sorted(os.listdir(run_dir)):
         if not name.endswith(".json") or name in SKIP_FILES:
             continue
-        reviewer_id = name[:-len(".json")]
-        if reviewer_id in reports or any(m["reviewer_id"] == reviewer_id for m in missing):
+        # `<reviewer-id>.json` is a report. Everything else the run writes about a seat carries a
+        # qualifier before its extension — `<id>.failed.json` from run_panel, `<id>.invalid.txt`
+        # from dispatch — and is a record of the failure, not a second report from a fifth seat.
+        stem, _dot, qualifier = name[:-len(".json")].partition(".")
+        if qualifier:
             continue
-        with open(os.path.join(run_dir, name), "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-        if report_lib.validate_report(data, lens=data.get("lens")):
+        if stem in reports or any(m["reviewer_id"] == stem for m in missing):
             continue
-        reports[reviewer_id] = data
+        stray.append(name)
+    if stray:
+        raise ReconcileError(
+            "report file(s) {0} in {1} for reviewer(s) the manifest never resolved; either add the "
+            "seat to manifest.json or remove the file".format(", ".join(stray), run_dir))
 
     return reports, missing
 
@@ -422,17 +466,18 @@ def build_member_records(cluster):
 
 
 def shared_quote(records):
-    quotes = [normalize_quote(r["_finding"].raw.get("quote")) for r in records]
-    quotes = [q for q in quotes if q]
+    carriers = [r for r in records if normalize_quote(r["_finding"].raw.get("quote"))]
+    quotes = [normalize_quote(r["_finding"].raw.get("quote")) for r in carriers]
     if not quotes:
         return None
     if len(quotes) == 1:
-        return records[0]["_finding"].raw.get("quote")
+        # The one member that carries a quote, not `records[0]` — `records` is sorted by reviewer_id.
+        return carriers[0]["_finding"].raw.get("quote")
     for index, left in enumerate(quotes):
         for right in quotes[index + 1:]:
             if not quote_match(left, right):
                 return None
-    shortest = min(records, key=lambda r: len(r["_finding"].raw.get("quote") or ""))
+    shortest = min(carriers, key=lambda r: len(r["_finding"].raw.get("quote") or ""))
     return shortest["_finding"].raw.get("quote")
 
 
@@ -452,18 +497,18 @@ def reconcile(run_dir, patch=None, artifact_text=None, now=None):
     manifest = load_manifest(run_dir)
     reports, missing = load_reports(run_dir, manifest)
 
+    # Exactly the reviewer ids the manifest resolved — the `unanimous` denominator, and nothing else.
+    # `load_reports` has already refused a report file for a reviewer that is not one of them.
     seats_expected = [seat["reviewer_id"] for seat in (manifest.get("seats") or []) if seat.get("reviewer_id")]
-    for reviewer_id in sorted(reports):
-        if reviewer_id not in seats_expected:
-            seats_expected.append(reviewer_id)
     seats_reporting = sorted(reports)
 
     findings = collect_findings(reports)
+    provisional = provisional_clusters(findings)
+
     anchor_drops = []
     if artifact_text is not None:
-        findings, anchor_drops = _drop_unreal_anchors(findings, artifact_text)
+        provisional, anchor_drops = _drop_unreal_anchors(provisional, artifact_text)
 
-    provisional = provisional_clusters(findings)
     for cluster in provisional:
         cluster["provisional_tier"] = compute_tier(cluster, seats_expected, seats_reporting)
 
@@ -495,27 +540,68 @@ def reconcile(run_dir, patch=None, artifact_text=None, now=None):
     document, merge_errors = _merge_judgment(merged, patch, manifest, seats_expected, seats_reporting, missing, reports, now)
     if merge_errors:
         return None, merge_errors, context
-    document["_anchor_drops"] = anchor_drops
+    document["anchor_drops"] = anchor_drops
     return document, [], context
 
 
-def _drop_unreal_anchors(findings, artifact_text):
-    """Drop any member whose `quote` is not text in the pinned artifact, and record the drop."""
+_ELLIPSES = ("…", "...")
+
+
+def anchor_is_real(text, haystack):
+    """Whether a `quote` or an `old_text` occurs in the normalized artifact.
+
+    The validator truncates a `quote` at 300 characters and marks the cut with U+2026. NFKC — which
+    `normalize_quote` applies to both sides — maps U+2026 to "...", so the marker cannot be
+    recognised after normalization and the artifact contains neither form. The raw string is
+    therefore inspected for the marker first; a marked quote is matched as the prefix it is.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return True
+    truncated = any(raw.endswith(marker) for marker in _ELLIPSES)
+    if truncated:
+        raw = raw.rstrip("….").rstrip()
+    needle = normalize_quote(raw)
+    return not needle or needle in haystack
+
+
+def _drop_unreal_anchors(clusters, artifact_text):
+    """Drop any member whose `quote` or `old_text` is not text in the pinned artifact.
+
+    This runs **after** the provisional ids are minted, and drops the member from its cluster rather
+    than the finding from the run: `P-n` is the judgment patch's entire reference vocabulary, and a
+    check that renumbered the clusters would invalidate every patch written against the previous
+    run. A cluster left with no members disappears; a cluster left with one is a cluster of one and
+    no longer rests on the key that joined it.
+    """
     haystack = normalize_quote(artifact_text)
     kept = []
     drops = []
-    for finding in findings:
-        needle = finding.norm_quote
-        if needle.endswith("…"):
-            needle = needle[:-1].strip()
-        if needle and needle not in haystack:
-            drops.append({
-                "reviewer_id": finding.reviewer_id,
-                "finding_id": finding.raw.get("id"),
-                "reason": "quote does not occur in the pinned artifact",
-            })
+    for cluster in clusters:
+        survivors = []
+        for finding in cluster["members"]:
+            unreal = []
+            if not anchor_is_real(finding.raw.get("quote"), haystack):
+                unreal.append("quote")
+            edit = finding.raw.get("literal_edit")
+            if isinstance(edit, dict) and not anchor_is_real(edit.get("old_text"), haystack):
+                unreal.append("literal_edit.old_text")
+            if unreal:
+                drops.append({
+                    "reviewer_id": finding.reviewer_id,
+                    "finding_id": finding.raw.get("id"),
+                    "cluster": cluster["provisional_id"],
+                    "reason": "{0} does not occur in the pinned artifact".format(" and ".join(unreal)),
+                })
+                continue
+            survivors.append(finding)
+        if not survivors:
             continue
-        kept.append(finding)
+        if len(survivors) < len(cluster["members"]):
+            cluster["members"] = survivors
+            if len(survivors) == 1:
+                cluster["match_key"] = "none"
+        kept.append(cluster)
     return kept, drops
 
 
@@ -555,6 +641,22 @@ def validate_patch_shape(patch, manifest, reports):
         if entry.get("source"):
             check_ref("canonical_edits on {0}".format(entry.get("cluster")), entry["source"])
 
+    # One entry per cluster per list. Two entries for one cluster silently last-wins otherwise, and
+    # the losing entry is a judgment the supplier wrote down and the product never carried.
+    for name in ("singleton_labels", "severities", "dispositions", "contradictions", "canonical_edits", "rulings"):
+        seen = set()
+        for entry in patch.get(name) or []:
+            reference = entry.get("cluster")
+            if reference in seen:
+                errors.append("{0}: more than one entry for {1!r}".format(name, reference))
+            seen.add(reference)
+    seen_splits = set()
+    for entry in patch.get("splits") or []:
+        reference = entry.get("from")
+        if reference in seen_splits:
+            errors.append("splits: more than one entry for {0!r}".format(reference))
+        seen_splits.add(reference)
+
     for entry in patch.get("singleton_labels") or []:
         if entry.get("label") not in SINGLETON_LABELS:
             errors.append("singleton_labels on {0}: `label` must be one of {1}".format(entry.get("cluster"), list(SINGLETON_LABELS)))
@@ -571,17 +673,18 @@ def validate_patch_shape(patch, manifest, reports):
     return errors
 
 
-def _resolve_cluster_ref(clusters, reference):
-    """Find the post-merge cluster a patch entry's provisional id now lives in."""
+def _resolve_cluster_refs(clusters, reference):
+    """Every post-merge cluster a patch entry's provisional id could now name.
+
+    More than one means the patch split `reference` and then named the parent: which half the entry
+    meant is not recoverable, so the caller reports it rather than binding to the first product.
+    """
+    matches = []
     for cluster in clusters:
-        pid = cluster["provisional_id"]
-        if pid == reference:
-            return cluster
-        if "+" in pid and reference in pid.split("+"):
-            return cluster
-        if pid.startswith(reference + "."):
-            return cluster
-    return None
+        parts = cluster["provisional_id"].split("+")
+        if reference in parts or any(part.startswith(reference + ".") for part in parts):
+            matches.append(cluster)
+    return matches
 
 
 def _merge_judgment(clusters, patch, manifest, seats_expected, seats_reporting, missing, reports, now):
@@ -604,10 +707,19 @@ def _merge_judgment(clusters, patch, manifest, seats_expected, seats_reporting, 
             by_ref.setdefault(part, record)
 
     def resolve(reference, where):
-        record = by_ref.get(reference) or _wrap(_resolve_cluster_ref(clusters, reference), records)
-        if record is None:
+        record = by_ref.get(reference)
+        if record is not None:
+            return record
+        matches = [_wrap(cluster, records) for cluster in _resolve_cluster_refs(clusters, reference)]
+        matches = [match for match in matches if match is not None]
+        if len(matches) > 1:
+            errors.append("{0}: {1!r} was split into {2}; name the product, not the parent".format(
+                where, reference, ", ".join(sorted(m["cluster"]["provisional_id"] for m in matches))))
+            return None
+        if not matches:
             errors.append("{0}: unknown provisional id {1!r}".format(where, reference))
-        return record
+            return None
+        return matches[0]
 
     for entry in patch.get("severities") or []:
         record = resolve(entry.get("cluster"), "severities")
@@ -655,9 +767,15 @@ def _merge_judgment(clusters, patch, manifest, seats_expected, seats_reporting, 
         tier = cluster["tier"]
         if "severity" not in record:
             severities = [m["severity"] for m in members]
-            worst = min(severities, key=lambda s: SEVERITY_ORDER.get(s, 9))
-            record["severity"] = worst
-            record["arbitration_reason"] = "members agree" if len(set(severities)) == 1 else "highest member severity; the patch supplied no arbitration"
+            if len(set(severities)) == 1:
+                record["severity"] = severities[0]
+                record["arbitration_reason"] = "members agree"
+            else:
+                # Step 4 is the supplier's. Taking the worst severity here would be the script
+                # arbitrating a disagreement on no reasoning, in a field that reads as a ruling.
+                errors.append("cluster {0} ({1}) has members at {2} and the patch supplies no `severities` entry".format(
+                    cluster["provisional_id"], _describe(members),
+                    ", ".join(sorted(set(severities), key=lambda s: SEVERITY_ORDER.get(s, 9)))))
         if tier in LABELLED_TIERS and not record.get("singleton_label"):
             errors.append("post-merge {0} cluster {1} ({2}) carries no label in the patch".format(tier, cluster["provisional_id"], _describe(members)))
         if tier not in LABELLED_TIERS and record.get("singleton_label"):
@@ -676,10 +794,24 @@ def _merge_judgment(clusters, patch, manifest, seats_expected, seats_reporting, 
     if errors:
         return None, errors
 
-    # A contradiction forces flag-for-human; so does a judgment-call with no host ruling.
+    # A contradiction forces flag-for-human, whatever the patch said.
     for record in records:
         if record.get("contradicted_by"):
             record["disposition"] = "flag-for-human"
+
+    # The `synthesis` persona always flags a judgment call, and this is where that is enforced. An
+    # unattended persona disposing a design fork is a human decision recorded as settled by nobody.
+    # A host is not held to it: it has an owner to answer to and its `disposition_reason` is the
+    # trace, which is why `rulings` stays optional and reserved for a decision of record.
+    if patch.get("author") == "synthesis":
+        for record in records:
+            if _all_judgment_call(record) and record["disposition"] != "flag-for-human":
+                errors.append(
+                    "cluster {0} ({1}) is all `judgment-call` and this patch from `synthesis` disposes it "
+                    "{2}; the synthesis persona always flags a judgment call".format(
+                        record["cluster"]["provisional_id"], _describe(record["members"]), record["disposition"]))
+    if errors:
+        return None, errors
 
     ordered = sorted(records, key=_presentation_key)
     counters = {"blocker": 0, "should-fix": 0, "nice-to-have": 0}
@@ -688,10 +820,10 @@ def _merge_judgment(clusters, patch, manifest, seats_expected, seats_reporting, 
     for record in ordered:
         severity = record["severity"]
         counters[severity] += 1
-        clusters_out.append(_render_cluster(record, "{0}-{1}".format(prefix[severity], counters[severity])))
+        clusters_out.append(_render_cluster(record, "{0}-{1}".format(prefix[severity], counters[severity]), patch.get("author")))
 
     document = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": RECONCILIATION_SCHEMA_VERSION,
         "run_id": manifest.get("run_id"),
         "artifact": {
             "path": manifest.get("artifact"),
@@ -708,6 +840,7 @@ def _merge_judgment(clusters, patch, manifest, seats_expected, seats_reporting, 
         "seats_expected": seats_expected,
         "seats_reporting": seats_reporting,
         "missing_seats": missing,
+        "anchor_drops": [],
         "families_reporting": sorted({reports[r].get("family") for r in seats_reporting if reports[r].get("family")}),
         "clusters": clusters_out,
         "disagreements": _disagreements(clusters_out, patch),
@@ -728,6 +861,12 @@ def _wrap(cluster, records):
     return None
 
 
+def _all_judgment_call(record):
+    """True when every finding behind the cluster — collapsed duplicates included — is a judgment call."""
+    findings = [finding for member in record["members"] for finding in member["_all"]]
+    return bool(findings) and all(f.raw.get("change_kind") == "judgment-call" for f in findings)
+
+
 def _describe(members):
     return ", ".join("{0} {1}".format(m["reviewer_id"], m["finding_id"]) for m in members)
 
@@ -742,7 +881,7 @@ def _presentation_key(record):
     )
 
 
-def _render_cluster(record, final_id):
+def _render_cluster(record, final_id, author):
     cluster = record["cluster"]
     members = record["members"]
     primary = sorted(members, key=lambda m: (SEVERITY_ORDER.get(m["severity"], 9), m["reviewer_id"]))[0]
@@ -753,7 +892,7 @@ def _render_cluster(record, final_id):
                 if tag not in tags:
                     tags.append(tag)
 
-    canonical_edit, edit_conflict = _canonical_edit(record)
+    canonical_edit, edit_conflict = _canonical_edit(record, author)
 
     return {
         "id": final_id,
@@ -794,7 +933,7 @@ def _render_cluster(record, final_id):
     }
 
 
-def _canonical_edit(record):
+def _canonical_edit(record, author):
     edits = []
     for member in record["members"]:
         for finding in member["_all"]:
@@ -803,10 +942,10 @@ def _canonical_edit(record):
                 edits.append((member["reviewer_id"], finding.raw.get("id"), edit))
     if not edits:
         return None, False
-    replacements = {edit.get("new_text") for _r, _f, edit in edits}
+    conflict = _members_disagree_on_replacement(edits)
     entry = record.get("canonical_edit_entry")
     if entry is None or not entry.get("accepted"):
-        return None, len(replacements) > 1
+        return None, conflict
     source = entry.get("source") or {}
     for reviewer_id, finding_id, edit in edits:
         if reviewer_id == source.get("reviewer_id") and finding_id == source.get("finding_id"):
@@ -814,10 +953,27 @@ def _canonical_edit(record):
                 "old_text": edit.get("old_text"),
                 "new_text": edit.get("new_text"),
                 "source": {"reviewer_id": reviewer_id, "finding_id": finding_id},
-                "accepted_by": entry.get("accepted_by") or "judgment patch",
+                "accepted_by": entry.get("accepted_by") or author,
                 "reason": entry.get("reason") or "",
             }, False
-    return None, len(replacements) > 1
+    return None, conflict
+
+
+def _members_disagree_on_replacement(edits):
+    """`edit_conflict` is about **members**: two reviewers proposing different replacements.
+
+    One reviewer's own collapsed duplicates offering two wordings is that reviewer restating itself,
+    not a conflict between seats, and reporting it as one made the field mean two different things.
+    """
+    by_reviewer = {}
+    for reviewer_id, _finding_id, edit in edits:
+        by_reviewer.setdefault(reviewer_id, set()).add(edit.get("new_text"))
+    order = sorted(by_reviewer)
+    for index, left in enumerate(order):
+        for right in order[index + 1:]:
+            if any(a != b for a in by_reviewer[left] for b in by_reviewer[right]):
+                return True
+    return False
 
 
 def _disagreements(clusters, patch):
@@ -878,7 +1034,6 @@ def _counts(clusters):
 def compute_verdict(clusters, reports):
     """Severity and disposition together, per the spec's four bullets."""
     blockers = [c for c in clusters if c["severity"] == "blocker"]
-    rework_seats = sum(1 for data in reports.values() if data.get("verdict") == "rework")
     families_at_rework = len({data.get("family") for data in reports.values() if data.get("verdict") == "rework"})
     if families_at_rework >= 2:
         return "rework"
@@ -890,7 +1045,6 @@ def compute_verdict(clusters, reports):
     for cluster in clusters:
         if cluster["severity"] == "should-fix" and cluster["disposition"] in ("fix-now", "flag-for-human"):
             return "fix-then-ship"
-    del rework_seats
     return "ship"
 
 
@@ -927,10 +1081,12 @@ def judgment_request(context):
         "seats_expected": context["seats_expected"],
         "seats_reporting": context["seats_reporting"],
         "missing_seats": context["missing_seats"],
+        "anchor_drops": context["anchor_drops"],
         "note": (
             "Write judgment.json in this directory against schemas/judgment-patch.schema.json, then re-run reconcile.py "
             "with --judgment. Provisional tiers are computed before your claim joins and splits and are recomputed after "
-            "them; label every cluster that is a singleton or corroborated-same-family AFTER the merge."
+            "them; label every cluster that is a singleton or corroborated-same-family AFTER the merge. Any member listed "
+            "in `anchor_drops` quoted text that is not in the pinned artifact and is already out of the clusters below."
         ),
         "clusters": entries,
     }
