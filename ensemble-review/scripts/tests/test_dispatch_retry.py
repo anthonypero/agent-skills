@@ -156,6 +156,50 @@ class LengthRetryTest(DispatchTestCase):
                                msg="a failed seat still spent money and the record must say so")
 
 
+class ForkTagAtIngestTest(DispatchTestCase):
+    """The `fork` rule reaches a real reviewer, or it is a rule only the unit tests enforce.
+
+    `lib/report.py` applies the rule only when it is called with `ingest=True`, and the one caller
+    that matters here is `dispatch.py`. Every other test in this file feeds it reports that would
+    pass either way, so without these two the wiring could be deleted and the suite stay green.
+    """
+
+    def untagged(self):
+        """The house fixture's judgment call with its `fork` tag taken off again."""
+        item = dict(harness.valid_report()["findings"][0])
+        item["tags"] = ["configuration"]
+        return harness.valid_report(findings=[item])
+
+    def test_an_untagged_judgment_call_costs_the_seat_a_repair_re_ask(self):
+        self.workspace.plan({harness.FAST_MODEL: [
+            {"body": self.untagged()},
+            {"body": harness.valid_report()},
+        ]})
+        code, err = self.run_seat(family="xai")
+        self.assertEqual(code, 0, err)
+        self.assertIn("carries the `fork` tag", err, "the reviewer is told which rule it broke")
+        self.assertEqual([c["is_repair"] for c in self.workspace.calls(harness.FAST_MODEL)], [False, True])
+        self.assertIn("fork", self.report("consistency-xai")["findings"][0]["tags"])
+
+    def test_a_still_untagged_second_reply_retires_the_seat(self):
+        self.workspace.plan({harness.FAST_MODEL: [{"body": self.untagged()}]})
+        code, err = self.run_seat(family="xai")
+        self.assertEqual(code, 3, err)
+        self.assertIn("carries the `fork` tag", err)
+        self.assertFalse(os.path.isfile(os.path.join(self.out, "consistency-xai.json")),
+                         "an invalid report is never written as if it had passed")
+        self.assertTrue(os.path.isfile(os.path.join(self.out, "consistency-xai.invalid.txt")),
+                        "the raw response is kept so the seat's failure can be read")
+
+    def test_a_gap_tagged_judgment_call_is_refused_the_same_way(self):
+        item = dict(harness.valid_report()["findings"][0])
+        item["tags"] = ["configuration", "gap"]
+        self.workspace.plan({harness.FAST_MODEL: [{"body": harness.valid_report(findings=[item])}]})
+        code, err = self.run_seat(family="xai")
+        self.assertEqual(code, 3, err)
+        self.assertIn("must not carry the `gap` tag", err)
+
+
 class RegistryGateTest(DispatchTestCase):
 
     def test_a_model_absent_from_the_registry_is_a_composition_error(self):

@@ -47,7 +47,7 @@ The dispatching script overwrites `reviewer_id`, `lens`, `family`, `model`, `leg
 
 ### `location`
 
-Point at one place a reader can turn to. `§5.5`, `§6.1 step 4`, `"Driver resolution" table, row 2`, `lines 88-94`. If the defect is the *absence* of something, name the place it should have been: "§6.2, the renderer list — rST/AsciiDoc absent". Never write "throughout" without also naming one concrete instance.
+Point at one place a reader can turn to. `§5.5`, `§6.1 step 4`, `"Driver resolution" table, row 2`, `lines 88-94`. If the defect is the _absence_ of something, name the place it should have been: "§6.2, the renderer list — rST/AsciiDoc absent". Never write "throughout" without also naming one concrete instance.
 
 ### `quote`
 
@@ -61,7 +61,7 @@ One sentence, in the present tense, naming the defect and not the remedy. "`/acc
 
 The passage in a source document that the artifact contradicts, omits, or misreads. `reference` is the repo-relative path as it was given to you; `location` is the section or heading in that document; `quote` is verbatim from it, 300 characters or fewer.
 
-**A fidelity finding without a citation is not a finding.** For other lenses, a citation is what turns an opinion into an argument — supply one whenever a source document bears on the point, and use `null` when the finding rests on the artifact alone (an internal contradiction, for instance, has no external source to cite).
+**A `fidelity` or `source-credibility` finding without a citation is not a finding.** Those two lenses cite on every finding and the validator rejects one that does not; a panel seating either with no references supplied is refused before it runs, for the same reason. For other lenses, a citation is what turns an opinion into an argument — supply one whenever a source document bears on the point, and use `null` when the finding rests on the artifact alone (an internal contradiction, for instance, has no external source to cite).
 
 ### `severity`
 
@@ -75,7 +75,7 @@ Rate the defect, not your feelings about the document. A document you dislike wi
 
 Two things, both required: **why it is wrong**, and **what a builder or reader does wrong because of it**. The second half is what makes a finding actionable — "the schema is under-specified" is not a finding; "the schema does not say whether `references` items carry revisions, so two builders will pick different shapes and the reconciler will fail to match them" is.
 
-Where you can, include the strongest argument *against* your own finding and say why it does not save the artifact. A finding that survives its own steelman is worth far more to the reconciler than one that has never been tested.
+Where you can, include the strongest argument _against_ your own finding and say why it does not save the artifact. A finding that survives its own steelman is worth far more to the reconciler than one that has never been tested.
 
 ### `suggested_change`
 
@@ -83,11 +83,51 @@ Concretely what to change, written at the altitude of the artifact. For a spec, 
 
 ### `change_kind` and `literal_edit`
 
-`literal-edit` means the fix is a text substitution you can write out exactly: a wrong word, a stale figure, a contradictory sentence. When you use it, supply `literal_edit` with `old_text` copied verbatim from the artifact and **occurring exactly once in it**, and `new_text` as the replacement. If the text you would replace appears more than once, widen `old_text` until it is unique, or mark the finding `judgment-call` instead.
+`change_kind` answers one question — **can this fix be written out, or does somebody have to decide something first?** It is not a measure of how big the fix is.
 
-`judgment-call` means a human has to decide something. Anything that changes scope, adds a requirement, picks between designs, or rests on information not in the documents is a `judgment-call`, no matter how obvious the answer looks to you. Set `literal_edit` to `null`.
+`literal-edit` means the fix is a text substitution you can write out exactly: a wrong word, a stale figure, a contradictory sentence, a missing case you can draft. When you use it, supply `literal_edit` with `old_text` copied verbatim from the artifact and **occurring exactly once in it**, and `new_text` as the replacement. An **insertion** counts: make `old_text` the sentence the missing text should follow and `new_text` that same sentence plus the addition. If the text you would replace appears more than once, widen `old_text` until it is unique.
+
+`judgment-call` means a human has to choose before anything can be written, and set `literal_edit` to `null`. It means a **design fork**: the artifact faces two answers, both defensible, the references do not settle which is right, and choosing one changes what gets built. Name both answers in `suggested_change`. A fork is not the same thing as a question you personally cannot answer — it is a question the documents in front of you do not answer.
+
+**"The artifact left this thin" is not a judgment call.** A gap, an omission, an unsupported claim, a stale figure or a missing case has a determinate fix — somebody has to write it, but nobody has to decide anything. Rate it `should-fix` or `blocker` by consequence and mark it `literal-edit`, **however large the replacement is**: a whole missing section goes in `new_text` the same way a corrected figure does, because `change_kind` measures whether the fix is decided and not how much typing it is. This is the single most common miscalibration in this schema, and it is expensive: on the 2026-09-18 panel that reviewed this skill's own v1 spec, 24 of 29 clusters were all-`judgment-call` and 22 of those were disposed something other than `flag-for-human`, which left the reconciler with a tag that discriminated nothing and two dozen clusters that all looked like decisions somebody owed an answer to.
+
+**Every `judgment-call` finding carries the tag `fork`.** It is the one thing `change_kind` cannot say for itself: the enum has two values, `literal-edit` is what the auto-apply gate turns on, and a reviewer who reaches for `judgment-call` because the fix is big rather than because the fix is undecided writes a finding the reconciler cannot tell from a real fork. The tag is you saying out loud which of the two this is, and a report whose judgment call does not carry it is rejected when the run first accepts it.
+
+**A `judgment-call` may not carry `gap`.** `gap` is a live tag and it belongs on the determinate fixes — a `literal-edit` that fills an absence rather than correcting a statement. On a `judgment-call` it is a contradiction, because a fix determinate enough to call a gap is a fix you can write out; the validator rejects that combination and tells you to write the replacement instead.
 
 The auto-apply gate reads `change_kind` and nothing else. Marking a judgment call as a literal edit is the one error in this schema that can put unreviewed text into a document.
+
+**A fork, and the same defect miscalled.** Both are real findings from that panel.
+
+Positive — this is a `judgment-call` tagged `fork`:
+
+```json
+{
+  "claim": "References are optional, but the default panel inference lands on a template whose fidelity seat cannot run without them, and the spec never says whether the run refuses, drops the seat, or re-infers the panel.",
+  "severity": "should-fix",
+  "suggested_change": "Choose one and state it: (a) refuse the run as a composition error, (b) drop the fidelity seat and record the panel as under-seated, or (c) re-infer onto a template whose requires_references is false and record the substitution. (a) protects the evidentiary value and costs the operator a retry; (c) always produces a review and produces a different one than was asked for.",
+  "change_kind": "judgment-call",
+  "literal_edit": null,
+  "tags": ["panel-inference", "fork"]
+}
+```
+
+Three defensible answers, no reference settles which, and the artifact reads differently under each. That is a fork.
+
+Negative — this was filed as a `judgment-call` and is a gap:
+
+```json
+{
+  "claim": "The family-aware configuration shape and the seat-allocation rules are unspecified.",
+  "severity": "should-fix",
+  "suggested_change": "Add the family axis under the tier map and state the three resolution passes.",
+  "change_kind": "judgment-call",
+  "literal_edit": null,
+  "tags": ["configuration"]
+}
+```
+
+Nobody has to decide anything here: there is one shape the rest of the document already implies, and the fix is to write it down. It is `should-fix` with the replacement drafted as a `literal-edit` and tagged `gap` — and it stays a `literal-edit` if the missing text is a whole section, because the section can be drafted. Filed as a judgment call it reads to the reconciler exactly like the fork above, and the two get opposite treatment: the fork goes to a human for a ruling, the gap goes on the fix list.
 
 ### `confidence`
 
@@ -102,6 +142,8 @@ The auto-apply gate reads `change_kind` and nothing else. Marking a judgment cal
 ### `tags`
 
 Short free strings that group findings across sections: `wire-contract`, `threat-model`, `cost-model`, `naming`, `missing-decision`. The reconciler uses them as a weak clustering hint, so reuse an obvious word rather than inventing a precise one.
+
+Two tags are **not** hints and are read directly, per `change_kind` above. Every `judgment-call` finding carries `fork`, and one that does not is rejected. `gap` marks a `literal-edit` that fills an absence, and it may never appear on a `judgment-call`.
 
 ## What a good finding looks like
 
@@ -123,11 +165,11 @@ Short free strings that group findings across sections: `wire-contract`, `threat
   "literal_edit": null,
   "confidence": "high",
   "externally_verified": false,
-  "tags": ["wire-contract", "concurrency"]
+  "tags": ["wire-contract", "concurrency", "fork"]
 }
 ```
 
-What makes it good: the location is turnable-to, the quote is verbatim, the claim is one sentence naming the defect rather than the fix, the citation shows which promise is broken, the reasoning carries the mechanism *and* the downstream harm *and* the counter-argument, and the suggested change is specific enough to write into the document.
+What makes it good: the location is turnable-to, the quote is verbatim, the claim is one sentence naming the defect rather than the fix, the citation shows which promise is broken, the reasoning carries the mechanism _and_ the downstream harm _and_ the counter-argument, and the suggested change is specific enough to write into the document.
 
 ## Output discipline
 

@@ -72,7 +72,7 @@ def main(argv=None):
             parsed["model"] = args.model
         parsed.setdefault("model", "harness-subagent" if leg == "harness" else "unknown")
 
-    errors = report_lib.validate_report(parsed, lens=parsed.get("lens"))
+    errors = report_lib.validate_report(parsed, lens=parsed.get("lens"), ingest=True)
     if errors:
         sys.stderr.write("{0} failed validation:\n".format(args.report))
         for error in errors:

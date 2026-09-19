@@ -2,7 +2,7 @@
 
 A panel of independent reviewers for one document, instead of one reviewer with one shape of blind spot.
 
-Each seat carries a different **lens** — fidelity to source, buildability, internal consistency, adversarial — and runs on a different **model family**. The reviewers never see each other's prompts or outputs, every report lands on disk as validated JSON with a Markdown rendering beside it, and the host session reconciles them into one document that says which findings two families agreed on and which came from exactly one mind.
+Each seat carries a different **lens** — fidelity to source, buildability, internal consistency, adversarial, completeness, source credibility, security, alternatives, second-order consequences — and runs on a different **model family**. The reviewers never see each other's prompts or outputs, every report lands on disk as validated JSON with a Markdown rendering beside it, and the host session reconciles them into one document that says which findings two families agreed on and which came from exactly one mind.
 
 ```bash
 python3 scripts/run_panel.py \
@@ -23,10 +23,15 @@ skills/ensemble-review/
 ├── SKILL.md                        # the runbook: panel → dispatch → harness seats → reconcile
 ├── README.md
 ├── agents/                         # the personas — one file per lens, no model baked in
-│   ├── lens-fidelity.md
+│   ├── lens-fidelity.md            # the four with a measured track record
 │   ├── lens-buildability.md
 │   ├── lens-consistency.md
-│   └── lens-adversarial.md
+│   ├── lens-adversarial.md
+│   ├── lens-completeness.md        # the five added in the v1 rebuild
+│   ├── lens-source-credibility.md
+│   ├── lens-security.md
+│   ├── lens-alternatives.md
+│   └── lens-second-order.md
 ├── references/
 │   └── finding-schema.md           # how to fill a finding; loaded into every persona prompt
 ├── schemas/
@@ -36,7 +41,11 @@ skills/ensemble-review/
 ├── templates/
 │   ├── config.json                 # tier × family → concrete model id
 │   ├── models.json                 # the registry: prices, context limits, effort vocabularies, priors
-│   └── panels/spec-review.json     # the measured four-lens panel
+│   └── panels/
+│       ├── spec-review.json        # the measured four-lens panel
+│       ├── research-report.json    # fidelity, source-credibility, completeness, adversarial
+│       ├── design-decision.json    # adversarial, alternatives, second-order — needs no references
+│       └── code-review.json        # a named stub: deferred, routes to /code-review
 └── scripts/
     ├── dispatch.py                 # one persona × one family → a validated report on disk
     ├── run_panel.py                # claim → materialize → resolve → project → dispatch → manifest
@@ -59,6 +68,9 @@ skills/ensemble-review/
         ├── test_run_lifecycle.py   # claim, materialize, projection, budget gate, CAS, resume
         ├── test_paths.py           # the cascade, the config merge, a panel with the package read-only
         ├── test_seating.py         # the tier order, the constraints, both re-seat paths
+        ├── test_catalog.py         # every persona and every panel template, checked as data
+        ├── test_panel_selection.py # inference, the references rule, the deferred stub
+        ├── test_min_families.py    # the family target, counted at both ends, never a gate
         ├── test_reconcile_revision.py  # the artifact-revision check
         ├── harness.py              # a temp workspace: artifact, config, registry, panel, overrides
         └── fake_backend.py         # a scripted connector, loaded by file path like any driver
@@ -91,6 +103,74 @@ Notes on the picks, because they will go stale and the next person needs the rea
 - **Non-`pro` variants where a `pro` exists.** `openai/gpt-6-astra-pro` is the same underlying model served with `reasoning.mode: pro`. Paying for a higher reasoning mode on one seat and not the others would make that seat's findings incomparable with the rest of the panel, which is the one thing this skill cannot tolerate. Same reasoning for `gpt-5.5-pro`.
 - **The Claude family is Sonnet 5 at every tier, and the default panel seats no Claude family.** Decided 2026-09-18 after the first dogfood run: the Fable seat cost $3.58 of a $4.80 panel and its unique findings were matched by a $0.34 GLM seat. The stronger reason is decorrelation: the host session that authors and reconciles these documents is a Claude model, so a Claude reviewer is the seat most correlated with the artifact. Seat `claude` explicitly when a second Claude opinion is wanted. `run_panel.py --skip-claude` still exists for running that seat as an Opus harness subagent on the subscription; it is **off by default**.
 
+## The lens catalog
+
+Nine personas, one file each in `agents/`, and the catalog is closed: `scripts/tests/test_catalog.py` asserts that `agents/` holds exactly these nine and nothing else, so a lens cannot be added without the panel templates and this list being updated with it.
+
+The four with a measured track record are the 2026-06-26 `annotate` full-spec set — fidelity, buildability, consistency, adversarial. The five added in the v1 rebuild are `completeness`, `source-credibility`, `security`, `alternatives` and `second-order`, which the seed and the v3 spec both name.
+
+**Where each new lens stops is the design decision, not what it asks.** Four of the five overlap something the adversarial lens already touches, and the boundary is drawn the same way every time: the adversarial lens goes where it can win, and the new lens sweeps systematically whether or not anything is there to win.
+
+| Lens | Its half of the boundary | The neighbour's half |
+| --- | --- | --- |
+| `completeness` | Sweeps the whole surface against what a document of this kind owes its reader | `adversarial` Part B sweeps for the absence its attack needs |
+| `source-credibility` | Judges whether the source deserves to be cited at all — authority, currency, independence, sufficiency | `fidelity` judges whether the artifact reads the source correctly |
+| `security` | Assumes the design is right and asks who can abuse it: assets, actors, trust boundaries, blast radius | `adversarial` asks whether the design is wrong |
+| `alternatives` | Enumerates every fork the document passed through and reports the ones with no argument attached | `adversarial` reaches for a foreclosed alternative only when it breaks the central claim |
+| `second-order` | Starts where the build ends: month two, year two, the first time somebody changes it | `buildability` stops at the moment the thing is built; `adversarial` attacks the bet as it stands |
+
+**Overlap is not duplication and the bodies say so.** Every persona is told not to trim its findings to avoid a neighbour, because two independent lenses landing on one defect is the corroboration signal the panel exists to collect and it cannot be produced by holding back.
+
+**Three sentences are byte-identical across all nine bodies**, and a test asserts it: the severity calibration, the `judgment-call` rule and the verbatim-quote rule. A lens calibrated differently from its neighbours makes the panel's agreement counts mean something different per seat, which is the one thing this skill cannot tolerate. Frontmatter is identical too — `model: frontier`, `output_type: json_report`, `context: [finding-schema.md]`, `tools: []`.
+
+**`model: frontier`, not `model: high`.** Framework §6 wants a frontmatter `model` that names a key in the tiers map; the personas shipped through stage 2b with the abstract `high`, which names no tier here, so the lowest level of the tier order could never fire. It fires now: a seat with no `--model`, no `--tier`, no seat tier, no panel tier and no config `default_tier` resolves to `frontier` and records `tier_source: "persona"`. The framework §8 inversion is unaffected — the config's `default_tier` still beats it, because the tier is a property of the run's stakes rather than of the lens.
+
+## Panel templates and how one is chosen
+
+| Template | Seats | `requires_references` | `min_families` | `verify_web` |
+| --- | --- | --- | --- | --- |
+| `spec-review` | fidelity, buildability, consistency, adversarial — openai, glm, kimi, xai | `true` | 2 | `false` |
+| `research-report` | fidelity, source-credibility, completeness, adversarial — openai, kimi, glm, xai | `true` | 2 | `false` |
+| `design-decision` | adversarial, alternatives, second-order — xai, openai, glm | `false` | 2 | `false` |
+| `code-review` | none — `"deferred": true`, `"routes_to": "/code-review"` | — | — | — |
+
+Every live template seats **named, distinct, non-Claude families**, for the reason under _Tiers and model picks_: `distinct` and `non-claude` appear in no shipped template and exist for ad hoc composition. `test_catalog.py` resolves all three against the shipped config at all three tiers and checks each clears its own `min_families`.
+
+**Inference, when no `--panel` is given.** A cheap heuristic over the **artifact's filename** — and nothing else — picks `research-report` or `design-decision` when the name says so, else `spec-review`. The heuristic deliberately does not open the document: a heuristic that read the artifact would be a second, unreviewed judgement about it made before any reviewer has seen it, and the operator can always name the panel.
+
+Then the references rule, which overrides the heuristic: **a run with no references never infers a template whose `requires_references` is true.** It falls back to `design-decision`, the one shipped template that needs none, and the substitution is recorded three times over — in the manifest's `panel_inference`, on the console, and in the reconciliation's method caveat by `reconcile_core.method_caveat`, the same way a seat substitution is.
+
+**A named `--panel` does not bend.** `fidelity` and `source-credibility` require a `citation` on every finding, so a seat carrying either with nothing to cite is a composition error, exit 1, refused before the first paid call and naming the seats. Inference exists to avoid that outcome; an operator who named the panel gets told why instead. This replaces the stderr warning v0 printed, which let a run spend four seats' money on a panel whose fidelity seat could not produce a valid finding.
+
+**The two panel-shape refusals happen before the run directory is claimed**, so neither leaves anything behind: `code-review` refuses on the template, and a starved `fidelity` or `source-credibility` seat refuses once the seats resolve and still before the claim. That matters because `lib/runs.py` increments the sequence number on a collision, so a directory left behind here would silently move the operator's retry — the one with `--ref` supplied — into `<name>-2`. Refusals that need more than the panel, the config and the seats come after the claim and leave the directory with what they wrote: the registry and effort gates, a resume fingerprint mismatch, a materialize failure, and the budget refusal, which writes `budget-refusal.json` into it deliberately.
+
+**`verify_web` is declared and off.** Every live template carries `"verify_web": false`, matching the spec's normative template block. No seat has a live web tool in v1, so the flag states the intent rather than switching anything, and `test_catalog.py` requires it on every live template.
+
+## `min_families` is a target
+
+The spec is explicit that it is a target and not a precondition: a panel that cannot meet it runs anyway, lens-diverse only, and the reconciliation says so. The implementation counts distinct families **twice** and keeps both:
+
+| Count | Taken at | Over | Answers |
+| --- | --- | --- | --- |
+| `seated` | Resolve | every expected seat, harness seats included | what the panel was composed to reach |
+| `reporting` | wrap-up | the seats whose reports validated | what it actually reached |
+
+Both land in the manifest as `min_families: {target, seated, reporting, families_seated, families_reporting}`, and `min_families_target` is kept beside them so the manifests written in stage 2a and 2b still read. `--min-families` overrides the template.
+
+Two numbers rather than one, because a panel that seated four families and heard back from one is a different document from a panel that only ever had one, and the tier table has to be read differently in each case. `reconcile_core.method_caveat` prints both, and **one reporting family reads as "lens-diverse only"** — several lenses, one mind, and no cluster in that run can carry cross-family corroboration at any tier. A run that meets its target adds nothing to the caveat.
+
+## `judgment-call` means a fork
+
+On the 2026-09-18 panel that reviewed this skill's own v1 spec, **24 of 29 clusters were all-`judgment-call`**, and 22 of those were disposed something other than `flag-for-human`. A tag that lands on four fifths of a review discriminates nothing, and the reconciler was left with two dozen clusters that all looked like decisions somebody owed an answer to.
+
+`references/finding-schema.md` and every persona rubric now say the same thing: `change_kind` answers **one** question — can the fix be written out, or does somebody have to decide something first — and it is not a measure of how big the fix is. `judgment-call` means a **design fork**: two defensible answers, the references silent on which is right, and the choice changes what gets built. "The artifact left this thin" is not one. A gap has a determinate fix, so it is `should-fix` or `blocker` by consequence with the replacement drafted as a `literal-edit` — **however large that replacement is**, a whole missing section included, because a section somebody can draft is a section somebody can draft.
+
+**The discriminator is a tag, and that is a deviation worth naming.** The spec's remedy for a thin spot is a `gap` change kind, and the enum in `schemas/review-report.schema.json` has exactly two values that the frozen replay fixture depends on. So the enum is unchanged and the tag carries the distinction instead: **every `judgment-call` finding carries `fork`, and none may carry `gap`**. `gap` stays a live tag on the determinate fixes it describes. The schema doc carries a worked positive (a real fork from that run) and a worked negative (the same run's configuration finding, which is a gap that was filed as a judgment call).
+
+**Enforced at ingest, and only at ingest.** `lib/report.py` rejects a `judgment-call` with no `fork` tag, and rejects one carrying `gap`, at the moment a report first enters the system — a model's response in `dispatch.py`, a subagent's JSON in `render_harness_report.py` — where the reviewer is still there to be handed the error in the repair re-ask. Reading a stored report back applies none of it, because the frozen replay fixture's 44 untagged judgment calls predate the rule and a resume must not re-dispatch a seat over a rule its report could not have known.
+
+**What the reconciler does with the tag.** A cluster whose findings are all `judgment-call` is forced to `flag-for-human` on a patch from `synthesis` — unless every one of those findings is tagged `gap`, in which case it is a determinate fix somebody filed under the wrong change kind and it goes on the fix list. Untagged still goes to the human: silence says nothing, and the safe reading of silence is the one that asks. Since ingest rejects a `gap`-tagged judgment call, that branch only ever fires for a report written before the rule or by hand — which is exactly the case it exists for.
+
 ## The driver seam
 
 The HTTP call lives in `scripts/backends/openai_compat.py`, loaded by the provider entry's `"type"` field. `dispatch.py` contains no backend-specific logic.
@@ -119,7 +199,7 @@ The manifest's `roots` block is a map of loaded file to root — `{"search": [�
 
 `scripts/lib/seating.py` owns both orderings, because a second builder has to reproduce a run from the same panel and the same config.
 
-The **tier order**, first match wins: `--model <seat-id>=<model-id>` → `--tier` → the seat's `tier` → the panel's `tier` → the config's `default_tier` → the persona frontmatter's `model`. The last level only fires when the frontmatter names a key in the tier map; the shipped personas carry the abstract `model: high`, which names no tier, so in practice the config default is the floor. The level that decided each seat is recorded as `tier_source`.
+The **tier order**, first match wins: `--model <seat-id>=<model-id>` → `--tier` → the seat's `tier` → the panel's `tier` → the config's `default_tier` → the persona frontmatter's `model`. The last level only fires when the frontmatter names a key in the tier map, and since the v1 rebuild every shipped persona carries `model: frontier`, which is one — so a seat with nothing above it resolves to `frontier` and records `tier_source: "persona"`. The level that decided each seat is recorded as `tier_source`.
 
 The **family passes**, over the seats in template order so the result does not depend on how the template was written: every named family reserves first, across the whole template; then each named seat whose family has no cell re-seats; then `non-claude` takes the first non-`claude` family in declaration order that has a model and nobody holds; then `distinct` takes the first family nobody else holds, reserving in both directions, always last.
 
@@ -145,7 +225,9 @@ A seat's `reviewer_id` is minted from its lens and **what it asked for** — `fi
 
 `schemas/review-report.schema.json` is JSON Schema draft 2020-12 and carries exactly the spec's two tables: the report envelope, and the finding with its thirteen fields. `references/finding-schema.md` is the prose version that gets loaded into every persona's system prompt, so the reviewer and the validator are reading the same contract.
 
-Validation is hand-written in `scripts/lib/report.py` — required fields, types, enums, length caps, the `F<n>` id pattern — so the skill runs on any Python 3 with nothing installed. It also enforces the two rules the schema can only state in prose: a `literal-edit` finding must carry a `literal_edit` block, and every finding from the **fidelity** lens must carry a `citation`. A report that fails gets **one repair re-ask** carrying the validation errors back; a second failure writes the raw response to `<reviewer-id>.invalid.txt` and exits non-zero, and the seat is flagged as missing rather than silently dropped.
+Validation is hand-written in `scripts/lib/report.py` — required fields, types, enums, length caps, the `F<n>` id pattern — so the skill runs on any Python 3 with nothing installed. It also enforces the rules the schema can only state in prose: a `literal-edit` finding must carry a `literal_edit` block, every finding from the **`fidelity`** and **`source-credibility`** lenses must carry a `citation`, and — at ingest only — every `judgment-call` finding must carry the `fork` tag and must not carry `gap`. A report that fails gets **one repair re-ask** carrying the validation errors back; a second failure writes the raw response to `<reviewer-id>.invalid.txt` and exits non-zero, and the seat is flagged as missing rather than silently dropped.
+
+**Both citing lenses are held to the citation rule at both ends.** `run_panel.py` refuses to seat `fidelity` or `source-credibility` with no references, as a composition error before the first paid call; `report.py` rejects a finding from either lens with a null `citation`. The two halves close the same rule, and closing only the first one left a seated `source-credibility` seat able to return uncited findings that validated.
 
 The dispatcher **overwrites the audit fields** — `schema_version`, `reviewer_id`, `lens`, `family`, `model`, `leg`, `artifact`, `references` — with what it knows, before validating. The model cannot get the audit record wrong, and validation bites on the part that is actually the reviewer's work: verdict, summary, findings, method notes.
 
@@ -192,13 +274,11 @@ This is a deliberate subset of `design/v1-spec.md`, built to be usable today and
 - **`apply_fixes.py` and the auto-apply gate** — nothing is written back to the artifact. `change_kind` and `literal_edit` are collected, and `reconciliation.json` carries a `canonical_edit` and an `edit_conflict` flag per cluster so the gate can be built later, but no code reads them today.
 - **`install.sh`** — no installer. The key check is `dispatch.py --help`.
 - **The `synthesis` persona and autonomous mode** — `reconcile.py` accepts a judgment patch from either author, but nothing here produces one unattended: no reconciler persona, no unattended run.
-- **Four of the eight lenses** — `completeness`, `security`, `alternatives`, `second-order` are specced and unwritten. `spec-review.json` carries a fifth seat under `optional_seats` (completeness on `xai`) that cannot be enabled until that persona exists.
-- **The other three panel templates** — `research-report`, `design-decision`, and the deferred `code-review` stub.
 - **Mid-flight budget metering** — the projection is a dispatch gate only. Nothing meters spend as seats return, so a panel that overruns its projection runs to completion.
-- **`min_families` enforcement** — `min_families_target` is recorded and never acted on. Re-seating is built; counting the families that actually reported against the target is not.
-- **`mode: identical` and `verify_web`** — neither knob exists, so neither is refused by name.
+- **`mode: identical`** — the knob does not exist, so it is not refused by name.
+- **`verify_web`** — every live template declares it `false` and nothing reads it, and the composition error the spec requires for `verify_web: true` on a tool-less seat is not implemented, so a workspace panel setting it true runs unrefused.
 
-Built since the first cut of this list: the completion cap and its length retry, the per-model cap floor, the model registry and `refresh_models.py`, the cost and token pre-flight with its budget gate and `budget-refusal.json`, content-hash revisions with a read-only `inputs/` directory, resume with a compare-and-set claim, the two-root workspace cascade, the tier resolution order, the `non-claude` and `distinct` constraint resolvers, and re-seating on a missing cell or an unreachable model.
+Built since the first cut of this list: the completion cap and its length retry, the per-model cap floor, the model registry and `refresh_models.py`, the cost and token pre-flight with its budget gate and `budget-refusal.json`, content-hash revisions with a read-only `inputs/` directory, resume with a compare-and-set claim, the two-root workspace cascade, the tier resolution order, the `non-claude` and `distinct` constraint resolvers, re-seating on a missing cell or an unreachable model, the five remaining lenses, the three remaining panel templates, panel inference with its references rule, and `min_families` counted at both ends.
 
 ## Rebuild items
 
@@ -218,6 +298,7 @@ The first panel against a real document (`design/v1-spec.md`, 2026-09-18, four s
 - **A projection exists, and it is built on priors rather than on prompt size.** `lib/budget.py` prices each seat as `input_price × prompt tokens + output_price × the model's output-token prior`, plus a 50% repair allowance per seat and one synthesis call. Against run 2's numbers that lands near $1.5 on a run that cost $1.47 and was projected at $1.00 by prompt size alone. Prompt tokens are approximated at four characters per token — no tokenizer dependency — and every figure is labelled an estimate wherever it is printed.
 - **The package is read-only and the workspace overrides it.** `lib/paths.py` resolves every packaged file through two roots — `<workspace>/.agents/ensemble-review/` then the package — with whole-file replacement for files and a deep merge for `config.json`. `run_panel.py`, `dispatch.py`, `reconcile.py` and `refresh_models.py` all go through it, and `run_panel.py` passes `--workspace` to each `dispatch.py` subprocess so the child reads what the parent resolved. A driver under the workspace root is imported from its path, so a project binds a family to its own connector without editing the package. `scripts/tests/test_paths.py` runs a whole fake-backend panel against a copy of the package with every file and directory stripped of its write bit, and checks afterwards that nothing in it moved.
 - **Seats resolve by a stated order, and constraints resolve.** `lib/seating.py` implements the tier order and the four family passes, and `non-claude` and `distinct` work. A missing cell, an unsatisfiable constraint and a model the provider refuses each record a `substitution` rather than failing the run, no re-seat of any kind adds a Claude seat nobody asked for, and `reconcile_core.method_caveat` appends every substitution to the reconciliation's method caveat — the judgment supplier cannot know about them, because both re-seat paths are decided by `run_panel.py` after the reports are written.
+- **The catalog is complete, and the panel is chosen rather than assumed.** Five lenses were written (`completeness`, `source-credibility`, `security`, `alternatives`, `second-order`), three panel templates landed beside `spec-review`, and the personas were retiered from `model: high` to `model: frontier` so framework §6's frontmatter level of the tier order is live. `--panel` is now optional: the template is inferred from the artifact's name and a run with no references never lands on one that needs them. A `fidelity` or `source-credibility` seat with nothing to cite is a composition error rather than a stderr warning, `min_families` is counted at both ends and named in the method caveat, and `judgment-call` was sharpened to mean a design fork rather than a thin spot. The four sections above carry the reasoning; `test_catalog.py`, `test_panel_selection.py` and `test_min_families.py` carry the tests.
 - **The artifact has a revision, and three mechanisms use it.** `run_panel.py` copies the artifact and every reference into a read-only `<run-dir>/inputs/`, and a revision is the SHA-256 of the bytes written there, with the commit id beside it when that file's tree is clean. Seats read those bytes; resume refuses when the input fingerprint has moved; `reconcile.py` hashes the artifact it resolves against the manifest's `artifact_revision` and refuses on a mismatch. **In the ordinary case that refusal never fires**, because `reconcile.py` resolves the run's own `inputs/` copy first and those bytes cannot change — editing the working-tree document afterwards is fine and always was. It fires only when `--artifact <path>` overrides the resolution, or when the `inputs/` copy is gone and the working-tree file has moved on since. A null revision is unpinned, warned about, and allowed through, which is what keeps the frozen replay fixture running.
 
 ### Still open
@@ -225,7 +306,8 @@ The first panel against a real document (`design/v1-spec.md`, 2026-09-18, four s
 - **Reasoning tokens bill as output, and several frontier models will not let you opt out.** `_meta.reasoning_tokens` records them per seat from `usage.completion_tokens_details.reasoning_tokens` when the provider reports it. They are often the larger half of a seat's bill and are invisible in the completion, which is why the projection is built on a measured output-token prior rather than on prompt size.
 - **The priors are four measurements and eight defaults.** `openai/gpt-5.6-sol`, `z-ai/glm-5.3-flash`, `moonshotai/kimi-k3` and `x-ai/grok-4.6` carry run 2's accepted-attempt completion tokens and `openai/gpt-6-astra` carries run 1's; every other model in the registry carries a flat 16000 labelled `default`. A projection for a panel of unmeasured models is a guess with a receipt.
 - **The repair re-ask resends the whole user message.** It has to, because the reviewer must re-quote verbatim — but it roughly doubles the cost of a seat that needed one. A cheaper repair that sends only the previous output and the errors would save money and risk fabricated quotes; measure before choosing.
-- **The spec's `min_families` is recorded and never enforced.** `run_panel.py` writes `min_families_target` into the manifest and does nothing with it. Re-seating now exists, so the missing half is narrower than it was: nothing counts the families that actually reported against the target, and nothing says so in the method caveat.
+- **Panel inference reads a filename, not a document.** The heuristic is three word lists over the artifact's own name, which is cheap, reproducible and wrong whenever a document is named for its subject rather than its kind — a research report called `caching.md` infers `spec-review`. The references rule is the safety net that matters, and it is the one that fires; the heuristic is a convenience and the operator can always pass `--panel`. Whether the heuristic should look at the document's headings is undecided, and doing so would put an unreviewed reading of the artifact ahead of every reviewer's.
+- **`min_families` is counted and named, never acted on — deliberately.** The spec makes it a target rather than a precondition, so nothing re-seats to reach it and nothing refuses for missing it. What is genuinely absent is a way to _ask_ for more families: composing a panel across more families is still a hand edit of the template, and `--min-families 3` on a three-family panel records the shortfall rather than seating a fourth.
 - **`provider_routing` is passed through on thin evidence.** The shipped map carries the spec's one entry, for `z-ai/glm-5.3`, and the driver sends it as OpenRouter's request-level `provider` object. The per-model endpoint data that would justify a routing choice — latency, throughput, quantization and price per host, from `GET /api/v1/models/{author}/{slug}/endpoints` — is a second pass of `refresh_models.py` that nothing runs yet, so the values are hand-picked.
 - **A runtime re-seat spends past the projection.** The budget gate is a pre-flight over the seats as composed; a seat re-seated onto another family makes a call the projection never priced, on a model that may cost more than the one it replaced. Nothing re-gates. That is the same gap as mid-flight metering, one level down, and it is part of why the re-seat is capped at once per seat.
 - **`dispatch.py` exit 5 is not in the spec's exit-code table.** It is internal signalling — the child telling the parent that the provider refused the model rather than that the reviewer wrote a bad report — and `run_panel.py` consumes it and never re-emits it, so no panel run returns 5. An operator invoking `dispatch.py` directly on an unserved model will see it.

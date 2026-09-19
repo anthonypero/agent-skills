@@ -800,13 +800,17 @@ def _merge_judgment(clusters, patch, manifest, seats_expected, seats_reporting, 
         if record.get("contradicted_by"):
             record["disposition"] = "flag-for-human"
 
-    # The `synthesis` persona always flags a judgment call, and this is where that is enforced. An
-    # unattended persona disposing a design fork is a human decision recorded as settled by nobody.
-    # A host is not held to it: it has an owner to answer to and its `disposition_reason` is the
-    # trace, which is why `rulings` stays optional and reserved for a decision of record.
+    # The `synthesis` persona always flags a design fork, and this is where that is enforced. An
+    # unattended persona disposing a fork is a human decision recorded as settled by nobody. A host
+    # is not held to it: it has an owner to answer to and its `disposition_reason` is the trace,
+    # which is why `rulings` stays optional and reserved for a decision of record.
+    #
+    # A cluster whose judgment calls are all tagged `gap` is not a fork and is not forced anywhere:
+    # it is a determinate fix that was filed under the wrong `change_kind`, and it goes on the fix
+    # list like any other. `_needs_a_human_ruling` is where that reading lives.
     if patch.get("author") == "synthesis":
         for record in records:
-            if _all_judgment_call(record) and record["disposition"] != "flag-for-human":
+            if _needs_a_human_ruling(record) and record["disposition"] != "flag-for-human":
                 errors.append(
                     "cluster {0} ({1}) is all `judgment-call` and this patch from `synthesis` disposes it "
                     "{2}; the synthesis persona always flags a judgment call".format(
@@ -854,15 +858,26 @@ def _merge_judgment(clusters, patch, manifest, seats_expected, seats_reporting, 
 
 
 def method_caveat(supplied, manifest):
-    """The patch's caveat, plus any seat the run did not seat the way the panel asked for.
+    """The patch's caveat, plus everything about the run the judgment supplier could not know.
 
-    A re-seated seat changes what the agreement counts mean — the panel that ran is not quite the
-    panel that was composed — so it belongs beside the family counts rather than only in the
-    manifest. The judgment supplier cannot be relied on to know: an unsatisfiable constraint and a
-    runtime re-seat are both decided by `run_panel.py` after the patch's author has read the reports.
-    Every substitution the manifest recorded is appended here, and nothing else is changed.
+    Three appendices, each drawn from the manifest and none of them from the patch:
+
+    - **Seat substitutions.** A re-seated seat changes what the agreement counts mean — the panel
+      that ran is not quite the panel that was composed. An unsatisfiable constraint and a runtime
+      re-seat are both decided by `run_panel.py` after the patch's author has read the reports.
+    - **The family target.** `min_families` is a target, not a precondition: a run that misses it
+      proceeds and says so here. **One reporting family is `lens-diverse only`** — several lenses,
+      one mind, and no cross-family corroboration available at any tier, which is the single fact
+      that most changes how the tier table should be read.
+    - **The inferred panel.** A run with no references never infers a template whose
+      `requires_references` is true, so the panel that ran may not be the panel the artifact's own
+      name suggested. That substitution is recorded the same way a seat's is.
+
+    Nothing else about the supplied text is changed.
     """
     text = (supplied or "").strip()
+    appendices = []
+
     lines = []
     for seat in manifest.get("seats") or []:
         substitution = seat.get("substitution")
@@ -871,10 +886,55 @@ def method_caveat(supplied, manifest):
         lines.append("`{0}` asked for {1} and ran on {2} ({3}): {4}".format(
             seat.get("reviewer_id"), substitution.get("requested"), substitution.get("resolved"),
             substitution.get("kind"), (substitution.get("reason") or "").rstrip(".")))
-    if not lines:
+    if lines:
+        appendices.append("Seat substitutions recorded in the manifest — " + "; ".join(lines) + ".")
+
+    families = _min_families_caveat(manifest)
+    if families:
+        appendices.append(families)
+
+    inference = manifest.get("panel_inference")
+    if isinstance(inference, dict) and inference.get("reason"):
+        appendices.append("Panel substitution recorded in the manifest — the artifact's name suggested "
+                          "`{0}` and the run used `{1}`: {2}.".format(
+                              inference.get("heuristic"), inference.get("resolved"),
+                              (inference.get("reason") or "").rstrip(".")))
+
+    if not appendices:
         return text
-    appended = "Seat substitutions recorded in the manifest — " + "; ".join(lines) + "."
+    appended = "\n\n".join(appendices)
     return (text + "\n\n" + appended) if text else appended
+
+
+def _min_families_caveat(manifest):
+    """One sentence when the run missed its family target, and nothing at all when it met it.
+
+    Both counts are reported, because they answer different questions: `seated` says what the panel
+    was composed to reach and `reporting` says what it actually reached, and a panel that seated four
+    families and heard back from one is a different document from one that only ever had one.
+    """
+    block = manifest.get("min_families")
+    if not isinstance(block, dict):
+        return None
+    target = block.get("target")
+    seated = block.get("seated")
+    reporting = block.get("reporting")
+    if not isinstance(target, int):
+        return None
+    counts = [value for value in (seated, reporting) if isinstance(value, int)]
+    if not counts or min(counts) >= target:
+        return None
+    reading = ("this run is **lens-diverse only** — several lenses, one family, so no cluster on it "
+               "can carry cross-family corroboration"
+               if reporting == 1 else
+               "cross-family corroboration is thinner than the panel asked for")
+    return ("Family diversity below the panel's target — `min_families` target {0}, {1} seated, {2} "
+            "reporting ({3}); {4}.".format(
+                target,
+                seated if seated is not None else "unrecorded",
+                reporting if reporting is not None else "unrecorded",
+                ", ".join(block.get("families_reporting") or block.get("families_seated") or []) or "no family recorded",
+                reading))
 
 
 def _wrap(cluster, records):
@@ -886,10 +946,23 @@ def _wrap(cluster, records):
     return None
 
 
-def _all_judgment_call(record):
-    """True when every finding behind the cluster — collapsed duplicates included — is a judgment call."""
+def _needs_a_human_ruling(record):
+    """True when the cluster is all `judgment-call` **and** the tags do not say it is only a gap.
+
+    Two conditions, and the second is what `change_kind` cannot express. A `judgment-call` is a
+    design fork — two defensible answers the references do not settle — and it carries the `fork`
+    tag to say so. A cluster whose judgment calls are every one of them tagged `gap` is a determinate
+    fix somebody filed as a decision; it belongs on the fix list, and forcing it to a human is how a
+    reviewer's miscalibration becomes a question the owner has to answer.
+
+    Untagged is treated as needing the ruling. A report written before the tag rule existed — the
+    frozen replay fixture's 44 untagged judgment calls among them — says nothing either way, and the
+    safe reading of silence is the one that asks rather than the one that applies.
+    """
     findings = [finding for member in record["members"] for finding in member["_all"]]
-    return bool(findings) and all(f.raw.get("change_kind") == "judgment-call" for f in findings)
+    if not findings or not all(f.raw.get("change_kind") == "judgment-call" for f in findings):
+        return False
+    return not all(report_lib.GAP_TAG in (f.raw.get("tags") or []) for f in findings)
 
 
 def _describe(members):

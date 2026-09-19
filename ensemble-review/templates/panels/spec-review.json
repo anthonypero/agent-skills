@@ -6,6 +6,7 @@
   "tier": "frontier",
   "reconciler": "default",
   "auto_apply": false,
+  "verify_web": false,
   "seats": [
     {
       "lens": "fidelity",
@@ -27,8 +28,8 @@
   "optional_seats": [
     {
       "lens": "completeness",
-      "family": "xai",
-      "note": "A fifth family is seated here when the artifact is large enough to earn it. Not enabled in v0: the completeness persona is not written yet. Move this into `seats` once agents/lens-completeness.md exists."
+      "family": "deepseek",
+      "note": "A fifth family is seated here when the artifact is large enough to earn it. `deepseek` because the four seated families are openai, glm, kimi and xai, and it is the one remaining non-Claude family the config carries at all three tiers — promoting this seat onto a family already at the table would seat two lenses on one mind and inflate every agreement count it touches. Off by default because the measured panel is the four-lens one and a fifth seat changes what those counts mean; the completeness persona exists now, so moving this into `seats` is a one-line edit."
     }
   ]
 }

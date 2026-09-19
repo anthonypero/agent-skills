@@ -166,7 +166,7 @@
           "default": false
         },
         "tags": {
-          "description": "Free strings used as clustering hints, e.g. wire-contract, threat-model.",
+          "description": "Free strings used as clustering hints, e.g. wire-contract, threat-model. Two are not hints and are enforced when a report is first accepted: every judgment-call finding carries `fork`, and `gap` on a judgment-call is rejected, because a determinate fix is a literal-edit however large the replacement is. `gap` marks a literal-edit that fills an absence.",
           "type": "array",
           "items": { "type": "string" },
           "default": []

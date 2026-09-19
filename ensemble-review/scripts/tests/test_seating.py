@@ -98,7 +98,7 @@ class TierOrderTest(unittest.TestCase):
         self.assertEqual((seat["tier"], seat["tier_source"], seat["model"]), ("persona", "persona", "model/persona"))
 
     def test_a_frontmatter_model_that_names_no_tier_contributes_nothing(self):
-        """The shipped personas carry the abstract `model: high`, which is not a key in any tier map."""
+        """A value naming no key in this config's tier map — `model: high`, what the personas carried through stage 2b."""
         seat = self.resolve(frontmatter={"model": "high"})
         self.assertEqual((seat["tier"], seat["tier_source"]), (seating_lib.DEFAULT_TIER, "default"))
 

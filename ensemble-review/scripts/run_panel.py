@@ -13,7 +13,12 @@ The run lifecycle, in the order the stages run:
 
 - **Claim** — the run directory is created with an atomic exclusive `mkdir`. On collision the run
   id's sequence number increments and the claim retries, so two concurrent runs on one artifact can
-  never write into the same directory.
+  never write into the same directory. The two **panel-shape** refusals are raised before this line
+  and leave nothing on disk — the deferred stub, and a `fidelity` or `source-credibility` seat with
+  no references — because both are decidable from the panel, the config and the seats alone. Every
+  later refusal fires after the claim and leaves the directory holding whatever it had written by
+  then: the registry gate, the effort gate, a resume fingerprint mismatch, a materialize failure,
+  and the budget refusal, which writes `budget-refusal.json` there on purpose.
 - **Materialize** — the artifact and every reference are copied into `<run-dir>/inputs/`, read-only,
   and each one's revision is the SHA-256 of the bytes written there. Seats read those bytes, never
   the working tree: a mid-run edit must not give two seats two different documents.
@@ -29,6 +34,20 @@ Every file the run loads — the panel, the config, the registry, the personas, 
 backend driver — resolves through `lib/paths.py`'s two-root cascade: `<workspace>/.agents/
 ensemble-review/` first, then the skill package, which is read-only and is never written to. Files
 replace whole; `config.json` deep-merges. The root each one came from lands in the manifest's `roots`.
+
+With no `--panel`, the template is **inferred**: a cheap heuristic over the artifact's own filename
+picks `research-report` or `design-decision` when the name says so and `spec-review` otherwise, and a
+run with **no references never lands on a template whose `requires_references` is true** — it falls
+back to `design-decision` and records the substitution in the manifest, on the console, and in the
+reconciliation's method caveat. `code-review` ships deferred and refuses with exit 1, naming
+`/code-review`. A `fidelity` or `source-credibility` seat with no references is a composition error,
+also exit 1: those two lenses cite on every finding and cannot do their job against nothing.
+
+`min_families` is a **target, not a precondition**. The panel's value (default 2) is overridable with
+`--min-families`; distinct families are counted twice, over the expected seats at Resolve and over
+the reporting seats at wrap-up, and both counts land in the manifest as
+`min_families: {target, seated, reporting}`. A run that misses the target still runs, and
+`reconcile_core.method_caveat` says so — "lens-diverse only" when one family reported.
 
 Seats resolve through `lib/seating.py`: the tier order (`--model`, `--tier`, the seat, the panel, the
 config, the persona frontmatter) and the three constraint passes (named, `non-claude`, `distinct`).
@@ -52,6 +71,7 @@ import concurrent.futures
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -72,6 +92,29 @@ FINDING_SCHEMA = "finding-schema.md"
 PROVIDER = "openrouter"
 
 DEFAULT_BUDGET_USD = 5.00
+
+# Panel inference. `DEFAULT_PANEL` is where a run with no signal lands; `FALLBACK_PANEL` is where a
+# run with no references lands, and it is the one shipped template whose `requires_references` is
+# false. Both are names, not paths, so a workspace copy of either wins through the cascade.
+DEFAULT_PANEL = "spec-review"
+FALLBACK_PANEL = "design-decision"
+
+# The cheap heuristic, and it is deliberately cheap: the artifact's own filename, split into words,
+# against two word lists. Nothing reads the document — a heuristic that opened the artifact would be
+# a second, unreviewed judgement about it before any reviewer has seen it, and the operator can
+# always name the panel. First list that matches wins; no match is `spec-review`.
+PANEL_HEURISTIC = (
+    ("research-report", ("research", "survey", "landscape", "findings", "report")),
+    ("design-decision", ("decision", "adr", "rfc", "proposal", "options", "tradeoff", "fork", "choice")),
+)
+
+# The two lenses that cite on every finding. A seat carrying one with no references is a composition
+# error rather than a wasted seat: the reviewer would be asked for a citation it has no document to
+# take one from, and every finding it returned would fail validation.
+REFERENCE_REQUIRED_LENSES = ("fidelity", "source-credibility")
+
+# `min_families` is a target. A panel that does not set one is held to this.
+DEFAULT_MIN_FAMILIES = 2
 
 EXIT_OK = 0
 EXIT_COMPOSITION = 1
@@ -97,6 +140,50 @@ def load_panel(name_or_path, paths):
             sys.exit("{0}\n  Panels available: {1}".format(failure, ", ".join(available_panels(paths)) or "none"))
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle), path
+
+
+def panel_from_artifact(artifact):
+    """The template name the artifact's own filename suggests, by the word lists above."""
+    slug = os.path.basename(artifact)
+    slug = slug.rsplit(".", 1)[0] if "." in slug else slug
+    words = {word for word in re.split(r"[^a-z0-9]+", slug.lower()) if word}
+    for name, markers in PANEL_HEURISTIC:
+        if words & set(markers):
+            return name
+    return DEFAULT_PANEL
+
+
+def infer_panel(artifact, refs, paths):
+    """(panel, path, inference record) when the operator named no `--panel`.
+
+    Two steps, and the second overrides the first. The heuristic reads the artifact's filename and
+    nothing else. Then the **references rule**: a run with no references never infers a template
+    whose `requires_references` is true, because the fidelity-bearing seats on it would be refused a
+    line later as a composition error. It lands on `design-decision`, which is reference-free by
+    design, and the substitution is recorded so the reconciliation can say the panel that ran was not
+    the panel the artifact suggested.
+
+    An explicit `--panel` skips all of this: an operator who names a reference-hungry template and
+    supplies nothing gets the composition error rather than a quietly different panel.
+    """
+    heuristic = panel_from_artifact(artifact)
+    panel, path = load_panel(heuristic, paths)
+    # `requested` is null on this path by construction: `infer_panel` is only reached when the
+    # operator named no `--panel`. The explicit path in `main` fills it with the name they gave.
+    record = {"requested": None, "heuristic": heuristic, "resolved": heuristic, "reason": None}
+    if panel.get("requires_references") and not refs:
+        panel, path = load_panel(FALLBACK_PANEL, paths)
+        record["resolved"] = FALLBACK_PANEL
+        record["reason"] = (
+            "panel {0!r} was inferred from the artifact name and requires source-of-truth references; "
+            "none were supplied, so the run fell back to {1!r}, whose seats judge the artifact on its "
+            "own argument".format(heuristic, FALLBACK_PANEL))
+    return panel, path, record
+
+
+def reference_required_seats(seats):
+    """Every resolved seat whose lens cites on every finding. Empty unless one is seated."""
+    return [seat for seat in seats if seat["lens"] in REFERENCE_REQUIRED_LENSES]
 
 
 def available_panels(paths):
@@ -258,7 +345,8 @@ def _accumulate(before, now):
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Run a review panel: one dispatch per seat, in parallel.")
-    parser.add_argument("--panel", default="spec-review", help="Panel template name in templates/panels/, or a path to one")
+    parser.add_argument("--panel", default=None,
+                        help="Panel template name in templates/panels/, or a path to one (default: inferred from the artifact's name, and never a template needing references the run does not have)")
     parser.add_argument("--artifact", required=True, help="Path to the document under review")
     parser.add_argument("--ref", action="append", default=[], dest="refs", help="Path to a source-of-truth reference; repeat for several")
     parser.add_argument("--out", required=True, help="Run directory")
@@ -267,6 +355,8 @@ def parse_args(argv):
     parser.add_argument("--config", default=None, help="Config JSON, taken as given (default: the workspace-first cascade, deep-merged)")
     parser.add_argument("--models", default=None, help="Model registry, taken as given (default: the workspace-first cascade)")
     parser.add_argument("--tier", default=None, help="Tier for every seat that does not set its own (default: the panel's, then the config's)")
+    parser.add_argument("--min-families", type=int, default=None, dest="min_families",
+                        help="Target distinct families, overriding the panel's (default: the panel's, else {0}). A target, not a precondition: a run below it proceeds and the reconciliation's method caveat says so".format(DEFAULT_MIN_FAMILIES))
     parser.add_argument("--model", action="append", default=[], dest="models_pinned", metavar="SEAT=MODEL",
                         help="Pin one seat to a concrete model id, e.g. --model fidelity-openai=openai/gpt-6-astra. Repeatable; beats every tier source")
     parser.add_argument("--max-tokens", type=int, default=registry_lib.DEFAULT_MAX_TOKENS,
@@ -286,35 +376,50 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
 
-    paths = paths_lib.Paths(args.workspace)
-    panel, panel_path = load_panel(args.panel, paths)
-    if panel.get("requires_references") and not args.refs:
-        sys.stderr.write("warning: panel `{0}` expects source-of-truth references and none were supplied; "
-                         "a fidelity seat cannot do its job without them\n".format(panel.get("name", args.panel)))
-
     if not os.path.isfile(args.artifact):
         sys.exit("Not a file: {0}".format(args.artifact))
     for ref in args.refs:
         if not os.path.isfile(ref):
             sys.exit("Not a file: {0}".format(ref))
 
-    # --- Claim, or resume ------------------------------------------------------------------------
-    resuming = False
-    if os.path.isdir(args.out) and os.path.isfile(runs_lib.manifest_path(args.out)) and not args.fresh:
-        run_dir = os.path.abspath(args.out)
-        resuming = True
-    else:
-        try:
-            run_dir = runs_lib.claim_run_dir(args.out)
-        except runs_lib.RunError as failure:
-            sys.stderr.write("{0}\n".format(failure))
-            return EXIT_COMPOSITION
-        if os.path.abspath(run_dir) != os.path.abspath(args.out):
-            print("run directory {0} was already claimed; this run is {1}".format(args.out, run_dir))
+    paths = paths_lib.Paths(args.workspace)
+    try:
+        if args.panel:
+            panel, panel_path = load_panel(args.panel, paths)
+            # An operator who named the panel still gets the record, because `requested` is the
+            # field that says so. `heuristic: null` is what distinguishes the two paths: nothing
+            # read the artifact's name, so nothing could have been substituted.
+            inference = {"requested": args.panel, "heuristic": None,
+                         "resolved": panel.get("name") or args.panel, "reason": None}
+        else:
+            panel, panel_path, inference = infer_panel(args.artifact, args.refs, paths)
+    except paths_lib.PathError as failure:
+        sys.stderr.write("composition error: {0}\n".format(failure))
+        return EXIT_COMPOSITION
+    panel_name = panel.get("name") or args.panel or DEFAULT_PANEL
+
+    # A deferred template is a named stub carrying a route, not a panel with no seats. It refuses
+    # before anything is claimed or materialized, so the run leaves nothing behind.
+    if panel.get("deferred"):
+        sys.stderr.write(
+            "composition error: panel `{0}` ships deferred and seats nobody.\n"
+            "  {1}\n"
+            "  Use {2} instead — code diffs are not this skill's lane, which is documents judged "
+            "against their source-of-truth references.\n".format(
+                panel_name, panel.get("description") or "", panel.get("routes_to") or "/code-review"))
+        return EXIT_COMPOSITION
+
+    if inference["reason"]:
+        print("panel inferred: {0} (the {1} template needs references this run does not have)".format(
+            inference["resolved"], inference["heuristic"]))
+    elif inference["heuristic"]:
+        print("panel inferred: {0} (from the artifact's name; pass --panel to choose another)".format(
+            inference["resolved"]))
 
     # --- Resolve, part one: the cascade, the config and the seats ---------------------------------
-    # Seats resolve before anything is materialized, so a composition error costs nothing and leaves
-    # the run directory empty rather than half-pinned.
+    # Seats resolve **before the run directory is claimed**, so every composition error this stage
+    # can raise refuses the way the deferred-stub refusal above does: nothing created, nothing to
+    # clean up. Only `_adopt_recorded_substitutions` needs the claim, and it waits for it below.
     try:
         config, config_path = paths.config(args.config)
         config_entry = config.get(PROVIDER) or {}
@@ -335,6 +440,36 @@ def main(argv=None):
         sys.stderr.write("composition error: {0}\n".format(failure))
         return EXIT_COMPOSITION
 
+    # Composition error, not a warning: `fidelity` and `source-credibility` require a `citation` on
+    # every finding, so a seat carrying either with nothing to cite would have every finding it
+    # returned rejected by the validator. Refused here, before the first paid call, naming the seats.
+    starved = reference_required_seats(seats) if not args.refs else []
+    if starved:
+        sys.stderr.write(
+            "composition error: {0} seat(s) require source-of-truth references and none were supplied.\n".format(
+                len(starved)))
+        for seat in starved:
+            sys.stderr.write("  {0} carries the `{1}` lens, which cites on every finding\n".format(
+                seat["reviewer_id"], seat["lens"]))
+        sys.stderr.write(
+            "Supply them with --ref <path>, repeatable, or compose a panel without those lenses — "
+            "`{0}` is the shipped reference-free template.\n".format(FALLBACK_PANEL))
+        return EXIT_COMPOSITION
+
+    # --- Claim, or resume ------------------------------------------------------------------------
+    resuming = False
+    if os.path.isdir(args.out) and os.path.isfile(runs_lib.manifest_path(args.out)) and not args.fresh:
+        run_dir = os.path.abspath(args.out)
+        resuming = True
+    else:
+        try:
+            run_dir = runs_lib.claim_run_dir(args.out)
+        except runs_lib.RunError as failure:
+            sys.stderr.write("{0}\n".format(failure))
+            return EXIT_COMPOSITION
+        if os.path.abspath(run_dir) != os.path.abspath(args.out):
+            print("run directory {0} was already claimed; this run is {1}".format(args.out, run_dir))
+
     if resuming:
         _adopt_recorded_substitutions(runs_lib.read_manifest(run_dir), seats)
 
@@ -345,6 +480,16 @@ def main(argv=None):
     dispatched = [s for s in seats if not (args.skip_claude and s["family"] == "claude")]
     harness = [s for s in seats if args.skip_claude and s["family"] == "claude"]
     tier_default = args.tier or panel.get("tier")
+
+    # The first of the two family counts. `min_families` is a target: a panel that cannot meet it
+    # runs anyway, lens-diverse only, and says so. The second count — over the seats that actually
+    # reported — is taken at wrap-up, because a seat can fail after this line.
+    min_families = _min_families_target(args, panel)
+    seated_families = sorted({seat["family"] for seat in seats if seat.get("family")})
+    if len(seated_families) < min_families:
+        print("min_families: {0} seated against a target of {1} ({2}) — the run proceeds and the "
+              "reconciliation's method caveat will say so".format(
+                  len(seated_families), min_families, ", ".join(seated_families) or "no family"))
 
     # --- Materialize -----------------------------------------------------------------------------
     # On a resume the fingerprint is checked BEFORE anything is written: materializing first would
@@ -409,7 +554,8 @@ def main(argv=None):
         return EXIT_COMPOSITION
 
     manifest = _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
-                               dispatched, harness, inputs, fingerprint, tier_default, registry)
+                               dispatched, harness, inputs, fingerprint, tier_default, registry,
+                               min_families, seated_families, inference)
     if resuming:
         manifest = _merge_resume(manifest, runs_lib.read_manifest(run_dir))
     runs_lib.write_manifest(run_dir, manifest)
@@ -548,8 +694,17 @@ def _reseated(seat, entry, run_cap):
 
 # --- manifest ------------------------------------------------------------------------------------
 
+def _min_families_target(args, panel):
+    """`--min-families`, else the panel's, else the default. A target the run is measured against, never a gate."""
+    if args.min_families is not None:
+        return args.min_families
+    target = panel.get("min_families")
+    return DEFAULT_MIN_FAMILIES if target is None else target
+
+
 def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats, dispatched, harness,
-                    inputs, fingerprint, tier_default, registry):
+                    inputs, fingerprint, tier_default, registry, min_families, seated_families,
+                    inference):
     """The manifest as it stands at Resolve: every seat pending, every input pinned."""
     artifact = inputs["artifact"]
     references = inputs["references"]
@@ -596,6 +751,10 @@ def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
         "generated_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
         "panel": panel.get("name", args.panel),
         "panel_path": panel_path,
+        # How this run got its panel: `requested` is the `--panel` the operator named or null,
+        # `heuristic` is what the artifact's name suggested or null when nothing read it, `resolved`
+        # is what ran, and `reason` says why the last two differ when the references rule moved it.
+        "panel_inference": inference,
         "artifact": artifact["path"],
         "artifact_revision": artifact["revision"],
         "artifact_commit": artifact["commit"],
@@ -619,7 +778,18 @@ def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
         "skip_claude": args.skip_claude,
         "seats": seat_records,
         "families_dispatched": sorted({s["family"] for s in dispatched}),
-        "min_families_target": panel.get("min_families"),
+        # The target and both counts against it. `seated` is over every expected seat, harness seats
+        # included; `reporting` is filled at wrap-up, over the seats whose reports validated, and
+        # stays null on a run that never reached wrap-up. `reconcile_core.method_caveat` reads this
+        # block and names it when either count is short.
+        "min_families": {
+            "target": min_families,
+            "seated": len(seated_families),
+            "families_seated": list(seated_families),
+            "reporting": None,
+            "families_reporting": None,
+        },
+        "min_families_target": min_families,
         "elapsed_s": None,
         "cost_usd_total": None,
         "failures": [],
@@ -772,7 +942,6 @@ def _wrap_up(args, run_dir, results, harness, dispatched, elapsed, halt, held):
     manifest["elapsed_s"] = round(elapsed, 1)
     manifest["cost_usd_total"] = round(total_cost, 6) if cost_known else None
     manifest["failures"] = sorted({s["reviewer_id"] for s in manifest["seats"] if s.get("status") == "failed"})
-    runs_lib.write_manifest(run_dir, manifest)
 
     # Harness seats are expected to sit `pending` until the host spawns them, so they are not what
     # "under-seated" means here; only the OpenRouter leg's own seats are counted against exit 3.
@@ -783,11 +952,25 @@ def _wrap_up(args, run_dir, results, harness, dispatched, elapsed, halt, held):
     openrouter_seats = [s for s in manifest["seats"] if s.get("leg") != "harness"]
     reporting = [s for s in openrouter_seats
                  if runs_lib.report_is_valid(run_dir, s["reviewer_id"], _validate)[0]]
+
+    # The second family count, over the seats that actually reported — the one the agreement tiers
+    # are worth anything against. A harness seat has not been rendered yet at this point and is not
+    # counted; `reconcile.py` recomputes `families_reporting` from the reports it finds.
+    families_reporting = sorted({s.get("family") for s in reporting if s.get("family")})
+    min_families = _record_min_families(manifest, families_reporting)
+    runs_lib.write_manifest(run_dir, manifest)
+
     print("Panel `{0}` on {1}".format(manifest["panel"], manifest["artifact"]))
     print("Run directory: {0}".format(run_dir))
     print("Seats reporting: {0} of {1} · harness pending: {2} · failed: {3} · held: {4} · {5:.0f}s{6}".format(
         len(reporting), len(openrouter_seats), len(harness), len(manifest["failures"]), len(held), elapsed,
         " · ${0:.4f}".format(total_cost) if cost_known else ""))
+    if min_families["reporting"] < min_families["target"]:
+        print("Families reporting: {0} of a target {1} ({2}) — {3}".format(
+            min_families["reporting"], min_families["target"],
+            ", ".join(families_reporting) or "none",
+            "this run is lens-diverse only" if min_families["reporting"] <= 1
+            else "cross-family corroboration is thinner than the panel asked for"))
     print("")
 
     by_id = {r["seat"]["reviewer_id"]: r for r in results}
@@ -823,6 +1006,26 @@ def _wrap_up(args, run_dir, results, harness, dispatched, elapsed, halt, held):
     if len(reporting) < len(openrouter_seats):
         return EXIT_UNDER_SEATED
     return EXIT_OK
+
+
+def _record_min_families(manifest, families_reporting):
+    """Fill the reporting half of the manifest's `min_families` block. Returns the completed block.
+
+    Resolve wrote `target`, `seated` and `families_seated`; this is the count that matters, because a
+    seat that failed cannot corroborate anything. A run resumed from a manifest written before this
+    block existed gets one built here, so `method_caveat` never has to guess at the target.
+    """
+    block = manifest.get("min_families")
+    if not isinstance(block, dict):
+        block = {
+            "target": manifest.get("min_families_target") or DEFAULT_MIN_FAMILIES,
+            "seated": len({s.get("family") for s in manifest.get("seats") or [] if s.get("family")}),
+            "families_seated": sorted({s.get("family") for s in manifest.get("seats") or [] if s.get("family")}),
+        }
+    block["reporting"] = len(families_reporting)
+    block["families_reporting"] = list(families_reporting)
+    manifest["min_families"] = block
+    return block
 
 
 def _repo_relative(path):

@@ -3,8 +3,16 @@
 Standard library only. The validator is hand-written against `schemas/review-report.schema.json`
 rather than pulling in `jsonschema`, so the skill runs on any Python 3 with nothing installed. It
 checks what the schema can express about this document — required fields, types, enums, the id
-pattern — plus the two rules the schema states in prose: a `literal-edit` finding needs a
-`literal_edit` block, and every finding from the fidelity lens needs a citation.
+pattern — plus the rules the schema states in prose: a `literal-edit` finding needs a `literal_edit`
+block, every finding from a citing lens (`fidelity`, `source-credibility`) needs a citation, and a
+`judgment-call` finding carries the `fork` tag.
+
+**The `fork` tag is checked at ingest only.** `ingest=True` is the moment a report first enters the
+system — a model's response in `dispatch.py`, a subagent's JSON in `render_harness_report.py` —
+where the reviewer is still there to be asked for a repair. Reading a report back off disk uses the
+default, `ingest=False`, because a report accepted before the rule existed is still the report that
+seat wrote: the frozen replay fixture's 44 untagged `judgment-call` findings must keep replaying,
+and a resume must not re-dispatch a seat over a rule its report predates.
 
 Length caps are the one rule that does not reject. A string over its cap is trimmed to the cap with
 a trailing ellipsis and the trim is recorded in `_meta.truncated`, because a reviewer who wrote 696
@@ -23,6 +31,16 @@ SEVERITIES = ("blocker", "should-fix", "nice-to-have")
 CHANGE_KINDS = ("literal-edit", "judgment-call")
 CONFIDENCES = ("high", "medium", "low")
 LEGS = ("harness", "openrouter")
+
+# The two lenses that cite on every finding. `run_panel.py` refuses to seat either with no references
+# for the same reason this rejects an uncited finding from one: the citation is the whole argument.
+CITING_LENSES = ("fidelity", "source-credibility")
+
+# `change_kind` has two values and `judgment-call` means a design fork and nothing else, so `fork` is
+# the tag a judgment call carries and `gap` is the tag it may not: a determinate fix, however large,
+# is a `literal-edit` with the replacement written out. `gap` stays a live tag on those.
+FORK_TAG = "fork"
+GAP_TAG = "gap"
 
 SEVERITY_ORDER = {"blocker": 0, "should-fix": 1, "nice-to-have": 2}
 SEVERITY_LABEL = {"blocker": "Blockers", "should-fix": "Should fix", "nice-to-have": "Nice to have"}
@@ -137,8 +155,13 @@ def apply_length_caps(report):
     return truncations
 
 
-def validate_report(report, lens=None):
-    """Trim over-long strings in place, then return the errors that remain. Empty list means valid."""
+def validate_report(report, lens=None, ingest=False):
+    """Trim over-long strings in place, then return the errors that remain. Empty list means valid.
+
+    `ingest=True` adds the rules that only a reviewer who is still listening can repair — today, the
+    `fork` tag on a `judgment-call` finding. See this module's docstring for why re-reading a stored
+    report does not apply them.
+    """
     errors = []
     if not isinstance(report, dict):
         return ["top level is a {0}, expected a JSON object".format(type(report).__name__)]
@@ -190,7 +213,7 @@ def validate_report(report, lens=None):
     else:
         seen_ids = set()
         for index, finding in enumerate(findings):
-            errors.extend(_validate_finding(finding, index, seen_ids, lens))
+            errors.extend(_validate_finding(finding, index, seen_ids, lens, ingest))
 
     if report.get("verdict") == "ship" and isinstance(findings, list):
         if any(f.get("severity") == "blocker" for f in findings if isinstance(f, dict)):
@@ -199,7 +222,7 @@ def validate_report(report, lens=None):
     return errors
 
 
-def _validate_finding(finding, index, seen_ids, lens):
+def _validate_finding(finding, index, seen_ids, lens, ingest=False):
     where = "findings[{0}]".format(index)
     errors = []
     if not isinstance(finding, dict):
@@ -238,8 +261,8 @@ def _validate_finding(finding, index, seen_ids, lens):
                 if not _is_str(value) or not value.strip():
                     errors.append("{0}: `citation.{1}` must be a non-empty string".format(where, field))
 
-    if lens == "fidelity" and citation is None:
-        errors.append("{0}: the fidelity lens requires a `citation` on every finding".format(where))
+    if lens in CITING_LENSES and citation is None:
+        errors.append("{0}: the {1} lens requires a `citation` on every finding".format(where, lens))
 
     literal_edit = finding.get("literal_edit")
     if finding.get("change_kind") == "literal-edit":
@@ -260,8 +283,32 @@ def _validate_finding(finding, index, seen_ids, lens):
     tags = finding.get("tags")
     if tags is not None and (not isinstance(tags, list) or any(not _is_str(t) for t in tags)):
         errors.append("{0}: `tags` must be an array of strings".format(where))
+    else:
+        errors.extend(_judgment_call_tag_errors(finding, tags, where, ingest))
 
     return errors
+
+
+def _judgment_call_tag_errors(finding, tags, where, ingest):
+    """`judgment-call` means a fork, and the `fork` tag is where the reviewer says so out loud.
+
+    Two rejections, because the two mistakes need opposite repairs. A `judgment-call` carrying `gap`
+    is a determinate fix filed as a decision: the repair is to write the replacement out. A
+    `judgment-call` carrying neither tag is a finding nobody calibrated: the repair is to decide
+    which of the two it was. Both are ingest-time rules — nothing here rejects a stored report.
+    """
+    if not ingest or finding.get("change_kind") != "judgment-call":
+        return []
+    carried = [tag for tag in (tags or []) if tag in (FORK_TAG, GAP_TAG)]
+    if GAP_TAG in carried:
+        return ["{0}: a `judgment-call` finding must not carry the `{1}` tag. A determinate fix is a "
+                "`literal-edit` however large it is; `judgment-call` is reserved for a design fork, "
+                "which carries `{2}`".format(where, GAP_TAG, FORK_TAG)]
+    if FORK_TAG not in carried:
+        return ["{0}: every `judgment-call` finding carries the `{1}` tag in `tags`. If this is not a "
+                "design fork with two defensible answers, it is a `literal-edit` with the replacement "
+                "written out".format(where, FORK_TAG)]
+    return []
 
 
 # --- rendering ---------------------------------------------------------------------------------

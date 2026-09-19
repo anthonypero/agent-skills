@@ -1,0 +1,24 @@
+{
+  "name": "design-decision",
+  "description": "A decision record, RFC, proposal or options memo, where the artifact is the argument and there is no source of truth to judge it against. Three seats, three named distinct families, no Claude seat: adversarial attacks the case being made, alternatives names the roads not taken, and second-order traces what the decision commits its owner to. `requires_references: false`, which is also why this is the panel a run with no references falls back to.",
+  "requires_references": false,
+  "min_families": 2,
+  "tier": "frontier",
+  "reconciler": "default",
+  "auto_apply": false,
+  "verify_web": false,
+  "seats": [
+    {
+      "lens": "adversarial",
+      "family": "xai"
+    },
+    {
+      "lens": "alternatives",
+      "family": "openai"
+    },
+    {
+      "lens": "second-order",
+      "family": "glm"
+    }
+  ]
+}

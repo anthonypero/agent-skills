@@ -493,7 +493,7 @@ def main(argv=None):
             errors = ["the response was not parseable JSON: {0}".format(exc)]
         if parsed is not None:
             parsed = stamp_authoritative(parsed, reviewer_id, lens, args, model, artifact=args.artifact)
-            errors = report_lib.validate_report(parsed, lens=lens)
+            errors = report_lib.validate_report(parsed, lens=lens, ingest=True)
         attempts.append(finish_attempt(driver_attempt, len(attempts) + 1, errors))
 
         if not errors:

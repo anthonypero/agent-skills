@@ -1,0 +1,28 @@
+{
+  "name": "research-report",
+  "description": "A research report, findings memo or landscape survey judged against the sources it rests on. Four seats, four named distinct families, no Claude seat: fidelity in claim-by-claim fact-check mode, source-credibility on whether those sources deserve the weight, completeness on what the report never covered, and adversarial on whether its conclusion survives. `verify_web` is off in v1, so fidelity and source-credibility judge the supplied sources rather than the live web — a report whose sources are not supplied cannot be reviewed by this panel.",
+  "requires_references": true,
+  "min_families": 2,
+  "tier": "frontier",
+  "reconciler": "default",
+  "auto_apply": false,
+  "verify_web": false,
+  "seats": [
+    {
+      "lens": "fidelity",
+      "family": "openai"
+    },
+    {
+      "lens": "source-credibility",
+      "family": "kimi"
+    },
+    {
+      "lens": "completeness",
+      "family": "glm"
+    },
+    {
+      "lens": "adversarial",
+      "family": "xai"
+    }
+  ]
+}

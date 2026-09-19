@@ -1,0 +1,7 @@
+{
+  "name": "code-review",
+  "description": "Deferred, and ships as a named stub on purpose. The seed lists four panel templates and this is the fourth; code diffs are not this skill's lane, so it routes the caller to /code-review instead of seating a panel. The two code lenses — correctness and simplification/efficiency — are deliberately absent from the persona catalog for the same reason. This skill reviews documents judged against their source-of-truth references; run_panel.py refuses this template with exit 1 and names where to go.",
+  "deferred": true,
+  "routes_to": "/code-review",
+  "seats": []
+}

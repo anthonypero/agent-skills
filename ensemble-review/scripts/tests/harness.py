@@ -52,12 +52,15 @@ def valid_report(verdict="fix-then-ship", summary="One defect found.", findings=
             "citation": None,
             "severity": "should-fix",
             "reasoning": "A builder cannot resolve a seat constraint without one.",
-            "suggested_change": "Add the family axis under the tier map.",
+            "suggested_change": "Choose one and state it: carry the family axis under the tier map, or resolve families outside the tier map entirely.",
             "change_kind": "judgment-call",
             "literal_edit": None,
             "confidence": "high",
             "externally_verified": False,
-            "tags": ["configuration"],
+            # `judgment-call` is a design fork and carries `fork`, which the ingest-time validator
+            # requires. A scripted report that could not pass that check would test the repair
+            # re-ask rather than the path every other test here is about.
+            "tags": ["configuration", "fork"],
         }]
     return {"verdict": verdict, "summary": summary, "findings": findings, "method_notes": "scripted"}
 

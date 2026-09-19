@@ -1,6 +1,6 @@
 ---
 name: ensemble-review
-description: "Review a high-stakes document with a panel of independent reviewers instead of one. Use when a spec, plan, PRD, research report, design decision or technical-requirements document is about to gate a build or a commitment and a single reviewer's blind spot would be expensive; when the user asks for a panel, an ensemble, a multi-model review, a red-team read, or a second and third opinion on a document; or when a document has been revised enough that nobody trusts a single pass over it any more. Each seat carries a different lens (fidelity, buildability, consistency, adversarial) and a different model family, reviewers never see each other's work, every report lands on disk as validated JSON, and the host session reconciles them into one document. Not for code diffs — those go to /code-review."
+description: "Review a high-stakes document with a panel of independent reviewers instead of one. Use when a spec, plan, PRD, research report, design decision or technical-requirements document is about to gate a build or a commitment and a single reviewer's blind spot would be expensive; when the user asks for a panel, an ensemble, a multi-model review, a red-team read, or a second and third opinion on a document; or when a document has been revised enough that nobody trusts a single pass over it any more. Each seat carries a different lens — fidelity, buildability, consistency, adversarial, completeness, source credibility, security, alternatives, second-order consequences — and a different model family; reviewers never see each other's work, every report lands on disk as validated JSON, and the host session reconciles them into one document. Not for code diffs — those go to /code-review."
 ---
 
 # ensemble-review
@@ -39,6 +39,26 @@ It is idempotent — a refresh that changes nothing writes nothing and says so �
 
 Reviewers are **personas**, not harness subagents: a lens prompt, a rubric and an output schema in `agents/`, with no model baked in. A **seat** says which family runs a persona. Concrete model ids live in `templates/config.json` and are resolved at dispatch time, so a panel definition never names a vendor.
 
+**The lens catalog.** Nine personas ship. The first four are the ones with a measured track record — the 2026-06-26 `annotate` full-spec round — and they are what `spec-review` seats.
+
+| Persona | Asks | Needs references | Where it ends |
+| --- | --- | --- | --- |
+| `lens-fidelity` | Does the artifact faithfully implement the sources it is built from? | **Required** | Does not judge whether the design is good, buildable or self-consistent |
+| `lens-buildability` | Could a builder execute this without inventing a missing decision? Is the altitude right? Where are the seams? | Helpful | Stops at the moment the thing is built |
+| `lens-consistency` | Do the parts agree with each other? | No | Judges the artifact against itself, never against its sources |
+| `lens-adversarial` | What is the strongest case that this is wrong — and then, what is simply missing? | Helpful | Attacks the central bet; the systematic sweeps belong to `completeness` and `security` |
+| `lens-completeness` | What is absent, thin, or asserted without support? | Helpful | Sweeps the whole surface against what a document of this kind owes its reader, rather than what an attack needs |
+| `lens-source-credibility` | Do the sources deserve the weight the artifact puts on them — authority, currency, independence, sufficiency? | **Required** | Judges the source; `fidelity` judges the reading of it |
+| `lens-security` | Who can abuse this? Assets, actors, trust boundaries, attacker-controlled input, blast radius | No | Assumes the design is right and asks who can abuse it; `adversarial` asks whether it is wrong |
+| `lens-alternatives` | What approach did this foreclose without arguing why? | No | Enumerates every fork, argued or not; `adversarial` reaches for the one alternative that wins |
+| `lens-second-order` | What does this commit us to, and what breaks downstream? | No | Starts where the build ends: month two, year two, the first time somebody changes it |
+
+The catalog deliberately has **no code lenses**. Correctness and simplification/efficiency belong to `/code-review`, and `templates/panels/code-review.json` ships as a named stub that routes there.
+
+Three sentences are **byte-identical in every lens body**, and `scripts/tests/test_catalog.py` asserts it: the severity calibration (rate by consequence, not by how much is unspecified), the `judgment-call` rule (a design fork, not a thin spot), and the verbatim-quote rule. A lens calibrated differently from its neighbours would make the panel's agreement counts mean something different per seat.
+
+**`judgment-call` means a design fork and carries the `fork` tag.** `change_kind` asks whether the fix can be written out or somebody has to decide first, and it is not a measure of size: a determinate fix is a `literal-edit` however large the replacement is, a whole missing section included, and it takes the `gap` tag. The enum could not gain a third value — the frozen replay fixture depends on the two it has — so the tag carries the distinction, and `lib/report.py` enforces it **at ingest**: a reviewer's fresh report is rejected if a `judgment-call` carries no `fork`, or carries `gap`. Reading a stored report back applies neither rule, so a report written before the rule still replays. `reconcile_core` then reads the tag: an all-`judgment-call` cluster goes to a human unless every one of its findings is tagged `gap`, and an untagged cluster goes to the human exactly as it always did.
+
 Prompt composition is fixed, and identical on both legs — that is what makes the comparison meaningful:
 
 - **System message** = the persona body (everything after the frontmatter) + `references/finding-schema.md`.
@@ -62,7 +82,7 @@ Prompt composition is fixed, and identical on both legs — that is what makes t
 | 3 | the seat's own `tier` | One seat at a different depth than its panel |
 | 4 | the panel's `tier` | `spec-review` ships at `frontier` |
 | 5 | the config's `default_tier` | `frontier` |
-| 6 | the persona frontmatter's `model` | Only when it names a key in the tier map; the shipped personas carry the abstract `model: high`, which names no tier, so this level does not fire for them |
+| 6 | the persona frontmatter's `model` | Only when it names a key in the tier map. Every shipped persona carries `model: frontier`, which is a key, so this level is live: a seat with nothing above it resolves to `frontier` and records `tier_source: "persona"` |
 
 This inverts framework §8, which puts agent frontmatter above the config default. Here the tier is a property of the run's stakes, not of the lens.
 
@@ -82,6 +102,25 @@ Three things are re-seated rather than failed, once each, with the substitution 
 **No re-seat of any kind lands on `claude` unless the seat asked for `claude` by name.** Claude is first in the config's declaration order, so without the rule every first re-seat would land on it — and the default panel seats no Claude family on purpose, because the host session that authors and reconciles is itself a Claude model. A substitution that quietly added one would undo that decision with nobody choosing it. When claude is the only _free_ family, the seat doubles up on a non-claude family instead; only a tier with no other family at all is a composition error. Owner ruling, 2026-09-18.
 
 **A seat's `reviewer_id` names what it asked for, not what it got** — `fidelity-openai`, `buildability-non-claude`. A constrained seat's family depends on what else the panel seats, and a re-seated seat would otherwise change its own id, its report filename and its manifest key half way through a run. The resolved family is in the seat's `family`; the difference is in `substitution`.
+
+**Panel templates.** Four ship in `templates/panels/`. A template is a starting point, not a wall: compose seats ad hoc, or drop an edited copy under `<workspace>/.agents/ensemble-review/panels/` and it replaces the shipped one whole.
+
+| Template | Seats | `requires_references` | Notes |
+| --- | --- | --- | --- |
+| `spec-review` | fidelity, buildability, consistency, adversarial — openai, glm, kimi, xai | `true` | The measured panel: the 2026-06-26 lens set, one family per seat, no Claude seat. A fifth `completeness` seat sits in `optional_seats` on `deepseek` — the one non-Claude family the four seats do not already hold — off by default |
+| `research-report` | fidelity, source-credibility, completeness, adversarial — openai, kimi, glm, xai | `true` | Four named distinct families. `verify_web` is off in v1, so the two citing lenses judge the sources you supply rather than the live web |
+| `design-decision` | adversarial, alternatives, second-order — xai, openai, glm | `false` | The artifact is the argument. This is also where a run with no references lands |
+| `code-review` | none | — | Ships **deferred**: a named stub carrying `"routes_to": "/code-review"`. `run_panel.py` refuses it with exit 1 and says where to go |
+
+**Choosing the panel, when you do not name one.** With no `--panel`, `run_panel.py` infers: a cheap heuristic over the **artifact's own filename** picks `research-report` or `design-decision` when the name says so, and `spec-review` otherwise. Nothing reads the document — a heuristic that opened the artifact would be a second, unreviewed judgement about it before any reviewer has seen it. Then the references rule: **a run with no references never infers a template whose `requires_references` is true.** It falls back to `design-decision`, and the substitution is recorded in the manifest's `panel_inference`, printed on the console, and named in the reconciliation's method caveat. Every run carries that block, named panel or not: `requested` is the `--panel` you gave or null, `heuristic` is what the filename suggested or null when nothing read it, `resolved` is what ran, and `reason` is filled only when the last two differ.
+
+**References are a composition error for two lenses, not a warning.** `fidelity` and `source-credibility` require a `citation` on every finding — `lib/report.py` rejects one from either lens without it — so a seat carrying either with nothing to cite would have every finding it returned thrown out. `run_panel.py` refuses before the first paid call, exit 1, naming the seats. Inference bends to avoid this; an explicitly named `--panel` does not, because an operator who named it should hear why.
+
+**The two panel-shape refusals happen before the run directory is claimed.** The deferred `code-review` stub refuses on the template, and a starved `fidelity` or `source-credibility` seat refuses once the seats resolve and still before the claim. Neither leaves a directory behind, which matters because a claim collision increments the sequence number: a stray `2026-09-18-1` would silently move your retry — the one with `--ref` supplied — into `2026-09-18-2`. Every other refusal comes after the claim and leaves the directory with what it wrote by then — the registry and effort gates, a resume fingerprint mismatch, a materialize failure, and the budget refusal, whose `budget-refusal.json` is written there on purpose — so delete the directory before retrying those.
+
+**`verify_web` is declared and off.** Every live template carries `"verify_web": false`. No seat has a live web tool in v1, so the two citing lenses judge the sources you supply; the flag states that rather than switching anything.
+
+**`min_families` is a target, not a precondition.** The panel's value (default 2) is overridable with `--min-families`. Distinct families are counted **twice** — over the expected seats at Resolve and over the reporting seats at wrap-up — and both land in the manifest as `min_families: {target, seated, reporting}` beside the family lists. A run that misses the target **proceeds**: it is never an error, and the console and `reconcile_core.method_caveat` both say so. One reporting family reads as **"lens-diverse only"**: several lenses, one mind, and no cluster in that run can carry cross-family corroboration at any tier.
 
 **Where files come from: the two-root cascade.** The skill package is read-only: **no run artifact is ever written into it** — reports, renderings, manifests, judgment patches, reconciliations and run directories all land in the reviewed project's tree. The one thing that does appear under the package is CPython's own `__pycache__` bytecode, which the interpreter writes and silently skips when it cannot; that is outside the invariant and outside the test that enforces it. `refresh_models.py` is the other exception, and a deliberate one — see _First-run setup_. Every file resolves through `scripts/lib/paths.py`, which searches two roots in order:
 
@@ -113,8 +152,8 @@ A panel costs real money and real minutes. It earns them when the document is ab
 Then choose the artifact, the references and the panel:
 
 - **Artifact** — one document. Panels do not review a folder.
-- **References** — the source-of-truth documents to judge it against: PRD, seed, framework doc, style guide, acceptance criteria. Optional, but a panel with a `fidelity` seat and no references is a panel with a wasted seat, and `run_panel.py` warns about exactly that.
-- **Panel** — `templates/panels/spec-review.json` is the measured four-lens panel. Copy and edit it for anything else; a panel template is a starting point, not a wall.
+- **References** — the source-of-truth documents to judge it against: PRD, seed, framework doc, style guide, acceptance criteria. Optional in general, and **required** by any panel seating `fidelity` or `source-credibility`: those two cite on every finding, so `run_panel.py` refuses such a seat with no references as a composition error, exit 1.
+- **Panel** — one of the four above, or none at all: with no `--panel` the template is inferred from the artifact's name, and a run with no references never lands on one that needs them. Copy and edit any of them for anything else; a panel template is a starting point, not a wall.
 
 ### 2. Create the run directory
 
@@ -163,7 +202,9 @@ Add `--skip-claude` **only** when you intend to run the claude seats as harness 
 | --- | --- | --- |
 | `--workspace` | the working directory | The project whose `.agents/ensemble-review/` overrides the package. Passed straight through to every `dispatch.py` subprocess, so parent and child read the same files. |
 | `--model` | none | `--model <seat-id>=<model-id>`, repeatable. Pins one seat to a concrete id and beats every tier source. |
+| `--panel` | inferred from the artifact's name, and never a reference-hungry template on a run with no references | The template, by name or by path. |
 | `--tier` | the panel's, else the config's | Tier for every seat that does not set its own. |
+| `--min-families` | the panel's, else `2` | The family target. A target and not a gate: a run below it proceeds, records `min_families: {target, seated, reporting}`, and says so in the method caveat. |
 | `--max-tokens` | `32000` | The completion cap sent on every call. A model's `min_max_tokens` floor in the registry raises it for that seat; the cap actually sent is recorded. |
 | `--budget-usd` | `5.00` | The pre-flight budget. Over it, an autonomous run refuses; an interactive one asks. |
 | `--approve-budget` | off | Dispatch anyway. |
@@ -222,7 +263,7 @@ It also checks the **revision**: the resolved artifact's SHA-256 against the man
 - **`splits`** — a mechanically joined group whose members turn out to name different defects. Two reviewers quoting one sentence to make two arguments is the common case. Splits apply first, so a join can name a split's product (`P-4.1`).
 - **`singleton_labels`** — every **post-merge** `singleton` or `corroborated-same-family` cluster is either a **blind-spot catch** or a **family-specific false positive**, with the reason. An unlabelled one is not an allowed output, and the script refuses the patch.
 - **`severities`** — the arbitrated severity and why it survived, for any cluster whose members disagree. A severity argued with a `citation` beats one argued without; downgrade one step when a finding is a singleton, below `high` confidence, and uncited. Where the members agree the script takes their severity and records the spread; where they **disagree and you supply no entry**, that is a patch error and the script re-asks, because arbitrating a disagreement is step 4 and step 4 is yours.
-- **`dispositions`** — `fix-now`, `flag-for-human` or `defer`, for **every** cluster, with the reason and the reviewers on each side. A `judgment-call` change kind is `flag-for-human` by default. As an interactive host you may dispose one some other way and say why in the `disposition_reason` — you have an owner to answer to, and `rulings` is reserved for a real decision of record. The `synthesis` persona has no such latitude: a patch authored by `synthesis` that disposes an all-`judgment-call` cluster anything but `flag-for-human` is rejected by the script.
+- **`dispositions`** — `fix-now`, `flag-for-human` or `defer`, for **every** cluster, with the reason and the reviewers on each side. A `judgment-call` change kind is `flag-for-human` by default, because `judgment-call` means a design fork. As an interactive host you may dispose one some other way and say why in the `disposition_reason` — you have an owner to answer to, and `rulings` is reserved for a real decision of record. The `synthesis` persona has no such latitude: a patch authored by `synthesis` that disposes an all-`judgment-call` cluster anything but `flag-for-human` is rejected by the script. **The one exception is the tag.** A cluster whose judgment calls are every one of them tagged `gap` is a determinate fix filed under the wrong change kind, and `synthesis` may put it on the fix list; untagged is treated as a fork, so a report written before the tag rule is flagged exactly as it always was.
 - **`contradictions`**, **`canonical_edits`**, **`altitude_splits`** and the **`method_caveat`** — who flatly disagreed with whom, which literal edit you accept for application and why, which lens is rating a document's seams at a different altitude than the rest (not a conflict, and never reported as one), and how many families actually ran.
 
 Then run it again. It merges your patch, **recomputes every tier from the post-merge membership** — a tier computed before your joins is a tier computed against the wrong member set — validates, mints the final `BK-n` / `SF-n` / `NH-n` ids, computes the run-level verdict from arbitrated severity and disposition together, and writes both files atomically:
@@ -257,7 +298,10 @@ A v0 that violates these is not this skill.
 | "Does the clustering still work?" | `python3 scripts/tests/test_replay.py` — the deterministic replay of the 2026-09-18 panel |
 | "Which models run which family?" | `templates/config.json` |
 | "What does the measured panel seat?" | `templates/panels/spec-review.json` |
-| "What does each lens actually ask?" | `agents/lens-*.md` |
+| "Which panel templates are there, and which needs references?" | `templates/panels/` — and the table under _Dispatch model_ |
+| "What does each lens actually ask, and where does it stop?" | `agents/lens-*.md` — and the catalog table under _Dispatch model_ |
+| "When is a finding a `judgment-call` rather than a gap?" | `references/finding-schema.md` — `change_kind`, with a worked positive and negative |
+| "Is the catalog still well-formed?" | `python3 scripts/tests/test_catalog.py` — every persona and every template, as data |
 | "What does a report of this quality read like?" | `.agents/subprojects/annotate/pm/reviews/fullspec-review-*.md` |
 | "What should the reconciliation look like?" | `.agents/subprojects/annotate/pm/reviews/fullspec-reconciliation.md` |
 
@@ -282,6 +326,11 @@ A v0 that violates these is not this skill.
 | `lens-buildability` | `finding-schema.md` | Artifact inlined, every reference inlined |
 | `lens-consistency` | `finding-schema.md` | Artifact inlined, every reference inlined |
 | `lens-adversarial` | `finding-schema.md` | Artifact inlined, every reference inlined |
+| `lens-completeness` | `finding-schema.md` | Artifact inlined, every reference inlined |
+| `lens-source-credibility` | `finding-schema.md` | Artifact inlined, every reference inlined |
+| `lens-security` | `finding-schema.md` | Artifact inlined, every reference inlined |
+| `lens-alternatives` | `finding-schema.md` | Artifact inlined, every reference inlined |
+| `lens-second-order` | `finding-schema.md` | Artifact inlined, every reference inlined |
 
 ## What v0 does not have
 
@@ -290,12 +339,10 @@ Say this plainly to anyone who asks what the skill does. None of it is stubbed; 
 - **`apply_fixes.py` and auto-apply** — nothing is ever written back to the artifact. `change_kind` and `literal_edit` are collected, and `reconciliation.json` now carries a `canonical_edit` and an `edit_conflict` flag per cluster so the gate can be built, but no code reads them yet.
 - **`install.sh`** — there is no installer. The key check is `dispatch.py --help`.
 - **The `synthesis` persona and autonomous mode** — `reconcile.py` reads a judgment patch from either author, but nothing here can _produce_ one unattended: there is no reconciler persona and no unattended run. Every run has a human writing `judgment.json`.
-- **Four of the eight lenses** — `completeness`, `security`, `alternatives` and `second-order` are specced and not written. `spec-review.json` carries a fifth seat under `optional_seats` (completeness on `xai`) that cannot be enabled until that persona exists.
-- **The other three panel templates** — `research-report`, `design-decision` and the deferred `code-review` stub are not written.
 - **Mid-flight budget metering** — the projection is a **dispatch gate only**. Nothing meters spend as seats return, and a panel that overruns its projection runs to completion.
 - **Per-seat `timeout_s`** — the knob has a specified default of 900 seconds and a specified behaviour, and no implementation. A hung provider hangs that seat until the process is killed.
-- **`min_families` enforcement** — `min_families_target` is recorded and never acted on. Re-seating itself is built (missing cell, unsatisfiable constraint, model unavailable), but nothing counts the families that actually reported against the target. The one deliberate exception stands: a **context overflow** is never re-seated, per the spec, and is reported as under-seated instead.
-- **`mode: identical` and `verify_web`** — neither knob exists, so neither is refused by name yet.
-- **Code review** — out of lane. Code diffs go to `/code-review`.
+- **`mode: identical`** — the knob does not exist, so it is not refused by name yet.
+- **`verify_web`** — declared `false` on every live template and read by nothing, and the spec's composition error for `verify_web: true` on a tool-less seat is not implemented, so a workspace panel setting it true runs unrefused.
+- **Code review** — out of lane, and now visibly so: `code-review.json` ships as a named stub that refuses and routes to `/code-review`. The two code lenses stay out of the catalog.
 
-Built since v0 and no longer on this list: the completion cap and its length retry, the per-model cap floor, the model registry and `refresh_models.py`, the cost and token pre-flight with its budget gate, content-hash revisions with a materialized `inputs/` directory, resume with a compare-and-set claim, the two-root workspace cascade in `lib/paths.py`, the tier resolution order and the `non-claude` / `distinct` constraint resolvers in `lib/seating.py`, and re-seating on a missing cell or an unreachable model.
+Built since v0 and no longer on this list: the completion cap and its length retry, the per-model cap floor, the model registry and `refresh_models.py`, the cost and token pre-flight with its budget gate, content-hash revisions with a materialized `inputs/` directory, resume with a compare-and-set claim, the two-root workspace cascade in `lib/paths.py`, the tier resolution order and the `non-claude` / `distinct` constraint resolvers in `lib/seating.py`, re-seating on a missing cell or an unreachable model, the other five lenses (`completeness`, `source-credibility`, `security`, `alternatives`, `second-order`), the other three panel templates, panel inference with its references rule, `min_families` counted at both ends and named in the method caveat, and the `source-credibility` citation rule in the validator.

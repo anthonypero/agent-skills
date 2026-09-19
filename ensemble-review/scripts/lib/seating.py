@@ -103,9 +103,13 @@ def resolve_tier(seat, panel, config_entry, cli_tier, pinned, frontmatter):
 def _frontmatter_tier(frontmatter, config_entry):
     """The persona's `model:` value, but only when it names a tier the config actually offers.
 
-    Framework §6 wants the value to match a key in the tiers map. The shipped personas carry the
-    abstract `model: high` instead, which names no tier here, so this level contributes nothing for
-    them and the seat falls through to the hard default. A persona that does name a tier is honoured.
+    Framework §6 wants the value to match a key in the tiers map, and the shipped personas now carry
+    `model: frontier`, which does — so this level is live: a seat with no `--model`, no `--tier`, no
+    seat tier, no panel tier and no config `default_tier` resolves to `frontier` with
+    `tier_source: "persona"`. A persona carrying a value that names no tier in this config (the
+    abstract `model: high` the personas shipped with through stage 2b) contributes nothing and the
+    seat falls through to the hard default, which is what keeps a workspace persona from forcing a
+    tier the config does not offer.
     """
     value = (frontmatter or {}).get("model")
     if value and value in (config_entry.get("tiers") or {}):
