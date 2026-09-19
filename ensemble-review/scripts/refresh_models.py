@@ -30,6 +30,7 @@ SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(SCRIPTS_DIR)
 sys.path.insert(0, SCRIPTS_DIR)
 
+from lib import paths as paths_lib  # noqa: E402
 from lib import registry as registry_lib  # noqa: E402
 from lib import report as report_lib  # noqa: E402
 
@@ -157,7 +158,8 @@ def _int(value):
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Refresh the model registry from the OpenRouter catalogue.")
-    parser.add_argument("--registry", default=registry_lib.DEFAULT_REGISTRY, help="Registry file (default: the skill's templates/models.json)")
+    parser.add_argument("--registry", default=None, help="Registry file (default: the workspace-first cascade, so a project's own models.json is the one refreshed)")
+    parser.add_argument("--workspace", default=None, help="The project whose registry to refresh; its .agents/ensemble-review/models.json wins over the packaged one (default: the working directory)")
     parser.add_argument("--add", action="append", default=[], help="Add a model id from the catalogue; repeat for several")
     parser.add_argument("--url", default=CATALOGUE_URL, help="Catalogue URL")
     parser.add_argument("--dry-run", action="store_true", help="Print the diff and write nothing")
@@ -167,10 +169,15 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
 
-    if not os.path.isfile(args.registry):
-        sys.stderr.write("no registry at {0}\n".format(args.registry))
+    try:
+        registry_path = paths_lib.Paths(args.workspace).registry(args.registry)
+    except paths_lib.PathError as failure:
+        sys.stderr.write("{0}\n".format(failure))
         return 1
-    with open(args.registry, "r", encoding="utf-8") as handle:
+    if not os.path.isfile(registry_path):
+        sys.stderr.write("no registry at {0}\n".format(registry_path))
+        return 1
+    with open(registry_path, "r", encoding="utf-8") as handle:
         registry_data = json.load(handle)
 
     try:
@@ -201,8 +208,8 @@ def main(argv=None):
         return 0
     if json.dumps(registry_data, sort_keys=True) == before:
         return 0
-    report_lib.write_json(args.registry, registry_data)
-    print("wrote {0}".format(args.registry))
+    report_lib.write_json(registry_path, registry_data)
+    print("wrote {0}".format(registry_path))
     return 0
 
 

@@ -11,6 +11,12 @@ read-only skill package: it drops `.agents/ensemble-review/backends/azure_openai
 config fragment and points `type` at it. Anything that is not an existing `.py` path is treated as a
 package module name, so the shipped `"type": "openai_compat"` is unaffected.
 
+**`lib/paths.py` is what turns a bare `type` into one or the other**, and the callers go through it:
+`Paths.driver_ref()` searches the workspace root before the package, hands back an absolute path for
+a workspace driver and the bare type name for the packaged one, and raises `PathError` — the
+caller's exit 1 — for a `type` that resolves nowhere. Nothing in this file has to be edited to add a
+driver at either root.
+
 Every driver exports two functions. The framework §9 entry point, minus the tool arguments, because
 ensemble-review's personas are single-turn and tool-less:
 

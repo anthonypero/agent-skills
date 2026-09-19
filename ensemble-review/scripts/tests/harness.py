@@ -21,6 +21,10 @@ if SCRIPTS_DIR not in sys.path:
 
 SLOW_MODEL = "test/slow-model"
 FAST_MODEL = "test/fast-model"
+THIRD_MODEL = "test/third-model"
+
+# Where a workspace override lives, relative to the project holding the artifact.
+WORKSPACE_SUBDIR = os.path.join(".agents", "ensemble-review")
 
 ARTIFACT_TEXT = """# A test artifact
 
@@ -133,11 +137,43 @@ class Workspace(object):
     def path(self, *parts):
         return os.path.join(self.root, *parts)
 
+    # --- the workspace override root ---------------------------------------------------------------
+
+    def workspace_root(self):
+        return os.path.join(self.root, WORKSPACE_SUBDIR)
+
+    def override(self, relpath, data=None, text=None):
+        """Write a file into `<root>/.agents/ensemble-review/`, the cascade's first root."""
+        path = os.path.join(self.workspace_root(), relpath)
+        directory = os.path.dirname(path)
+        if not os.path.isdir(directory):
+            os.makedirs(directory)
+        if text is not None:
+            _write(path, text)
+        else:
+            _write_json(path, data)
+        return path
+
     def close(self):
         shutil.rmtree(self.root, ignore_errors=True)
 
 
-def default_models():
+def default_models(third=False):
+    models = _two_models()
+    if third:
+        models[THIRD_MODEL] = {
+            "input_price_per_token": 1e-07,
+            "output_price_per_token": 5e-07,
+            "context_limit": 1000000,
+            "effort_vocabulary": ["high", "medium", "low"],
+            "output_token_prior": 10000,
+            "prior_source": "test fixture",
+            "min_max_tokens": None,
+        }
+    return models
+
+
+def _two_models():
     return {
         SLOW_MODEL: {
             "input_price_per_token": 2e-06,

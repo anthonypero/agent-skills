@@ -34,29 +34,27 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from lib import paths as paths_lib  # noqa: E402
 from lib import reconcile_core as core  # noqa: E402
 from lib import report as report_lib  # noqa: E402
 from lib import schema as schema_lib  # noqa: E402
-
-SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCHEMA_DIR = os.path.join(SKILL_DIR, "schemas")
 
 SEVERITY_ORDER = core.SEVERITY_ORDER
 
 
 # --- validation of the two contracts ---------------------------------------------------------------
 
-def validate_patch_document(patch):
-    return schema_lib.validate(patch, schema_lib.load(os.path.join(SCHEMA_DIR, "judgment-patch.schema.json")))
+def validate_patch_document(patch, paths):
+    return schema_lib.validate(patch, schema_lib.load(paths.schema("judgment-patch.schema")))
 
 
-def validate_reconciliation_document(document):
+def validate_reconciliation_document(document, paths):
     """The whole document, clusters included — the cluster contract lives in the schema file itself.
 
     It used to be parked in `definitions.cluster` and applied here in a second pass, which left any
     other consumer validating `reconciliation.json` with no cluster checking at all.
     """
-    return schema_lib.validate(document, schema_lib.load(os.path.join(SCHEMA_DIR, "reconciliation.schema.json")))
+    return schema_lib.validate(document, schema_lib.load(paths.schema("reconciliation.schema")))
 
 
 # --- rendering ---------------------------------------------------------------------------------
@@ -295,8 +293,11 @@ def main(argv=None):
     parser.add_argument("--judgment", help="The judgment patch. Defaults to <run-dir>/judgment.json when that file exists")
     parser.add_argument("--artifact", help="The pinned artifact. Defaults to the manifest's `artifact` path; required when that does not resolve, because the anchor check is not optional")
     parser.add_argument("--render-only", action="store_true", help="Re-render reconciliation.md from an existing reconciliation.json and write nothing else")
+    parser.add_argument("--workspace", default=None,
+                        help="The project holding the artifact. Schemas resolve from <workspace>/.agents/ensemble-review/schemas/ first, then the skill package (default: the working directory)")
     args = parser.parse_args(argv)
 
+    paths = paths_lib.Paths(args.workspace)
     run_dir = os.path.abspath(args.run_dir)
     if not os.path.isdir(run_dir):
         sys.stderr.write("no such run directory: {0}\n".format(run_dir))
@@ -309,7 +310,7 @@ def main(argv=None):
             return 1
         with open(path, "r", encoding="utf-8") as handle:
             document = json.load(handle)
-        errors = validate_reconciliation_document(document)
+        errors = validate_reconciliation_document(document, paths)
         if errors:
             _print_errors("reconciliation.json does not validate", errors)
             return 3
@@ -362,7 +363,7 @@ def main(argv=None):
     with open(patch_path, "r", encoding="utf-8") as handle:
         patch = json.load(handle)
 
-    shape_errors = validate_patch_document(patch)
+    shape_errors = validate_patch_document(patch, paths)
     if shape_errors:
         _print_errors("the judgment patch does not validate against judgment-patch.schema.json", shape_errors)
         return 3
@@ -379,7 +380,7 @@ def main(argv=None):
     document["judgment"]["path"] = os.path.relpath(patch_path, run_dir)
     document["generated_at"] = datetime.datetime.now().astimezone().replace(microsecond=0).isoformat()
 
-    schema_errors = validate_reconciliation_document(document)
+    schema_errors = validate_reconciliation_document(document, paths)
     if schema_errors:
         _print_errors("reconcile.py produced a document that does not validate; nothing was written", schema_errors)
         return 3

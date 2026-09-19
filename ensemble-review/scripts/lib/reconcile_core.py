@@ -846,11 +846,35 @@ def _merge_judgment(clusters, patch, manifest, seats_expected, seats_reporting, 
         "clusters": clusters_out,
         "disagreements": _disagreements(clusters_out, patch),
         "verdict": None,
-        "method_caveat": patch.get("method_caveat"),
+        "method_caveat": method_caveat(patch.get("method_caveat"), manifest),
         "counts": _counts(clusters_out),
     }
     document["verdict"] = compute_verdict(clusters_out, reports)
     return document, []
+
+
+def method_caveat(supplied, manifest):
+    """The patch's caveat, plus any seat the run did not seat the way the panel asked for.
+
+    A re-seated seat changes what the agreement counts mean — the panel that ran is not quite the
+    panel that was composed — so it belongs beside the family counts rather than only in the
+    manifest. The judgment supplier cannot be relied on to know: an unsatisfiable constraint and a
+    runtime re-seat are both decided by `run_panel.py` after the patch's author has read the reports.
+    Every substitution the manifest recorded is appended here, and nothing else is changed.
+    """
+    text = (supplied or "").strip()
+    lines = []
+    for seat in manifest.get("seats") or []:
+        substitution = seat.get("substitution")
+        if not isinstance(substitution, dict):
+            continue
+        lines.append("`{0}` asked for {1} and ran on {2} ({3}): {4}".format(
+            seat.get("reviewer_id"), substitution.get("requested"), substitution.get("resolved"),
+            substitution.get("kind"), (substitution.get("reason") or "").rstrip(".")))
+    if not lines:
+        return text
+    appended = "Seat substitutions recorded in the manifest — " + "; ".join(lines) + "."
+    return (text + "\n\n" + appended) if text else appended
 
 
 def _wrap(cluster, records):

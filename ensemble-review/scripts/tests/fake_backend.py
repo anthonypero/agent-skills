@@ -16,7 +16,10 @@ A call spec:
      "raw": "…",                                   # content verbatim, instead of `body`
      "prompt_tokens": 1000, "completion_tokens": 500, "reasoning_tokens": 100,
      "cost": 0.01,
-     "raise": "auth" | "transient" | "error"}
+     "raise": "auth" | "transient" | "error" | "unavailable"}
+
+`"unavailable"` is a 404 naming the model, which is what a provider answers when it will not serve
+that model at all — the row the re-seat-once path turns on.
 """
 
 import json
@@ -100,6 +103,8 @@ def dispatch_detailed(system_prompt, user_prompt, model, backend_entry, json_sch
         raise _Rejected(503, "service unavailable")
     if failure == "error":
         raise RuntimeError("provider error: scripted failure")
+    if failure == "unavailable":
+        raise _Rejected(404, "No endpoints found for {0}.".format(model))
 
     if "raw" in spec:
         text = spec["raw"]

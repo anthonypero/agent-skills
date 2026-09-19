@@ -13,6 +13,11 @@ Writes `<run-dir>/<lens>-<family>.json` (the validated report plus a `_meta` blo
 Standard library only. The HTTP call itself lives in `backends/`, loaded by the provider's `type`,
 so another access path is another file there rather than a change here.
 
+The persona, the finding schema, the config, the registry and the driver all resolve through
+`lib/paths.py`'s two-root cascade — `<workspace>/.agents/ensemble-review/` first, then the read-only
+package — so `--workspace` is the only thing `run_panel.py` has to pass for the child to read exactly
+the files the parent resolved. `--config` and `--models` stay available as operator paths.
+
 **Three retry paths, in this order, and they are not the same thing.**
 
 1. *Transient provider errors* — 429, 5xx, a socket timeout — are retried three times at 1 s, 4 s and
@@ -44,12 +49,11 @@ SKILL_DIR = os.path.dirname(SCRIPTS_DIR)
 sys.path.insert(0, SCRIPTS_DIR)
 
 from backends import AuthFailure, load_driver  # noqa: E402
+from lib import paths as paths_lib  # noqa: E402
 from lib import registry as registry_lib  # noqa: E402
 from lib import report as report_lib  # noqa: E402
 
-DEFAULT_CONFIG = os.path.join(SKILL_DIR, "templates", "config.json")
-FINDING_SCHEMA_REF = os.path.join(SKILL_DIR, "references", "finding-schema.md")
-AGENTS_DIR = os.path.join(SKILL_DIR, "agents")
+FINDING_SCHEMA = "finding-schema.md"
 LP = os.path.join(SKILL_DIR, os.pardir, "lastpass", "scripts", "lp")
 
 PROVIDER = "openrouter"
@@ -63,6 +67,15 @@ AUTH_STATUSES = (401, 403)
 EXIT_COMPOSITION = 1
 EXIT_AUTH = 2
 EXIT_INVALID = 3
+# A provider that will not serve this family's model at all. Distinct from EXIT_INVALID because the
+# caller can do something about it that it cannot do about a bad report: re-seat the lens once.
+EXIT_MODEL_UNAVAILABLE = 5
+
+# What a 400 or 404 body says when the model, rather than the request, is the problem.
+UNAVAILABLE_MARKERS = (
+    "no endpoints", "not a valid model", "no allowed providers", "is not available",
+    "does not exist", "not found", "unknown model", "model_not_found", "no providers",
+)
 
 
 # --- secrets -----------------------------------------------------------------------------------
@@ -101,12 +114,12 @@ def resolve_api_key(config_entry):
 
 # --- config ------------------------------------------------------------------------------------
 
-def load_config(path):
-    with open(path, "r", encoding="utf-8") as handle:
-        config = json.load(handle)
+def load_config(paths, override=None):
+    """The merged config, through the workspace-first cascade. `--config` is an operator path."""
+    config, path = paths.config(override)
     if PROVIDER not in config:
         sys.exit("config {0} has no `{1}` provider entry".format(path, PROVIDER))
-    return config
+    return config, path
 
 
 def resolve_model(config_entry, tier, family, override):
@@ -121,23 +134,49 @@ def resolve_model(config_entry, tier, family, override):
     return families[family], tier
 
 
+class EffortRefused(Exception):
+    """The config asks for an effort this model does not accept. A composition error, exit 1."""
+
+
 def resolve_effort(config_entry, model, entry):
     """The effort string for this model, checked against the registry's vocabulary.
 
     The effort map is keyed by concrete model id because the vocabularies differ by vendor. A model
     absent from the map is dispatched with **no effort parameter at all** — v0's behaviour, which
-    works everywhere at the cost of control. An effort the registry says this model does not accept
-    is dropped with a warning rather than sent into a 400.
+    works everywhere at the cost of control.
+
+    An effort the registry says this model does **not** accept is a composition error rather than a
+    warning. Dropping it silently would dispatch the seat at whatever depth the provider defaults to,
+    and a panel whose seats ran at unintended depths is not the comparison this skill exists to make.
+    A vocabulary the registry simply has not learned yet is not the same as an unsupported value, and
+    is allowed through: unknown is not refused.
     """
     effort = (config_entry.get("effort") or {}).get(model)
     if not effort:
         return None
     supported = registry_lib.effort_is_supported(entry, effort)
     if supported is False:
-        sys.stderr.write("warning: config asks for effort {0!r} on {1}, whose registry vocabulary is {2}; "
-                         "sending no effort parameter\n".format(effort, model, (entry or {}).get("effort_vocabulary")))
-        return None
+        raise EffortRefused(
+            "the config asks for effort {0!r} on {1}, whose registry vocabulary is {2}.\n"
+            "  Fix the `effort` entry in the config, or refresh the vocabulary with\n"
+            "  python3 scripts/refresh_models.py".format(
+                effort, model, "/".join((entry or {}).get("effort_vocabulary") or [])))
     return effort
+
+
+def model_is_unavailable(exc, model):
+    """Whether this dispatch failure means the provider will not serve this model at all.
+
+    Narrow on purpose. A 400 or 404 whose body names the model, or whose body carries one of the
+    phrases a provider uses when the model rather than the request is the problem. Anything else is
+    an ordinary failed seat: re-seating a lens costs a second seat's money, so it is not a guess.
+    """
+    status = getattr(exc, "status", None)
+    body = getattr(exc, "body", None) or str(exc)
+    low = body.lower()
+    if status in (400, 404) and (model.lower() in low or any(m in low for m in UNAVAILABLE_MARKERS)):
+        return True
+    return status is None and model.lower() in low and any(m in low for m in UNAVAILABLE_MARKERS)
 
 
 # --- prompt composition ------------------------------------------------------------------------
@@ -161,8 +200,8 @@ def read_file(path):
         return handle.read()
 
 
-def build_system_prompt(persona_body):
-    finding_schema = read_file(FINDING_SCHEMA_REF)
+def build_system_prompt(persona_body, finding_schema_path):
+    finding_schema = read_file(finding_schema_path)
     return persona_body.rstrip() + "\n\n---\n\n" + finding_schema.rstrip() + "\n"
 
 
@@ -306,8 +345,8 @@ def build_meta(attempts, tier, model, key_source, elapsed, effort, connector, pr
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Run one persona against one artifact through one model family.")
-    parser.add_argument("--persona", required=True, help="Persona file name in agents/, with or without the .md suffix (e.g. lens-fidelity)")
-    parser.add_argument("--family", required=True, help="Model family named in the config tier map (claude, openai, google, xai, deepseek)")
+    parser.add_argument("--persona", required=True, help="Persona file name, with or without the .md suffix (e.g. lens-fidelity); resolved through the workspace-first cascade")
+    parser.add_argument("--family", required=True, help="The **resolved** model family, named in the config tier map (claude, openai, google, xai, deepseek). A constrained seat's constraint is resolved by run_panel.py before this point")
     parser.add_argument("--artifact", required=True, help="Path to the document under review, or to its read-only copy in the run's inputs/")
     parser.add_argument("--artifact-name", default=None, help="Repo-relative path recorded in the report; defaults to the artifact's own")
     parser.add_argument("--artifact-revision", default=None, help="SHA-256 of the materialized artifact bytes, recorded in the report envelope")
@@ -315,8 +354,12 @@ def parse_args(argv):
     parser.add_argument("--ref-name", action="append", default=[], dest="ref_names", help="Repo-relative path for the reference in the same position")
     parser.add_argument("--ref-revision", action="append", default=[], dest="ref_revisions", help="SHA-256 for the reference in the same position")
     parser.add_argument("--out", required=True, help="Run directory; the report and its rendering land here")
-    parser.add_argument("--config", default=DEFAULT_CONFIG, help="Config JSON (default: the skill's templates/config.json)")
-    parser.add_argument("--models", default=None, help="Model registry (default: the skill's templates/models.json)")
+    parser.add_argument("--workspace", default=None,
+                        help="The project holding the artifact. Files resolve from <workspace>/.agents/ensemble-review/ first, then the skill package (default: the working directory)")
+    parser.add_argument("--config", default=None, help="Config JSON, taken as given (default: the workspace-first cascade, deep-merged)")
+    parser.add_argument("--models", default=None, help="Model registry, taken as given (default: the workspace-first cascade)")
+    parser.add_argument("--reviewer-id", default=None,
+                        help="Reviewer id for this seat; defaults to <lens>-<family>. run_panel.py passes the id it minted from the seat's *requested* family, which is stable across runs and across a re-seat")
     parser.add_argument("--model", default=None, help="Concrete model id, overriding the tier map")
     parser.add_argument("--tier", default=None, help="Tier in the config tier map (default: the config's default_tier)")
     parser.add_argument("--max-tokens", type=int, default=registry_lib.DEFAULT_MAX_TOKENS,
@@ -328,11 +371,15 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
 
+    paths = paths_lib.Paths(args.workspace)
+
     persona_name = args.persona[:-3] if args.persona.endswith(".md") else args.persona
-    persona_path = os.path.join(AGENTS_DIR, persona_name + ".md")
-    if not os.path.isfile(persona_path):
-        available = sorted(name[:-3] for name in os.listdir(AGENTS_DIR) if name.endswith(".md"))
-        sys.exit("No persona `{0}` in {1}. Available: {2}".format(persona_name, AGENTS_DIR, ", ".join(available)))
+    try:
+        persona_path = paths.persona(persona_name)
+        finding_schema_path = paths.reference(FINDING_SCHEMA)
+    except paths_lib.PathError as failure:
+        sys.stderr.write("{0}\n".format(failure))
+        return EXIT_COMPOSITION
 
     for path in [args.artifact] + args.refs:
         if not os.path.isfile(path):
@@ -340,9 +387,13 @@ def main(argv=None):
 
     _frontmatter, persona_body = report_lib.parse_agent_file(persona_path)
     lens = persona_name[len("lens-"):] if persona_name.startswith("lens-") else persona_name
-    reviewer_id = "{0}-{1}{2}".format(lens, args.family, args.suffix)
+    reviewer_id = args.reviewer_id or "{0}-{1}{2}".format(lens, args.family, args.suffix)
 
-    config = load_config(args.config)
+    try:
+        config, _config_path = load_config(paths, args.config)
+    except paths_lib.PathError as failure:
+        sys.stderr.write("{0}\n".format(failure))
+        return EXIT_COMPOSITION
     entry = dict(config[PROVIDER])
     tier = args.tier or entry.get("default_tier") or "frontier"
     model, tier = resolve_model(entry, tier, args.family, args.model)
@@ -350,9 +401,9 @@ def main(argv=None):
     # The registry covers every resolved seat or the run does not start. A model with no price is a
     # composition error, not a silent zero in the projection.
     try:
-        registry = registry_lib.load(args.models)
+        registry = registry_lib.load(paths.registry(args.models))
         registry_entry = registry.require(model)
-    except (registry_lib.RegistryError, registry_lib.MissingModel) as failure:
+    except (paths_lib.PathError, registry_lib.RegistryError, registry_lib.MissingModel) as failure:
         sys.stderr.write("{0}: {1}\n".format(reviewer_id, failure))
         return EXIT_COMPOSITION
 
@@ -362,7 +413,11 @@ def main(argv=None):
             reviewer_id, model, args.max_tokens, base_cap))
 
     input_price, output_price = registry_lib.prices(registry_entry)
-    effort = resolve_effort(entry, model, registry_entry)
+    try:
+        effort = resolve_effort(entry, model, registry_entry)
+    except EffortRefused as failure:
+        sys.stderr.write("{0}: composition error: {1}\n".format(reviewer_id, failure))
+        return EXIT_COMPOSITION
 
     api_key, key_source = resolve_api_key(entry)
     entry["api_key"] = api_key
@@ -372,10 +427,15 @@ def main(argv=None):
     if routing:
         entry["provider_routing_for_model"] = routing
 
-    driver = load_driver(entry.get("type", "openai_compat"))
+    try:
+        driver_ref = paths.driver_ref(entry.get("type", "openai_compat"))
+    except paths_lib.PathError as failure:
+        sys.stderr.write("{0}: composition error: {1}\n".format(reviewer_id, failure))
+        return EXIT_COMPOSITION
+    driver = load_driver(driver_ref)
     http_request_fn = make_http_request_fn(driver)
 
-    system_prompt = build_system_prompt(persona_body)
+    system_prompt = build_system_prompt(persona_body, finding_schema_path)
     user_prompt = build_user_prompt(args.artifact, args.refs, args.artifact_name, args.ref_names)
 
     started = time.time()
@@ -402,6 +462,10 @@ def main(argv=None):
             # Exhausted transient retries, a provider error, a malformed body: this seat is missing,
             # stage `dispatch`. It is not exit 2 — only an auth failure halts the whole panel.
             sys.stderr.write("{0}: dispatch failed: {1}\n".format(reviewer_id, exc))
+            if model_is_unavailable(exc, model):
+                sys.stderr.write("{0}: the provider will not serve {1}; this family is unreachable "
+                                 "for this run\n".format(reviewer_id, model))
+                return EXIT_MODEL_UNAVAILABLE
             return EXIT_INVALID
 
         raw = result.get("text") or ""

@@ -25,6 +25,18 @@ The run lifecycle, in the order the stages run:
 - **Dispatch** — each seat's record moves `pending -> dispatching` by compare-and-set before its
   first paid call, and is updated as it returns.
 
+Every file the run loads — the panel, the config, the registry, the personas, the finding schema, the
+backend driver — resolves through `lib/paths.py`'s two-root cascade: `<workspace>/.agents/
+ensemble-review/` first, then the skill package, which is read-only and is never written to. Files
+replace whole; `config.json` deep-merges. The root each one came from lands in the manifest's `roots`.
+
+Seats resolve through `lib/seating.py`: the tier order (`--model`, `--tier`, the seat, the panel, the
+config, the persona frontmatter) and the three constraint passes (named, `non-claude`, `distinct`).
+A family with no cell at the resolved tier, and a family the provider refuses at dispatch time with a
+404 or 400 naming the model, are the same condition — unreachable — and both re-seat that lens onto
+the next available family **once**, recording a `substitution` the reconciliation's method caveat
+then names.
+
 Re-running against an existing run directory **resumes** it: only seats whose reports are absent or
 invalid are re-dispatched, a seat already `dispatching` is left alone and reported as held, and a run
 whose inputs no longer hash to the manifest's fingerprint is refused rather than mixed. `--fresh`
@@ -46,19 +58,18 @@ import threading
 import time
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
-SKILL_DIR = os.path.dirname(SCRIPTS_DIR)
 sys.path.insert(0, SCRIPTS_DIR)
 
 from lib import budget as budget_lib  # noqa: E402
+from lib import paths as paths_lib  # noqa: E402
 from lib import registry as registry_lib  # noqa: E402
 from lib import report as report_lib  # noqa: E402
 from lib import runs as runs_lib  # noqa: E402
+from lib import seating as seating_lib  # noqa: E402
 
-DEFAULT_CONFIG = os.path.join(SKILL_DIR, "templates", "config.json")
-PANELS_DIR = os.path.join(SKILL_DIR, "templates", "panels")
-AGENTS_DIR = os.path.join(SKILL_DIR, "agents")
-FINDING_SCHEMA_REF = os.path.join(SKILL_DIR, "references", "finding-schema.md")
 DISPATCH = os.path.join(SCRIPTS_DIR, "dispatch.py")
+FINDING_SCHEMA = "finding-schema.md"
+PROVIDER = "openrouter"
 
 DEFAULT_BUDGET_USD = 5.00
 
@@ -70,56 +81,71 @@ EXIT_BUDGET = 4
 
 # dispatch.py's own codes, read back from the subprocess.
 DISPATCH_AUTH = 2
+DISPATCH_MODEL_UNAVAILABLE = 5
 
 
-def load_panel(name_or_path):
+def load_panel(name_or_path, paths):
+    """A panel template: an operator path when `--panel` names a file, else the workspace cascade."""
     if os.path.isfile(name_or_path):
-        path = name_or_path
+        path = os.path.abspath(name_or_path)
+        paths.note_operator_path("panel", path)
     else:
-        candidate = name_or_path if name_or_path.endswith(".json") else name_or_path + ".json"
-        path = os.path.join(PANELS_DIR, candidate)
-    if not os.path.isfile(path):
-        available = sorted(n[:-5] for n in os.listdir(PANELS_DIR) if n.endswith(".json"))
-        sys.exit("No panel `{0}`. Available: {1}".format(name_or_path, ", ".join(available)))
+        name = name_or_path[:-5] if name_or_path.endswith(".json") else name_or_path
+        try:
+            path = paths.panel(name)
+        except paths_lib.PathError as failure:
+            sys.exit("{0}\n  Panels available: {1}".format(failure, ", ".join(available_panels(paths)) or "none"))
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle), path
 
 
-def resolve_seat_models(panel, config_path, default_tier):
-    """Resolve each seat's tier and concrete model up front, so the manifest is written even on failure."""
-    with open(config_path, "r", encoding="utf-8") as handle:
-        config = json.load(handle)
-    entry = config.get("openrouter") or {}
-    tiers = entry.get("tiers") or {}
-    effort_map = entry.get("effort") or {}
-    resolved = []
-    for seat in panel.get("seats", []):
-        # Precedence: --tier on the command line, then the seat's own tier, then the panel's, then
-        # the config default. The CLI wins so an operator can force a whole panel cheap for a dry run.
-        tier = default_tier or seat.get("tier") or panel.get("tier") or entry.get("default_tier") or "frontier"
-        model = seat.get("model") or (tiers.get(tier) or {}).get(seat.get("family"))
-        resolved.append({
-            "lens": seat.get("lens"),
-            "family": seat.get("family"),
-            "tier": tier,
-            "model": model,
-            "effort": effort_map.get(model),
-            "connector": entry.get("type", "openai_compat"),
-            "reviewer_id": "{0}-{1}".format(seat.get("lens"), seat.get("family")),
-        })
-    return resolved
+def available_panels(paths):
+    """Every panel name either root offers, workspace first, each name listed once."""
+    names = []
+    for root in paths.roots:
+        for template in paths_lib.CANDIDATES["panel"]:
+            directory = os.path.dirname(os.path.join(root, template))
+            if not os.path.isdir(directory):
+                continue
+            for entry in sorted(os.listdir(directory)):
+                if entry.endswith(".json") and entry[:-5] not in names:
+                    names.append(entry[:-5])
+    return names
 
 
-def persona_chars(lens):
+def persona_chars(lens, paths):
     """Characters in this lens's system message: the persona body plus the finding schema."""
-    path = os.path.join(AGENTS_DIR, "lens-" + lens + ".md")
     total = 0
-    if os.path.isfile(path):
-        _frontmatter, body = report_lib.parse_agent_file(path)
+    persona = paths.find("persona", "lens-" + lens)
+    if persona:
+        _frontmatter, body = report_lib.parse_agent_file(persona["path"])
         total += len(body)
-    if os.path.isfile(FINDING_SCHEMA_REF):
-        total += os.path.getsize(FINDING_SCHEMA_REF)
+    reference = paths.find("reference", FINDING_SCHEMA)
+    if reference:
+        total += os.path.getsize(reference["path"])
     return total
+
+
+def persona_frontmatter(paths):
+    """`frontmatter_fn` for `seating.resolve`: the lowest-precedence tier source, when it names one."""
+    def read(lens):
+        found = paths.require("persona", "lens-" + lens)
+        frontmatter, _body = report_lib.parse_agent_file(found["path"])
+        return frontmatter
+    return read
+
+
+def parse_model_pins(values):
+    """`--model <seat-id>=<model-id>`, repeatable, into `{seat id: model id}`."""
+    pinned = {}
+    for value in values or []:
+        seat_id, sep, model = value.partition("=")
+        if not sep or not seat_id.strip() or not model.strip():
+            raise seating_lib.SeatingError(
+                "--model takes <seat-id>=<model-id>, e.g. --model fidelity-openai=openai/gpt-6-astra; "
+                "got {0!r}".format(value))
+        pinned[seat_id.strip()] = model.strip()
+    return pinned
 
 
 def run_seat(seat, args, run_dir, inputs, halt):
@@ -142,14 +168,17 @@ def run_seat(seat, args, run_dir, inputs, halt):
         sys.executable, DISPATCH,
         "--persona", "lens-" + seat["lens"],
         "--family", seat["family"],
+        "--reviewer-id", seat["reviewer_id"],
         "--artifact", inputs["artifact"]["materialized_abs"],
         "--artifact-name", inputs["artifact"]["path"],
         "--artifact-revision", inputs["artifact"]["revision"],
         "--out", run_dir,
-        "--config", args.config,
+        "--workspace", args.workspace or os.getcwd(),
         "--tier", seat["tier"],
         "--max-tokens", str(args.max_tokens),
     ]
+    if args.config:
+        command += ["--config", args.config]
     if args.models:
         command += ["--models", args.models]
     for record in inputs["references"]:
@@ -178,6 +207,10 @@ def seat_record_from_report(record, report_path):
     meta = data.get("_meta") or {}
     record["status"] = "ok"
     record["report"] = report_path
+    # A seat that has now reported is not carrying last dispatch's failure any more. The substitution
+    # stays — it is what this seat ran on — but the reason the earlier dispatch failed does not.
+    record.pop("failure_reason", None)
+    record.pop("error", None)
     record["verdict"] = data.get("verdict")
     record["findings"] = len(data.get("findings") or [])
     _fold_meta(record, meta)
@@ -229,9 +262,13 @@ def parse_args(argv):
     parser.add_argument("--artifact", required=True, help="Path to the document under review")
     parser.add_argument("--ref", action="append", default=[], dest="refs", help="Path to a source-of-truth reference; repeat for several")
     parser.add_argument("--out", required=True, help="Run directory")
-    parser.add_argument("--config", default=DEFAULT_CONFIG, help="Config JSON (default: the skill's templates/config.json)")
-    parser.add_argument("--models", default=None, help="Model registry (default: the skill's templates/models.json)")
+    parser.add_argument("--workspace", default=None,
+                        help="The project holding the artifact. Every file resolves from <workspace>/.agents/ensemble-review/ first and the skill package second; config.json deep-merges rather than replacing (default: the working directory)")
+    parser.add_argument("--config", default=None, help="Config JSON, taken as given (default: the workspace-first cascade, deep-merged)")
+    parser.add_argument("--models", default=None, help="Model registry, taken as given (default: the workspace-first cascade)")
     parser.add_argument("--tier", default=None, help="Tier for every seat that does not set its own (default: the panel's, then the config's)")
+    parser.add_argument("--model", action="append", default=[], dest="models_pinned", metavar="SEAT=MODEL",
+                        help="Pin one seat to a concrete model id, e.g. --model fidelity-openai=openai/gpt-6-astra. Repeatable; beats every tier source")
     parser.add_argument("--max-tokens", type=int, default=registry_lib.DEFAULT_MAX_TOKENS,
                         help="Completion cap sent on every call; a model's registry floor raises it for that seat (default: {0})".format(registry_lib.DEFAULT_MAX_TOKENS))
     parser.add_argument("--budget-usd", type=float, default=DEFAULT_BUDGET_USD,
@@ -249,7 +286,8 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
 
-    panel, panel_path = load_panel(args.panel)
+    paths = paths_lib.Paths(args.workspace)
+    panel, panel_path = load_panel(args.panel, paths)
     if panel.get("requires_references") and not args.refs:
         sys.stderr.write("warning: panel `{0}` expects source-of-truth references and none were supplied; "
                          "a fidelity seat cannot do its job without them\n".format(panel.get("name", args.panel)))
@@ -274,7 +312,36 @@ def main(argv=None):
         if os.path.abspath(run_dir) != os.path.abspath(args.out):
             print("run directory {0} was already claimed; this run is {1}".format(args.out, run_dir))
 
-    seats = resolve_seat_models(panel, args.config, args.tier)
+    # --- Resolve, part one: the cascade, the config and the seats ---------------------------------
+    # Seats resolve before anything is materialized, so a composition error costs nothing and leaves
+    # the run directory empty rather than half-pinned.
+    try:
+        config, config_path = paths.config(args.config)
+        config_entry = config.get(PROVIDER) or {}
+        if not config_entry:
+            sys.stderr.write("config {0} has no `{1}` provider entry\n".format(config_path, PROVIDER))
+            return EXIT_COMPOSITION
+        seats = seating_lib.resolve(
+            panel, config_entry,
+            cli_tier=args.tier,
+            pinned=parse_model_pins(args.models_pinned),
+            frontmatter_fn=persona_frontmatter(paths))
+        paths.driver_ref(config_entry.get("type", "openai_compat"))
+        # Every seat's system message carries it, so it is required, and its root belongs in the
+        # audit record: a project that overrides the finding schema has changed what every reviewer
+        # was asked for, which is the last thing `roots` should be silent about.
+        paths.require("reference", FINDING_SCHEMA)
+    except (paths_lib.PathError, seating_lib.SeatingError) as failure:
+        sys.stderr.write("composition error: {0}\n".format(failure))
+        return EXIT_COMPOSITION
+
+    if resuming:
+        _adopt_recorded_substitutions(runs_lib.read_manifest(run_dir), seats)
+
+    for seat in seats:
+        if seat.get("substitution"):
+            print("re-seated {0}: {1}".format(seat["reviewer_id"], seat["substitution"]["reason"]))
+
     dispatched = [s for s in seats if not (args.skip_claude and s["family"] == "claude")]
     harness = [s for s in seats if args.skip_claude and s["family"] == "claude"]
     tier_default = args.tier or panel.get("tier")
@@ -310,10 +377,10 @@ def main(argv=None):
         record["materialized_abs"] = os.path.join(run_dir, record["materialized"])
     inputs = {"artifact": artifact_record, "references": reference_records}
 
-    # --- Resolve ---------------------------------------------------------------------------------
+    # --- Resolve, part two: the registry gate -----------------------------------------------------
     try:
-        registry = registry_lib.load(args.models)
-    except registry_lib.RegistryError as failure:
+        registry = registry_lib.load(paths.registry(args.models))
+    except (paths_lib.PathError, registry_lib.RegistryError) as failure:
         sys.stderr.write("{0}\n".format(failure))
         return EXIT_COMPOSITION
     uncovered = registry.covers([s["model"] for s in dispatched])
@@ -329,8 +396,20 @@ def main(argv=None):
             sys.stderr.write("  python3 scripts/refresh_models.py --add {0}\n".format(model))
         return EXIT_COMPOSITION
 
-    manifest = _build_manifest(args, panel, panel_path, run_dir, seats, dispatched, harness,
-                               inputs, fingerprint, tier_default, registry)
+    # The effort a seat is dispatched at is a property of the comparison, not a preference: a value
+    # the model does not accept is refused here rather than dropped on the way to the provider.
+    effort_problems = seating_lib.effort_errors(dispatched, registry)
+    if effort_problems:
+        sys.stderr.write("composition error: the config asks for an effort {0} model(s) do not accept.\n".format(
+            len(effort_problems)))
+        for problem in effort_problems:
+            sys.stderr.write("  {0}\n".format(problem))
+        sys.stderr.write("Fix the config's `effort` map, or refresh the vocabularies:\n"
+                         "  python3 scripts/refresh_models.py\n")
+        return EXIT_COMPOSITION
+
+    manifest = _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
+                               dispatched, harness, inputs, fingerprint, tier_default, registry)
     if resuming:
         manifest = _merge_resume(manifest, runs_lib.read_manifest(run_dir))
     runs_lib.write_manifest(run_dir, manifest)
@@ -340,7 +419,7 @@ def main(argv=None):
     projection_seats = [{
         "reviewer_id": seat["reviewer_id"],
         "model": seat["model"],
-        "prompt_tokens": budget_lib.approx_tokens(budget_lib.prompt_chars(persona_chars(seat["lens"]), document_chars)),
+        "prompt_tokens": budget_lib.approx_tokens(budget_lib.prompt_chars(persona_chars(seat["lens"], paths), document_chars)),
     } for seat in dispatched]
     # `default` means host interactive, synthesis autonomous — so whether this run pays for a
     # synthesis call is decided by the same two facts the budget gate itself turns on.
@@ -386,20 +465,91 @@ def main(argv=None):
 
     halt = threading.Event()
     started = time.time()
-    results = []
-    if to_dispatch:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(to_dispatch)) as pool:
-            futures = [pool.submit(run_seat, seat, args, run_dir, inputs, halt) for seat in to_dispatch]
-            for future in concurrent.futures.as_completed(futures):
-                results.append(future.result())
+    results = _fan_out(to_dispatch, args, run_dir, inputs, halt)
+
+    # A family the provider will not serve is unreachable for this run, which is the same condition
+    # as a family with no cell at this tier — so it takes the same treatment: re-seat that lens onto
+    # the next available family, **once**, and record the substitution. Done after the fan-out rather
+    # than inside it, so the seats that did land are already holding their families when the
+    # replacement is chosen.
+    replacements = _reseat_unavailable(results, seats, config_entry, registry, run_dir, args)
+    if replacements:
+        landed = _fan_out(replacements, args, run_dir, inputs, halt)
+        by_id = {r["seat"]["reviewer_id"]: r for r in results}
+        by_id.update({r["seat"]["reviewer_id"]: r for r in landed})
+        results = list(by_id.values())
     elapsed = time.time() - started
 
     return _wrap_up(args, run_dir, results, harness, dispatched, elapsed, halt, held)
 
 
+def _fan_out(seats, args, run_dir, inputs, halt):
+    """One `dispatch.py` subprocess per seat, in parallel. Returns one result record per seat."""
+    results = []
+    if not seats:
+        return results
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(seats)) as pool:
+        futures = [pool.submit(run_seat, seat, args, run_dir, inputs, halt) for seat in seats]
+        for future in concurrent.futures.as_completed(futures):
+            results.append(future.result())
+    return results
+
+
+def _reseat_unavailable(results, seats, config_entry, registry, run_dir, args):
+    """Move every seat the provider refused onto another family, once each. Returns those seats.
+
+    Each seat's first, failed dispatch is folded into the manifest **before** the move, so its spend
+    and its reason survive the re-seat: a seat that cost money on a model the provider would not
+    serve is still a seat that cost money.
+    """
+    moved = []
+    for result in results:
+        if result.get("returncode") != DISPATCH_MODEL_UNAVAILABLE:
+            continue
+        seat = result["seat"]
+        refused_model = seat["model"]
+        runs_lib.update_seat(run_dir, seat["reviewer_id"], _unavailable(result, refused_model))
+        replacement = seating_lib.reseat(
+            seat, seats, config_entry, kind="model_unavailable",
+            reason="the provider would not serve {0}; re-seated once onto the next available "
+                   "family in declaration order".format(refused_model),
+            usable=lambda _family, model: bool(model) and not registry.covers([model]))
+        if replacement is None:
+            print("{0}: no family left to re-seat onto; the run is under-seated".format(seat["reviewer_id"]))
+            continue
+        entry = registry.get(seat["model"]) or {}
+        runs_lib.update_seat(run_dir, seat["reviewer_id"], _reseated(seat, entry, args.max_tokens))
+        print("re-seated {0}: {1}".format(seat["reviewer_id"], seat["substitution"]["reason"]))
+        moved.append(seat)
+    return moved
+
+
+def _unavailable(result, model):
+    def mutate(record):
+        record["status"] = "failed"
+        record["report"] = None
+        record["failure_reason"] = "model-unavailable"
+        record["error"] = (result.get("stderr") or "")[-2000:]
+        record["elapsed_s"] = result.get("elapsed_s")
+        record["unavailable_model"] = model
+    return mutate
+
+
+def _reseated(seat, entry, run_cap):
+    def mutate(record):
+        record["status"] = "failed"
+        record["family"] = seat["family"]
+        record["model"] = seat["model"]
+        record["effort"] = seat.get("effort")
+        record["max_tokens"] = registry_lib.cap_for(entry, run_cap)
+        record["substitution"] = seat["substitution"]
+    return mutate
+
+
 # --- manifest ------------------------------------------------------------------------------------
 
-def _build_manifest(args, panel, panel_path, run_dir, seats, dispatched, harness, inputs, fingerprint, tier_default, registry):
+def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats, dispatched, harness,
+                    inputs, fingerprint, tier_default, registry):
     """The manifest as it stands at Resolve: every seat pending, every input pinned."""
     artifact = inputs["artifact"]
     references = inputs["references"]
@@ -412,8 +562,10 @@ def _build_manifest(args, panel, panel_path, run_dir, seats, dispatched, harness
         seat_records.append({
             "reviewer_id": seat["reviewer_id"],
             "lens": seat["lens"],
+            "requested_family": seat["requested"],
             "family": seat["family"],
             "tier": seat["tier"],
+            "tier_source": seat["tier_source"],
             "model": None if harness_seat else seat["model"],
             "connector": None if harness_seat else seat["connector"],
             "provider": None,
@@ -433,7 +585,7 @@ def _build_manifest(args, panel, panel_path, run_dir, seats, dispatched, harness
             "reasoning_tokens": None,
             "cost_usd": None,
             "elapsed_s": None,
-            "substitution": None,
+            "substitution": seat.get("substitution"),
         })
         if harness_seat:
             seat_records[-1]["note"] = ("dispatched by the host session as a harness subagent; "
@@ -454,14 +606,13 @@ def _build_manifest(args, panel, panel_path, run_dir, seats, dispatched, harness
             for r in references
         ],
         "input_fingerprint": fingerprint,
-        "config": args.config,
+        "config": config_path,
         "models_registry": registry.path,
-        "roots": {
-            "panel": os.path.dirname(os.path.abspath(panel_path)),
-            "config": os.path.dirname(os.path.abspath(args.config)),
-            "personas": AGENTS_DIR,
-            "registry": os.path.dirname(os.path.abspath(registry.path)),
-        },
+        "workspace": paths.workspace,
+        # The cascade's audit record: the search order, the root each loaded file actually came
+        # from, and the ones a workspace override supplied. `config-fragment` appears only when a
+        # workspace `config.json` deep-merged over the packaged one.
+        "roots": paths.roots_block(),
         "tier_default": tier_default,
         "max_tokens_requested": args.max_tokens,
         "budget_usd": args.budget_usd,
@@ -473,6 +624,30 @@ def _build_manifest(args, panel, panel_path, run_dir, seats, dispatched, harness
         "cost_usd_total": None,
         "failures": [],
     }
+
+
+def _adopt_recorded_substitutions(existing, seats):
+    """Carry a runtime re-seat forward onto a resumed run's freshly resolved seats.
+
+    Seats are re-resolved from the panel on every run, and the panel still names the family the
+    provider refused. Without this, a resume re-derives that family, pays for the refusal again, and
+    re-seats again — one wasted call per resume, and a `substitution` the manifest already recorded
+    silently redone. Only `model_unavailable` is adopted: a missing cell and an unsatisfiable
+    constraint are properties of the config and the panel, so re-resolving them reaches the same
+    answer, and adopting them would freeze a stale config decision into the run.
+    """
+    by_id = {seat.get("reviewer_id"): seat for seat in existing.get("seats") or []}
+    for seat in seats:
+        record = by_id.get(seat["reviewer_id"]) or {}
+        substitution = record.get("substitution")
+        if not isinstance(substitution, dict) or substitution.get("kind") != "model_unavailable":
+            continue
+        if not record.get("family") or not record.get("model"):
+            continue
+        seat["family"] = record["family"]
+        seat["model"] = record["model"]
+        seat["effort"] = record.get("effort")
+        seat["substitution"] = substitution
 
 
 def _merge_resume(manifest, existing):
@@ -490,7 +665,7 @@ def _merge_resume(manifest, existing):
             for field in ("status", "report", "verdict", "findings", "attempts", "repairs", "truncations",
                           "usage", "reasoning_tokens", "cost_usd", "elapsed_s", "provider", "effort",
                           "max_tokens", "model", "connector", "substitution", "failure_reason", "error",
-                          "claimed_at", "string_truncations", "dispatches"):
+                          "claimed_at", "string_truncations", "dispatches", "unavailable_model"):
                 if field in before:
                     seat[field] = before[field]
     manifest["resumed_from"] = existing.get("generated_at")

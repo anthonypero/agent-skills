@@ -179,7 +179,9 @@ class EffortTest(DispatchTestCase):
         self.assertEqual(self.workspace.calls(harness.FAST_MODEL)[0]["effort"], "high")
         self.assertEqual(self.report("consistency-xai")["_meta"]["effort"], "high")
 
-    def test_an_effort_outside_the_vocabulary_is_dropped_with_a_warning(self):
+    def test_an_effort_outside_the_vocabulary_is_a_composition_error(self):
+        """Not a warning. Dropping it would dispatch the seat at whatever depth the provider
+        defaults to, and a panel whose seats ran at unintended depths is not a comparison."""
         workspace = harness.Workspace(effort={harness.FAST_MODEL: "xhigh", harness.SLOW_MODEL: "xhigh"})
         self.addCleanup(workspace.close)
         workspace.apply_env()
@@ -194,9 +196,11 @@ class EffortTest(DispatchTestCase):
             ])
         finally:
             sys.stderr = saved
-        self.assertEqual(code, 0, stderr.getvalue())
-        self.assertIsNone(workspace.calls(harness.SLOW_MODEL)[0]["effort"])
-        self.assertIn("vocabulary", stderr.getvalue())
+        self.assertEqual(code, 1, stderr.getvalue())
+        self.assertEqual(workspace.calls(harness.SLOW_MODEL), [], "nothing is dispatched")
+        self.assertIn("composition error", stderr.getvalue())
+        self.assertIn("max/high/low", stderr.getvalue(), "the message names the allowed values")
+        self.assertIn(harness.SLOW_MODEL, stderr.getvalue())
 
     def test_a_model_absent_from_the_effort_map_is_sent_no_effort_at_all(self):
         self.workspace.plan({harness.SLOW_MODEL: [{"body": harness.valid_report()}]})
@@ -215,6 +219,119 @@ class EnvelopeTest(DispatchTestCase):
         self.assertEqual(report["artifact_revision"], "deadbeef")
         self.assertEqual(report["_meta"]["connector"], "fake_backend")
         self.assertEqual(report["_meta"]["provider"], "fake")
+
+
+class WireShapeTest(DispatchTestCase):
+    """What actually lands in the HTTP body, through the **real** driver.
+
+    The other effort tests assert on what `dispatch.py` hands the driver entry, which the scripted
+    connector reads back from the same key — so they would still pass if the driver stopped sending
+    it. These go the whole way: a config with an `effort` and a `provider_routing` entry, the real
+    `openai_compat` driver, and `urllib.request.urlopen` monkeypatched to capture the request body.
+    `provider_routing` has no other coverage at all and would pass with the feature deleted.
+    """
+
+    MODEL = "test/wire-model"
+    BARE_MODEL = "test/bare-model"
+
+    ROUTING = {"sort": "throughput", "quantizations": ["fp8", "bf16"], "allow_fallbacks": True}
+
+    def setUp(self):
+        DispatchTestCase.setUp(self)
+        self.config = self.workspace.path("wire-config.json")
+        with open(self.config, "w", encoding="utf-8") as handle:
+            json.dump({"openrouter": {
+                "type": "openai_compat",
+                "base_url": "https://example.invalid/api/v1",
+                "api_key_secret": None,
+                "api_key_env": "ENSEMBLE_REVIEW_TEST_KEY",
+                "default_tier": "standard",
+                "tiers": {"standard": {"kimi": self.MODEL, "xai": self.BARE_MODEL}},
+                "effort": {self.MODEL: "high"},
+                "provider_routing": {self.MODEL: self.ROUTING},
+            }}, handle)
+
+        self.registry = self.workspace.path("wire-models.json")
+        priced = {
+            "input_price_per_token": 1e-06, "output_price_per_token": 2e-06,
+            "context_limit": 1000000, "output_token_prior": 1000, "min_max_tokens": None,
+        }
+        with open(self.registry, "w", encoding="utf-8") as handle:
+            json.dump({"schema_version": "1", "models": {
+                self.MODEL: dict(priced, effort_vocabulary=["max", "high", "low"]),
+                self.BARE_MODEL: dict(priced, effort_vocabulary=["high", "low"]),
+            }}, handle)
+
+        self.sent = []
+        saved = dispatch.urllib.request.urlopen
+        dispatch.urllib.request.urlopen = self._capture
+        self.addCleanup(setattr, dispatch.urllib.request, "urlopen", saved)
+
+    def _capture(self, request, timeout=None):
+        del timeout
+        self.sent.append(json.loads(request.data.decode("utf-8")))
+        return _Response(json.dumps({
+            "id": "wire-1",
+            "model": self.sent[-1]["model"],
+            "provider": "example",
+            "choices": [{"message": {"content": json.dumps(harness.valid_report())}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        }))
+
+    def dispatch_seat(self, family):
+        stderr, saved = io.StringIO(), sys.stderr
+        sys.stderr = stderr
+        try:
+            code = dispatch.main([
+                "--persona", "lens-consistency", "--family", family,
+                "--artifact", self.workspace.artifact, "--out", self.out,
+                "--config", self.config, "--models", self.registry,
+                "--tier", "standard", "--max-tokens", "8000",
+            ])
+        finally:
+            sys.stderr = saved
+        return code, stderr.getvalue()
+
+    def test_the_effort_and_the_provider_routing_reach_the_request_body(self):
+        code, err = self.dispatch_seat("kimi")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.sent), 1)
+        payload = self.sent[0]
+        self.assertEqual(payload["model"], self.MODEL)
+        self.assertEqual(payload["reasoning"], {"effort": "high"},
+                         "the config's effort map reaches OpenRouter's `reasoning.effort`")
+        self.assertEqual(payload["provider"], self.ROUTING,
+                         "provider_routing is passed through verbatim as the request-level `provider` object")
+        self.assertEqual(payload["max_tokens"], 8000)
+
+    def test_a_model_in_neither_map_sends_neither_key(self):
+        code, err = self.dispatch_seat("xai")
+        self.assertEqual(code, 0, err)
+        payload = self.sent[0]
+        self.assertEqual(payload["model"], self.BARE_MODEL)
+        self.assertNotIn("reasoning", payload,
+                         "a model absent from the effort map is dispatched with no effort parameter at all")
+        self.assertNotIn("provider", payload,
+                         "and with no routing object, so OpenRouter's own default routing stands")
+
+
+class _Response(object):
+    """The shape `urlopen` returns, enough of it for the driver."""
+
+    def __init__(self, body):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def getcode(self):
+        return 200
+
+    def read(self):
+        return self.body.encode("utf-8")
 
 
 class AuthAndBackoffTest(DispatchTestCase):
