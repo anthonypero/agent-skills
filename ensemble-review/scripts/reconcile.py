@@ -8,11 +8,24 @@ is available: the host session interactively, the `synthesis` persona autonomous
 
     reconcile.py --run-dir <dir>                        # writes judgment-request.json, exits 3
     reconcile.py --run-dir <dir> --judgment judgment.json
+    reconcile.py --run-dir <dir> --reconciler synthesis # dispatches the persona for the patch
     reconcile.py --run-dir <dir> --render-only          # re-render the Markdown from the JSON
 
 Run it once with no patch to get the provisional clusters and the questions they raise, write the
 patch against `schemas/judgment-patch.schema.json`, then run it again. Nothing is written when the
 patch fails validation: the failing entries are named and the supplier is asked again.
+
+**The Judge stage.** `--reconciler` says who supplies that patch: `host` leaves it to the session,
+`synthesis` dispatches the persona, and `default` — the panel's setting, recorded in the manifest —
+means host when a human is attached and `synthesis` when nobody is. In `synthesis` mode with no
+`judgment.json` on disk, this script composes the persona's user message from every validated
+report, the provisional clusters, the references and the pinned artifact, and makes the call through
+`dispatch.py`'s own machinery: the same driver, the same doubled-cap length retry, the same registry
+gate, and the same per-call cost record, which lands in the manifest as `judge`. The patch is
+validated — shape, then references, then a full trial merge — **before** `judgment.json` is written,
+so an invalid patch never reaches disk. One repair re-ask names the failing entries; a second failure
+is exit 3 with nothing written. A patch from `synthesis` carrying `rulings` is a hard error and earns
+no re-ask: stating a ruling on a design fork is the one thing an unattended judge may not do.
 
 The **pinned artifact is mandatory** in both of those modes: every `quote` and every
 `literal_edit.old_text` is verified against it and any member whose anchor is not real text is
@@ -31,15 +44,30 @@ import hashlib
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import dispatch  # noqa: E402
+from backends import AuthFailure  # noqa: E402
+from lib import judge as judge_lib  # noqa: E402
 from lib import paths as paths_lib  # noqa: E402
 from lib import reconcile_core as core  # noqa: E402
+from lib import registry as registry_lib  # noqa: E402
 from lib import report as report_lib  # noqa: E402
+from lib import runs as runs_lib  # noqa: E402
 from lib import schema as schema_lib  # noqa: E402
 
 SEVERITY_ORDER = core.SEVERITY_ORDER
+
+EXIT_OK = 0
+EXIT_USAGE = 1
+EXIT_TERMINAL = 2
+EXIT_PATCH = 3
+
+
+class HardPatchError(Exception):
+    """A patch defect no re-ask can be asked to repair. Nothing is written and nobody is re-asked."""
 
 
 # --- validation of the two contracts ---------------------------------------------------------------
@@ -285,6 +313,266 @@ def _render_cluster_block(cluster):
     return lines
 
 
+# --- the judge stage -----------------------------------------------------------------------------
+
+def _panel_for(paths, manifest):
+    """The run's panel template, when the cascade can still find it. `None` is not an error.
+
+    Only one field on it matters here — an optional `synthesis` block naming the family or tier the
+    judgment call should take — so a run whose panel was composed ad hoc, or whose template has
+    since moved, falls through to the declaration-order default rather than refusing.
+    """
+    name = manifest.get("panel")
+    if not name or name == "ad-hoc":
+        return None
+    try:
+        found = paths.find("panel", name)
+    except KeyError:
+        return None
+    if not found:
+        return None
+    try:
+        with open(found["path"], "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (ValueError, OSError):
+        return None
+
+
+def _materialized_references(run_dir, manifest):
+    """`(label, text)` for every reference, read from the run's own read-only `inputs/` copy.
+
+    The pinned bytes, for the same reason the artifact is: a reference edited since the panel ran is
+    not the document the seats judged against, and the judge is arbitrating their citations.
+    """
+    references = []
+    for record in manifest.get("reference_revisions") or []:
+        materialized = record.get("materialized")
+        if not materialized:
+            continue
+        path = os.path.join(run_dir, materialized)
+        if not os.path.isfile(path):
+            continue
+        with open(path, "r", encoding="utf-8") as handle:
+            references.append((record.get("path") or materialized, handle.read()))
+    return references
+
+
+def dispatch_synthesis(paths, run_dir, manifest, context, artifact_text, args):
+    """Make the judgment call. Returns `(patch, record)`; `patch` is None when nothing survived.
+
+    The patch is validated in three widening passes before it is believed — the schema, then the
+    references and enums `validate_patch_shape` checks, then a **full trial merge** through
+    `core.reconcile`, which is the only thing that can catch a label on a cluster the patch's own
+    splits dissolved. All three feed the one repair re-ask.
+    """
+    persona_name = judge_lib.SYNTHESIS_PERSONA
+    persona_path = paths.persona(persona_name)
+    frontmatter, body = report_lib.parse_agent_file(persona_path)
+    # The same resolver the seat leg uses, so a workspace persona's declared `context` means the
+    # same thing on both. It was two implementations, and the seat one silently dropped everything
+    # but the finding schema.
+    reference_paths = dispatch.persona_context_paths(paths, frontmatter)
+
+    config, _config_path = paths.config(args.config)
+    config_entry = config.get(dispatch.PROVIDER) or {}
+    if not config_entry:
+        raise judge_lib.JudgeError("the config has no `{0}` provider entry".format(dispatch.PROVIDER))
+
+    # **The seat Resolve worked out, model included, when the run recorded one.** The projection
+    # that gated this run was computed against that seat, so re-deriving it here would price one
+    # model and call another the moment a config cell was edited between the panel and the
+    # judgment — the budget gate would have weighed a call nobody makes. The recorded `model` is
+    # therefore passed to `prepare_call` as a **pin**, exactly as `--synthesis-model` is, rather
+    # than left to the tier map to resolve a second time.
+    #
+    # A run made before `judge_seat` existed, or one reconciled by hand, falls back to resolving it
+    # from the same inputs Resolve had.
+    recorded = manifest.get("judge_seat")
+    if isinstance(recorded, dict) and recorded.get("family") and recorded.get("tier"):
+        seat = dict(recorded)
+    else:
+        panel = _panel_for(paths, manifest)
+        seat = judge_lib.synthesis_seat(
+            config_entry, panel,
+            cli_tier=manifest.get("tier_default"),
+            seated_families=[s.get("family") for s in manifest.get("seats") or [] if s.get("family")],
+            persona_tier=frontmatter.get("model"))
+    family, tier = seat["family"], seat["tier"]
+
+    # `--synthesis-model` on this invocation beats the recorded pin: an operator naming a model here
+    # is overriding the run's own choice on purpose, and says so in `family_source`.
+    pinned = args.synthesis_model or seat.get("model")
+    if args.synthesis_model:
+        seat["family_source"] = "--synthesis-model"
+        seat["model"] = args.synthesis_model
+
+    cap = args.max_tokens
+    if cap is None:
+        cap = manifest.get("max_tokens_requested") or registry_lib.DEFAULT_MAX_TOKENS
+
+    call = dispatch.prepare_call(
+        paths, family, tier=tier, model=pinned, max_tokens=cap,
+        config_override=args.config, models_override=args.models, label="synthesis")
+
+    request = core.judgment_request(context)
+    system_prompt = dispatch.build_system_prompt(body, reference_paths)
+    user_prompt = judge_lib.build_user_message(
+        run_id=manifest.get("run_id"),
+        request=request,
+        reports=context["reports"],
+        artifact_text=artifact_text,
+        artifact_label=manifest.get("artifact") or "the artifact",
+        artifact_revision=manifest.get("artifact_revision"),
+        references=_materialized_references(run_dir, manifest))
+
+    def check(raw_text):
+        try:
+            patch = json.loads(report_lib.strip_fence(raw_text))
+        except ValueError as exc:
+            return None, ["the response was not parseable JSON: {0}".format(exc)]
+        if not isinstance(patch, dict):
+            return None, ["the response is a {0}, expected a JSON object".format(type(patch).__name__)]
+        # **`author` is assigned, never defaulted.** Both halves of the asymmetry that makes an
+        # unattended judge safe key on this one field — `reconcile_core` rejects `rulings` from
+        # `synthesis` and forces an all-`judgment-call` cluster to `flag-for-human` for that author
+        # alone — so a patch that wrote `"author": "host"` would escape both and settle a design
+        # fork with nobody's name on it. What is authoritative is who this script dispatched, not
+        # who the response says it is; the whole point of the audit fields on a report is the same
+        # rule one level up.
+        claimed = patch.get("author")
+        patch["author"] = judge_lib.SYNTHESIS_AUTHOR
+        disowned = []
+        if claimed is not None and claimed != judge_lib.SYNTHESIS_AUTHOR:
+            # Named, not quietly corrected. The field is overwritten either way — the enforcement
+            # below runs against `synthesis` whatever the response said — but a patch that disowns
+            # its own author is a patch reaching for the latitude the other author has, and that is
+            # exactly the thing the reader of this run needs told.
+            disowned = [
+                "judgment: the patch claims `author: {0!r}` and was written by the `synthesis` "
+                "persona this script dispatched. The author decides which half of the "
+                "judgment-call rule applies and whether `rulings` is allowed; it is not the "
+                "supplier's to choose. The field has been set to `synthesis`.".format(claimed)]
+
+        # The one defect a re-ask may not be asked to repair. An unattended persona that states a
+        # ruling on a design fork has recorded a human decision as settled by nobody, and asking it
+        # again would be asking it to say the same thing more quietly.
+        if patch.get("rulings"):
+            raise HardPatchError(
+                "the judgment patch carries {0} `rulings` entr(y/ies). `rulings` is the interactive "
+                "host's alone: it is a decision of record on a design fork, and an unattended judge "
+                "has no owner to answer to. Nothing was written and no re-ask was made.".format(
+                    len(patch["rulings"])))
+        errors = validate_patch_document(patch, paths)
+        if not errors:
+            errors = core.validate_patch_shape(patch, manifest, context["reports"])
+        if not errors:
+            _document, merge_errors, _context = core.reconcile(run_dir, patch, artifact_text)
+            errors = merge_errors
+        return patch, disowned + errors
+
+    print("judge: dispatching the `synthesis` persona on {0} ({1}, tier {2}) for the judgment patch".format(
+        call.model, family, tier))
+    attempts = []
+    started = time.time()
+    status = "ok"
+    errors = []
+    patch = None
+    try:
+        outcome = dispatch.attempt_loop(
+            call, system_prompt, user_prompt, check, judge_lib.build_repair_prompt, attempts=attempts)
+        patch, errors = outcome.parsed, outcome.errors
+        if errors:
+            _print_errors("the judgment patch from `synthesis` still does not hold after the repair "
+                          "re-ask; nothing was written", errors)
+            status = "failed"
+            patch = None
+    except HardPatchError as refusal:
+        status, errors = "refused", [str(refusal)]
+        raise
+    except (AuthFailure, dispatch.DispatchFailed) as failure:
+        status, errors = "failed", [str(failure)]
+        raise
+    finally:
+        # The record is written in a `finally` on purpose: a judgment call that failed, or that was
+        # refused outright, still spent money, and a manifest that reports it as free is the same
+        # under-accounting the failed-seat record was built to close.
+        record = judge_lib.judge_record(
+            reviewer_id=judge_lib.SYNTHESIS_PERSONA, family=family, tier=tier, model=call.model,
+            connector=call.connector, provider=call.provider, effort=call.effort, cap=call.cap,
+            attempts=attempts, elapsed_s=time.time() - started, status=status, errors=errors,
+            tier_source=seat.get("tier_source"), family_source=seat.get("family_source"))
+        _record_judge_call(run_dir, record)
+
+    return patch, record
+
+
+def _author_holds_for_this_run(patch, patch_path, run_dir, reconciler, args):
+    """Why this on-disk patch may not be merged as it stands, or None. A patch error, exit 3.
+
+    The dispatched path assigns `author` from what this script called, so it cannot be disowned.
+    The **on-disk** path had no such rule, and the two enforcement paths that make an unattended
+    judge safe — `reconcile_core` rejecting `rulings` from `synthesis`, and forcing an
+    all-`judgment-call` cluster to `flag-for-human` for that author alone — both key on that field.
+    So a `judgment.json` a host session left in a directory, picked up by a resumed autonomous run,
+    took the host's latitude on a run that has no host: a design fork disposed `fix-now`, with
+    auto-apply's first condition open on it.
+
+    The check is deliberately narrow. It fires only when the run's own record says `synthesis`
+    judges **and** the patch was found at the default path, so the two ways of saying "a human wrote
+    this one" — `--reconciler host` and an explicit `--judgment <path>` — both still take the host
+    route, and both are named in the message rather than left to be guessed at.
+
+    **The third guard is defence in depth and is unreachable today.** With `args.judgment` unset,
+    `main` only ever binds `patch_path` to `<run-dir>/judgment.json` — either finding it there or
+    writing it there after a dispatch — so the path comparison cannot fail. It is kept because this
+    function is what stands between an unattended run and a patch claiming the host's latitude, and
+    a security check that silently widens when somebody adds a third way to locate the patch is
+    worse than one redundant comparison.
+    """
+    if reconciler != judge_lib.SYNTHESIS_AUTHOR:
+        return None
+    if args.judgment is not None:
+        return None
+    if os.path.abspath(patch_path) != os.path.join(os.path.abspath(run_dir), "judgment.json"):
+        return None
+    author = patch.get("author") if isinstance(patch, dict) else None
+    if author == judge_lib.SYNTHESIS_AUTHOR:
+        return None
+    return (
+        "the judgment patch at {0} says `author: {1!r}`, and this run's judgment is `synthesis`.\n"
+        "  The author is not a label: it decides whether an all-`judgment-call` cluster may be\n"
+        "  disposed anything but `flag-for-human`, and whether `rulings` is allowed at all. A patch\n"
+        "  claiming `host` on a run with no host takes latitude nobody is answering for.\n"
+        "  Nothing was written. If a human did write this patch, say so — re-run with\n"
+        "  `--reconciler host`, or point at it explicitly with `--judgment {0}`.".format(
+            patch_path, author))
+
+
+def _record_judge_call(run_dir, record):
+    """Put the judgment call in the manifest as `judge`, and its cost in `cost_usd_total`.
+
+    Not in `seats`: that array is the `unanimous` denominator and every entry in it with no report
+    file is reported as a missing seat, so a judge seated there would make every autonomous run
+    reconcile as under-seated by exactly one.
+    """
+    try:
+        manifest = runs_lib.read_manifest(run_dir)
+    except runs_lib.RunError:
+        return
+    manifest["judge"] = record
+    total = 0.0
+    known = False
+    for seat in manifest.get("seats") or []:
+        if seat.get("cost_usd") is not None:
+            total += float(seat["cost_usd"])
+            known = True
+    if record.get("cost_usd") is not None:
+        total += float(record["cost_usd"])
+        known = True
+    manifest["cost_usd_total"] = round(total, 6) if known else None
+    runs_lib.write_manifest(run_dir, manifest)
+
+
 # --- cli -----------------------------------------------------------------------------------------
 
 def main(argv=None):
@@ -295,6 +583,16 @@ def main(argv=None):
     parser.add_argument("--render-only", action="store_true", help="Re-render reconciliation.md from an existing reconciliation.json and write nothing else")
     parser.add_argument("--workspace", default=None,
                         help="The project holding the artifact. Schemas resolve from <workspace>/.agents/ensemble-review/schemas/ first, then the skill package (default: the working directory)")
+    parser.add_argument("--reconciler", choices=judge_lib.RECONCILERS, default=None,
+                        help="Who supplies the judgment patch (default: the manifest's, else `default` — host when a human is attached, synthesis when nobody is)")
+    parser.add_argument("--autonomous", action="store_true",
+                        help="Nobody is attached: `--reconciler default` resolves to synthesis. Also inferred when stdin is not a tty")
+    parser.add_argument("--synthesis-model", default=None,
+                        help="Pin the judgment call to a concrete model id, overriding the tier map")
+    parser.add_argument("--max-tokens", type=int, default=None,
+                        help="Completion cap for the judgment call; a model's registry floor raises it (default: the run's own cap, else {0})".format(registry_lib.DEFAULT_MAX_TOKENS))
+    parser.add_argument("--config", default=None, help="Config JSON, taken as given (default: the workspace-first cascade, deep-merged)")
+    parser.add_argument("--models", default=None, help="Model registry, taken as given (default: the workspace-first cascade)")
     args = parser.parse_args(argv)
 
     paths = paths_lib.Paths(args.workspace)
@@ -338,6 +636,29 @@ def main(argv=None):
     with open(artifact_path, "r", encoding="utf-8") as handle:
         artifact_text = handle.read()
 
+    # **Who judges is resolved before either branch, because both branches need holding to it.**
+    # It used to be resolved inside the dispatch branch alone, which left the on-disk branch with no
+    # opinion at all: a `judgment.json` a host session had left in a directory was merged as-is, so
+    # an autonomous run resuming over it took a patch claiming `author: host` and applied the host's
+    # latitude — the same hole the dispatched path had closed, reached by the other door.
+    #
+    # **Autonomy is a fact about the run, not about this process's stdin.** `run_panel.py` reads the
+    # tty because it is the process the operator launched; a `reconcile.py` typed into a pipeline, a
+    # CI step or an editor has a stdin that says nothing about whether a human is waiting, and
+    # resolving `default` from it would make a paid judgment call on no evidence. So this side reads
+    # what the run recorded, and `--autonomous` is the explicit override.
+    try:
+        run_manifest = core.load_manifest(run_dir)
+    except core.ReconcileError:
+        run_manifest = {}
+    autonomous = args.autonomous or bool(run_manifest.get("autonomous"))
+    try:
+        reconciler = judge_lib.resolve_reconciler(
+            args.reconciler, run_manifest.get("reconciler"), autonomous)
+    except judge_lib.JudgeError as failure:
+        sys.stderr.write("{0}\n".format(failure))
+        return EXIT_USAGE
+
     if patch_path is None:
         try:
             _document, _errors, context = core.reconcile(run_dir, None, artifact_text)
@@ -354,14 +675,52 @@ def main(argv=None):
         for drop in context["anchor_drops"]:
             print("  dropped {0} {1} from {2}: {3}".format(
                 drop["reviewer_id"], drop["finding_id"], drop.get("cluster") or "?", drop["reason"]))
-        sys.stderr.write(
-            "a judgment patch is required before anything can be written: answer every cluster in "
-            "{0} against schemas/judgment-patch.schema.json, save it as {1}, and re-run with --judgment.\n".format(
-                request_path, os.path.join(run_dir, "judgment.json")))
-        return 3
+
+        manifest = context["manifest"]
+        if reconciler != judge_lib.SYNTHESIS_AUTHOR:
+            sys.stderr.write(
+                "a judgment patch is required before anything can be written: answer every cluster in "
+                "{0} against schemas/judgment-patch.schema.json, save it as {1}, and re-run with --judgment.\n".format(
+                    request_path, os.path.join(run_dir, "judgment.json")))
+            return 3
+
+        if not context["seats_reporting"]:
+            sys.stderr.write("zero seats reported: there is nothing for the judge to judge.\n")
+            return EXIT_TERMINAL
+
+        try:
+            patch, _record = dispatch_synthesis(paths, run_dir, manifest, context, artifact_text, args)
+        except HardPatchError as failure:
+            sys.stderr.write("the judgment patch was refused: {0}\n".format(failure))
+            return EXIT_PATCH
+        except AuthFailure as failure:
+            sys.stderr.write("provider auth failure on the judgment call: {0}\n".format(failure))
+            sys.stderr.write("  auth failures are not transient; no further paid calls.\n")
+            return EXIT_TERMINAL
+        except dispatch.DispatchFailed as failure:
+            sys.stderr.write("the judgment call failed: {0}\n".format(failure.cause))
+            return EXIT_PATCH
+        except (paths_lib.PathError, dispatch.CompositionError, judge_lib.JudgeError) as failure:
+            sys.stderr.write("the judgment call could not be composed: {0}\n".format(failure))
+            return EXIT_USAGE
+
+        if patch is None:
+            sys.stderr.write(
+                "the `synthesis` persona did not produce a valid judgment patch after one repair "
+                "re-ask; nothing was written.\n")
+            return EXIT_PATCH
+
+        patch_path = os.path.join(run_dir, "judgment.json")
+        report_lib.write_json(patch_path, patch)
+        print("wrote {0}".format(patch_path))
 
     with open(patch_path, "r", encoding="utf-8") as handle:
         patch = json.load(handle)
+
+    author_error = _author_holds_for_this_run(patch, patch_path, run_dir, reconciler, args)
+    if author_error:
+        sys.stderr.write("{0}\n".format(author_error))
+        return EXIT_PATCH
 
     shape_errors = validate_patch_document(patch, paths)
     if shape_errors:

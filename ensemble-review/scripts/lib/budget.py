@@ -107,39 +107,96 @@ def project_seat(reviewer_id, model, entry, prompt_tokens):
     })
 
 
-def project_synthesis(seats, registry, prompt_tokens):
-    """The judgment call, priced on the dearest seated model — the one most likely to run it.
+def project_synthesis(seats, registry, prompt_tokens, model=None, seat=None):
+    """The judgment call, priced on **the model that will actually make it**.
 
-    Returns (usd, detail). `usd` is None when no seated model has a price, which is the same
+    `model` is the judge's own model and `seat` is the record that chose it — family, tier and the
+    level of each order that decided them — both resolved by the caller through the same
+    `judge_lib.synthesis_seat()` the judge stage uses. Pricing this on the dearest *seated* model
+    used to under-read the call several times over, because the judge does not run on a seated
+    model unless the seating happens to land there.
+
+    The seat is carried into the detail rather than described here, because none of it is fixed:
+    the judge's tier follows the run's, its family prefers one the panel seated, and either can be
+    overridden by a template block or pinned by `--synthesis-model`. A rendering that asserted any
+    particular one of those would be wrong on most runs.
+
+    `model=None` falls back to the dearest seated model, which is a guess and is labelled one. It is
+    reachable only from a caller that did not resolve the seat.
+
+    Returns (usd, detail). `usd` is None when the model has no price, which is the same
     "unknown, not zero" rule the seats follow.
     """
-    priced = []
-    for seat in seats:
-        entry = registry.get(seat["model"]) or {}
-        output_price = _f(entry.get("output_price_per_token"))
-        if output_price is not None:
-            priced.append((output_price, seat["model"], entry))
-    if not priced:
-        return None, {"model": None, "note": "no seated model carries a price"}
-    _price, model, entry = max(priced)
+    seat = seat or {}
+    guessed = False
+    entry = registry.get(model) if model else None
+    if entry is None:
+        guessed = True
+        priced = []
+        # Not `seat`: that name is the judge's own seat record, and rebinding it here would make the
+        # detail below describe whichever reviewer happened to be last in the list.
+        for reviewer in seats:
+            candidate = registry.get(reviewer["model"]) or {}
+            output_price = _f(candidate.get("output_price_per_token"))
+            if output_price is not None:
+                priced.append((output_price, reviewer["model"], candidate))
+        if not priced:
+            return None, {
+                "model": model,
+                "note": ("the judgment call's model carries no price" if model
+                         else "no seated model carries a price"),
+            }
+        _price, model, entry = max(priced)
+
     input_price = _f(entry.get("input_price_per_token")) or 0.0
     output_price = _f(entry.get("output_price_per_token"))
+    if output_price is None:
+        return None, {"model": model, "note": "the judgment call's model carries no output price"}
     tokens = int(prompt_tokens * SYNTHESIS_PROMPT_MULTIPLIER)
     usd = input_price * tokens + output_price * SYNTHESIS_OUTPUT_PRIOR
     return _round(usd), {
         "model": model,
         "prompt_tokens": tokens,
         "prior_tokens": SYNTHESIS_OUTPUT_PRIOR,
-        "note": "priced on the dearest seated model; the synthesis seat is not resolved until the judge stage",
+        "resolved": not guessed,
+        "family": seat.get("family"),
+        "tier": seat.get("tier"),
+        "tier_source": seat.get("tier_source"),
+        "family_source": seat.get("family_source"),
+        "note": ("the judgment call's own seat, resolved as the judge stage resolves it" if not guessed
+                 else "GUESS: the judge's seat was not resolved, so this is the dearest seated model"),
     }
 
 
-def project(seats, registry, budget_usd, now=None, with_synthesis=True):
+def describe_synthesis_seat(detail):
+    """The one-line reading of where the judgment call sits, for the printed projection.
+
+    Every part of it moves per run — the tier follows `--tier`, the family prefers one the panel
+    seated, a template block or `--synthesis-model` overrides either — so the line states what was
+    actually chosen and which level chose it, rather than asserting a rule. It used to read "at the
+    config's default_tier", which stopped being true the moment the judge's tier began following
+    the run's and was then false on every non-default tier.
+    """
+    if not detail.get("resolved"):
+        return detail.get("note", "")
+    bits = []
+    if detail.get("tier"):
+        bits.append("tier {0}{1}".format(
+            detail["tier"], " ({0})".format(detail["tier_source"]) if detail.get("tier_source") else ""))
+    if detail.get("family"):
+        bits.append("family {0}{1}".format(
+            detail["family"], " ({0})".format(detail["family_source"]) if detail.get("family_source") else ""))
+    return ", ".join(bits) if bits else detail.get("note", "")
+
+
+def project(seats, registry, budget_usd, now=None, with_synthesis=True, synthesis_model=None,
+            synthesis_seat=None):
     """The whole run's projection. `seats` are dicts with reviewer_id, model and prompt_tokens.
 
     `with_synthesis` is False for a run whose judgment patch comes from the host in-session: that run
     makes no synthesis call, so charging one against its budget gate is charging for a call that will
-    not happen.
+    not happen. `synthesis_model` and `synthesis_seat` are the judge's own resolved model and the record that
+    chose it — see `project_synthesis`.
     """
     rows = []
     for seat in seats:
@@ -152,7 +209,8 @@ def project(seats, registry, budget_usd, now=None, with_synthesis=True):
     prompt_tokens = max([seat["prompt_tokens"] for seat in seats] or [0])
     if with_synthesis:
         synthesis_usd, synthesis_detail = project_synthesis(
-            [s for s in seats if s["reviewer_id"] in {r["reviewer_id"] for r in dispatchable}], registry, prompt_tokens)
+            [s for s in seats if s["reviewer_id"] in {r["reviewer_id"] for r in dispatchable}],
+            registry, prompt_tokens, model=synthesis_model, seat=synthesis_seat)
     else:
         synthesis_usd, synthesis_detail = None, {
             "model": None,
@@ -206,9 +264,12 @@ def render(projection):
         "repair allowance ({0:.0%} of a seat)".format(REPAIR_ALLOWANCE_FRACTION),
         projection["repair_allowance_usd"]))
     if projection["synthesis_allowance_usd"] is not None:
-        lines.append("    {0:<36} ${1:>8.4f}   priced on the dearest seated model".format(
-            "synthesis call on {0}".format(projection["synthesis"].get("model") or "?")[:36],
-            projection["synthesis_allowance_usd"]))
+        # Not truncated to the column width: which model runs the judge is the fact this line
+        # exists to carry, and a model id cut mid-slug tells the operator nothing they can act on.
+        lines.append("    {0:<36} ${1:>8.4f}   {2}".format(
+            "synthesis call on {0}".format(projection["synthesis"].get("model") or "?"),
+            projection["synthesis_allowance_usd"],
+            describe_synthesis_seat(projection["synthesis"])))
     else:
         lines.append("    {0:<36} {1:>9}   {2}".format(
             "synthesis call", "not charged", projection["synthesis"].get("note", "")))

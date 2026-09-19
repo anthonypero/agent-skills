@@ -223,7 +223,7 @@ class ReadOnlyPackageTest(unittest.TestCase):
              "--artifact", self.workspace.artifact,
              "--out", run_dir,
              "--tier", "standard",
-             "--autonomous"],
+             "--autonomous", "--reconcile", "off"],
             capture_output=True, text=True, env=self.workspace.env(),
             cwd=self.workspace.root)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -257,7 +257,7 @@ class ReadOnlyPackageTest(unittest.TestCase):
              "--artifact", self.workspace.artifact,
              "--out", run_dir,
              "--tier", "standard",
-             "--autonomous"],
+             "--autonomous", "--reconcile", "off"],
             capture_output=True, text=True, env=self.workspace.env(), cwd=self.workspace.root)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

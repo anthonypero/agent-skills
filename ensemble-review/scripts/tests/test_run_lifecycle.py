@@ -282,6 +282,9 @@ class PanelTestCase(unittest.TestCase):
             "--models", self.workspace.registry,
             "--tier", "standard",
             "--autonomous",
+            # The Judge stage is pinned off: these tests are about dispatch, and an autonomous run
+            # would otherwise finish the pipeline by asking the fake backend for a judgment patch.
+            "--reconcile", "off",
         ] + list(extra or [])
         out_stream, err_stream = io.StringIO(), io.StringIO()
         saved_out, saved_err = sys.stdout, sys.stderr

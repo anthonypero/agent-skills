@@ -8,11 +8,19 @@ resolved through the real cascade against the real package, so what is tested is
 Three claims:
 
 - **Every persona is the same shape.** Framework §6 frontmatter with `model: frontier`, `tools: []`
-  and the finding schema in `context`; the four body sections; and the three sentences the spec
-  requires in every lens body — the severity calibration, the `judgment-call` rule, and the
-  verbatim-quote rule. They are asserted **byte-identical across the nine personas**, because a
+  and its own `context` list; the four body sections; and, in every **lens** body, the three
+  sentences the spec requires — the severity calibration, the `judgment-call` rule, and the
+  verbatim-quote rule. Those three are asserted **byte-identical across the nine lenses**, because a
   reviewer calibrated differently from its neighbours makes the panel's agreement counts mean
   something different per seat, which is the one thing this skill cannot tolerate.
+
+  **`synthesis` is a persona and is not a lens**, and the shape assertions split there. It reads
+  reports rather than the artifact-under-a-lens, so it carries `reconciliation.md` in `context` as
+  well as the finding schema, it is never seated on a panel, and the verbatim-quote rule is not its
+  rule to carry. What it must carry instead is the asymmetry that makes an unattended judge safe:
+  the severity calibration, the all-`judgment-call` flag rule, and the `rulings` prohibition. The
+  nine-lens assertion is deliberately **not** loosened to let it in: `agents/` holds exactly the
+  nine lenses plus exactly this one non-lens persona.
 - **Every panel template is the same shape**, and names only lenses that exist. A template naming a
   missing lens fails at Resolve with a `PathError`, after the run directory is claimed and long
   after the operator has stopped watching.
@@ -49,11 +57,27 @@ CALIBRATION = "**Severity is rated by consequence, not by how much of the artifa
 JUDGMENT_RULE = "**`judgment-call` means a design fork, not a thin spot.**"
 VERBATIM_RULE = "**Quote verbatim.**"
 
-# Every lens the catalog table names. `synthesis` is not a lens and is not written yet.
+# The two sentences the `synthesis` body must carry in its rubric. The persona is the one author
+# `reconcile.py` enforces the judgment-call rule against and the one author forbidden `rulings`, so
+# a body that does not say both is a body whose instructions and whose validator disagree.
+SYNTHESIS_FLAG_RULE = "**A cluster whose findings are all `judgment-call` is always `flag-for-human`.**"
+SYNTHESIS_RULINGS_RULE = "**You may not emit `rulings`.**"
+
+# Every lens the catalog table names.
 EXPECTED_LENSES = (
     "fidelity", "buildability", "consistency", "adversarial", "completeness",
     "source-credibility", "security", "alternatives", "second-order",
 )
+
+# The one persona in `agents/` that is not a lens: the judgment supplier for autonomous runs. It is
+# never seated on a panel, so it is not in `EXPECTED_LENSES` and no template may name it as a lens.
+NON_LENS_PERSONAS = ("synthesis",)
+
+# Per persona, the `context` its frontmatter must name, in order. A lens is shown the output
+# contract; `synthesis` is shown the algorithm it is supplying half of, and then the same contract,
+# because it is arbitrating findings written against it.
+LENS_CONTEXT = ["finding-schema.md"]
+SYNTHESIS_CONTEXT = ["reconciliation.md", "finding-schema.md"]
 
 # The shipped templates that actually seat a panel, and the one that ships deferred.
 LIVE_PANELS = ("spec-review", "research-report", "design-decision")
@@ -63,7 +87,13 @@ TIERS = ("frontier", "standard", "fast")
 
 
 def persona_files():
+    """Every persona file in `agents/` — the nine lenses and the one non-lens."""
     return sorted(name for name in os.listdir(AGENTS_DIR) if name.endswith(".md"))
+
+
+def lens_files():
+    """Just the lenses. The shape rules that are about *reviewing* apply to exactly these."""
+    return sorted(name for name in persona_files() if name.startswith("lens-"))
 
 
 def panel_files():
@@ -96,7 +126,9 @@ class PersonaFileTest(unittest.TestCase):
                                  "framework §6 wants a value that names a key in the tiers map, and `frontier` is one")
                 self.assertEqual(frontmatter.get("tools"), [],
                                  "personas are single-turn and tool-less; the artifact is inlined for them")
-                self.assertEqual(frontmatter.get("context"), ["finding-schema.md"])
+                self.assertEqual(frontmatter.get("context"),
+                                 LENS_CONTEXT if name.startswith("lens-") else SYNTHESIS_CONTEXT,
+                                 "a persona is shown exactly the references its job needs")
                 self.assertEqual(frontmatter.get("output_type"), "json_report")
                 self.assertTrue(body.strip(), "no body after the frontmatter")
 
@@ -114,9 +146,9 @@ class PersonaFileTest(unittest.TestCase):
                     positions.append(text.index(heading))
                 self.assertEqual(positions, sorted(positions), "the four sections are out of order")
 
-    def test_every_persona_carries_the_three_required_sentences(self):
+    def test_every_lens_carries_the_three_required_sentences(self):
         """Calibration and the `judgment-call` rule in the rubric; the verbatim rule in the body."""
-        for name in persona_files():
+        for name in lens_files():
             with self.subTest(persona=name):
                 _frontmatter, body = report_lib.parse_agent_file(os.path.join(AGENTS_DIR, name))
                 rubric = body.split("\n# Rubric\n", 1)[1].split("\n# Output\n", 1)[0]
@@ -124,11 +156,11 @@ class PersonaFileTest(unittest.TestCase):
                 self.assertIn(JUDGMENT_RULE, rubric, "the sharpened `judgment-call` rule belongs in the rubric")
                 self.assertIn(VERBATIM_RULE, body)
 
-    def test_the_three_sentences_are_byte_identical_across_the_catalog(self):
+    def test_the_three_sentences_are_byte_identical_across_the_lenses(self):
         """A lens calibrated differently from its neighbours makes the agreement counts mean two things."""
         for marker in (CALIBRATION, JUDGMENT_RULE, VERBATIM_RULE):
             paragraphs = {}
-            for name in persona_files():
+            for name in lens_files():
                 _frontmatter, body = report_lib.parse_agent_file(os.path.join(AGENTS_DIR, name))
                 start = body.index(marker)
                 paragraphs.setdefault(body[start:body.index("\n", start)], []).append(name)
@@ -137,8 +169,53 @@ class PersonaFileTest(unittest.TestCase):
                                  marker, {text[:60]: names for text, names in paragraphs.items()}))
 
     def test_the_catalog_holds_exactly_the_lenses_the_spec_names(self):
-        self.assertEqual(sorted(persona_files()),
+        """Still exactly nine lenses. `synthesis` does not widen this; it is checked separately."""
+        self.assertEqual(lens_files(),
                          sorted("lens-{0}.md".format(lens) for lens in EXPECTED_LENSES))
+
+    def test_the_agents_directory_holds_the_lenses_and_exactly_one_non_lens_persona(self):
+        self.assertEqual(
+            persona_files(),
+            sorted(["lens-{0}.md".format(lens) for lens in EXPECTED_LENSES]
+                   + ["{0}.md".format(name) for name in NON_LENS_PERSONAS]),
+            "a file in agents/ that is neither a catalog lens nor a named non-lens persona")
+
+    def test_no_shipped_template_seats_the_non_lens_persona_as_a_lens(self):
+        """`synthesis` supplies the judgment; a panel that seated it would review with the judge."""
+        for name in panel_files():
+            panel = read_panel(name)
+            lenses = [seat.get("lens") for seat in (panel.get("seats") or []) + (panel.get("optional_seats") or [])]
+            for non_lens in NON_LENS_PERSONAS:
+                with self.subTest(panel=name, persona=non_lens):
+                    self.assertNotIn(non_lens, lenses)
+
+
+class SynthesisPersonaTest(unittest.TestCase):
+    """The one non-lens persona, whose body is the other half of a rule the script enforces."""
+
+    def setUp(self):
+        self.frontmatter, self.body = report_lib.parse_agent_file(os.path.join(AGENTS_DIR, "synthesis.md"))
+        self.rubric = self.body.split("\n# Rubric\n", 1)[1].split("\n# Output\n", 1)[0]
+
+    def test_it_is_shown_the_algorithm_it_supplies_half_of(self):
+        self.assertEqual(self.frontmatter.get("context"), SYNTHESIS_CONTEXT)
+        for name in SYNTHESIS_CONTEXT:
+            with self.subTest(reference=name):
+                self.assertTrue(os.path.isfile(os.path.join(SKILL_DIR, "references", name)),
+                                "the persona names a reference the package does not ship")
+
+    def test_it_carries_the_severity_calibration_the_lenses_carry(self):
+        """It arbitrates their severities, so it is calibrated the same way they are."""
+        self.assertIn(CALIBRATION, self.rubric)
+
+    def test_it_carries_the_two_rules_reconcile_py_enforces_against_it(self):
+        """`reconcile_core` rejects both; the body is where the persona is told before it is rejected."""
+        self.assertIn(SYNTHESIS_FLAG_RULE, self.rubric)
+        self.assertIn(SYNTHESIS_RULINGS_RULE, self.rubric)
+
+    def test_it_never_claims_to_write_the_reconciliation(self):
+        """One writer of both files, in every mode — the defect the host/persona split exists to close."""
+        self.assertIn("only writer of `reconciliation.json`", self.body)
 
     def test_every_persona_resolves_through_the_cascade(self):
         paths = paths_lib.Paths(workspace=SKILL_DIR)

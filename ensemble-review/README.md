@@ -20,8 +20,9 @@ The reason to bother is on disk in this repo. `.agents/subprojects/annotate/pm/r
 
 ```text
 skills/ensemble-review/
-├── SKILL.md                        # the runbook: panel → dispatch → harness seats → reconcile
+├── SKILL.md                        # the runbook: panel → dispatch → judge → reconcile → apply
 ├── README.md
+├── install.sh                      # python 3.10+, the key through dispatch.py's own chain, the registry seed
 ├── agents/                         # the personas — one file per lens, no model baked in
 │   ├── lens-fidelity.md            # the four with a measured track record
 │   ├── lens-buildability.md
@@ -31,9 +32,14 @@ skills/ensemble-review/
 │   ├── lens-source-credibility.md
 │   ├── lens-security.md
 │   ├── lens-alternatives.md
-│   └── lens-second-order.md
+│   ├── lens-second-order.md
+│   └── synthesis.md                # the one non-lens persona: the judgment supplier for unattended runs
 ├── references/
-│   └── finding-schema.md           # how to fill a finding; loaded into every persona prompt
+│   ├── panel-design.md             # is this worth a panel; how to choose seats; what it costs; where the bytes go
+│   ├── finding-schema.md           # how to fill a finding; loaded into every lens prompt
+│   ├── dispatch.md                 # both legs, the blinding rules, the three retry paths, the digest cap
+│   ├── reconciliation.md           # the seven steps as operator instructions; also synthesis.md's context
+│   └── auto-apply.md               # the five-condition gate, the threat model, the audit trail
 ├── schemas/
 │   ├── review-report.schema.json   # the report envelope and the finding, draft 2020-12
 │   ├── judgment-patch.schema.json  # the judgment a mind supplies to the reconciler
@@ -47,15 +53,18 @@ skills/ensemble-review/
 │       ├── design-decision.json    # adversarial, alternatives, second-order — needs no references
 │       └── code-review.json        # a named stub: deferred, routes to /code-review
 └── scripts/
-    ├── dispatch.py                 # one persona × one family → a validated report on disk
-    ├── run_panel.py                # claim → materialize → resolve → project → dispatch → manifest
+    ├── dispatch.py                 # one persona × one family → a validated report on disk; the shared call machinery
+    ├── run_panel.py                # claim → materialize → resolve → project → dispatch → manifest → judge → apply
     ├── render_harness_report.py    # the same artifacts for the harness leg
-    ├── reconcile.py                # the only writer of both reconciliation files
+    ├── reconcile.py                # the only writer of both reconciliation files; the Judge stage
+    ├── apply_fixes.py              # the five-condition gate, all-or-nothing, and applied.md
     ├── refresh_models.py           # pull the OpenRouter catalogue, diff the registry, report what moved
     ├── backends/__init__.py        # load_driver: a package module, or a driver at a file path
+    ├── backends/base.py            # the connector contract: what a driver exports and what it returns
     ├── backends/openai_compat.py   # the only shipped driver: POST {base_url}/chat/completions
     ├── lib/paths.py                # the two-root cascade: workspace first, then the read-only package
     ├── lib/seating.py              # tier resolution order, family constraints, re-seating
+    ├── lib/judge.py                # who supplies the judgment, where it is seated, what it is shown
     ├── lib/report.py               # agent-file parsing, validation, rendering, digests
     ├── lib/reconcile_core.py       # match keys, tiers, judgment-patch merge, verdict
     ├── lib/registry.py             # the model registry: caps, prices, priors, the missing-model error
@@ -64,7 +73,7 @@ skills/ensemble-review/
     ├── lib/schema.py               # the JSON Schema subset both contracts are checked against
     └── tests/                      # stdlib unittest, no network, no paid call
         ├── test_replay.py          # the deterministic replay of the 2026-09-18 panel
-        ├── test_dispatch_retry.py  # the cap, the length retry, the registry gate, backoff
+        ├── test_dispatch_retry.py  # the cap, the length retry, the registry gate, backoff, the driver contract
         ├── test_run_lifecycle.py   # claim, materialize, projection, budget gate, CAS, resume
         ├── test_paths.py           # the cascade, the config merge, a panel with the package read-only
         ├── test_seating.py         # the tier order, the constraints, both re-seat paths
@@ -72,6 +81,9 @@ skills/ensemble-review/
         ├── test_panel_selection.py # inference, the references rule, the deferred stub
         ├── test_min_families.py    # the family target, counted at both ends, never a gate
         ├── test_reconcile_revision.py  # the artifact-revision check
+        ├── test_synthesis.py       # the Judge stage: the scripted patch, the repair, the two refusals
+        ├── test_apply_fixes.py     # the five conditions, all-or-nothing, the audit log
+        ├── test_install.py         # install.sh in a subprocess, PATH and env controlled, no network
         ├── harness.py              # a temp workspace: artifact, config, registry, panel, overrides
         └── fake_backend.py         # a scripted connector, loaded by file path like any driver
 ```
@@ -241,6 +253,54 @@ Order is load-bearing and is fixed in `lib/reconcile_core.py`: provisional clust
 
 Every cluster records the `match_key` that joined it and a `judgment` flag that is true exactly when the join was semantic, so a reader can see which clusters rest on a mind. `scripts/tests/test_replay.py` is the control: it feeds the four reports of the 2026-09-18 panel and a `judgment.json` transcribed from that run's hand reconciliation through the core and checks membership, tiers, labels, spreads and the verdict against the hand document. No models are called and nothing is written.
 
+## The Judge stage, and the one asymmetry in it
+
+Somebody has to supply that patch. Interactively it is the host session. Unattended it is the `synthesis` persona, and `reconcile.py` dispatches it through **`dispatch.py`'s own machinery** rather than through a second copy of it: `prepare_call()` resolves the model, the registry gate, the effort and the key, and `attempt_loop()` runs the same three retry paths a review seat gets. What differs is the validator — a judgment patch, not a report — and that is exactly the callback `attempt_loop` takes. Two implementations of one call path was the defect the single-writer rule already closed one level up, and it is not reintroduced here.
+
+**Who judges is decided once.** `reconciler` is `host`, `synthesis` or `default`; `default` means host when a human is attached and `synthesis` when nobody is. `run_panel.py` resolves it and **records it in the manifest**, so `reconcile.py` reads a decision rather than asking its own stdin. That matters: a reconcile typed into a pipeline, a CI step or an editor has a stdin that says nothing about whether a human is waiting, and resolving `default` from it would make a paid call on no evidence. `--autonomous` is the explicit override on that side.
+
+**Where the call is seated — it follows the run.** The **tier** resolves by the same order the reviewers' does, first match wins: a template's `synthesis.tier`, then `--tier`, then the panel's `tier`, then the config's `default_tier`, then the `synthesis` persona's own frontmatter. The template's block outranks `--tier` on purpose — an explicit `synthesis.tier` is a choice about the judgment specifically, where `--tier` was aimed at the reviewers. The **family** is the template's `synthesis.family`, else the first non-`claude` family **among the ones the panel actually seated**, in the config's declaration order, else the first non-`claude` family in the config map. `claude` is excluded from both fallbacks, the same exclusion every re-seat draws on and for the same reason; a tier offering only `claude` refuses rather than seating it. `--synthesis-model` pins a concrete id.
+
+Both preferences were earned rather than assumed. Seating the judge at a **fixed** `default_tier` meant a `--tier fast` panel paid $1.70 for a frontier judgment against $1.22 for all four reviewers — the run got cheaper and the judgment did not. Reaching for the first non-`claude` family in the whole **config** meant the judge could land on a family nothing else in the run touched and the operator had never priced; preferring a seated family keeps it on a model the run has already chosen. Which level decided each is recorded: `judge_seat` in the manifest at Resolve, and `judge.tier_source` / `judge.family_source` on the call itself.
+
+**What it is shown, and why all of it.** Every validated report **in full**, the provisional clusters with their `P-n` ids, every reference, and the artifact at its pinned revision. Steps 4 through 7 arbitrate severity, adjudicate false positives and check that quoted text is real; none of that is possible against the reports alone.
+
+**The asymmetry.** An interactive host may dispose a `judgment-call` cluster however it likes and say why, because it has an owner to answer to. The persona may not: an all-`judgment-call` cluster disposed anything but `flag-for-human` in a patch authored by `synthesis` is a patch error, and a `rulings` array from `synthesis` is a **hard error** that earns no re-ask. The persona's own rubric carries both sentences, and `test_catalog.py` asserts it does — a body whose instructions disagree with the validator that judges it is a repair re-ask waiting to happen.
+
+**The patch is validated before it is written.** Schema, then references and enums, then a **full trial merge** through `reconcile_core` — which is the only thing that can catch a label on a cluster the patch's own splits dissolved. Only then does `judgment.json` reach disk, so an invalid patch never does. One repair re-ask names the failing entries; a second failure is exit 3 with nothing written.
+
+**The allowance's prompt rule is accurate; its model was not.** `lib/budget.py` prices the judgment call at 1.5x one seat's composed prompt plus a 16,000-token output prior. Measured with the real code path against the frozen `v2-spec` run — four reports, six references — the judge's actual prompt is **97,641 tokens against roughly 95,000 projected, about 1.03x**. It holds because a seat's prompt already carries the artifact and every reference, and the judge adds the reports on that same base rather than on nothing. The worst case is a run with **no references**, where the shared base is small and the reports dominate: 58,379 against 35,722, **1.63x** — `design-decision`'s shape, and the row to watch rather than the four-seat default.
+
+**The model was the defect, and it is fixed.** The allowance used to be priced on the dearest _seated_ model, which is not what runs the judge. `run_panel.py` now resolves the judge's seat with the same `judge_lib.synthesis_seat()` the judge stage uses, records it as `judge_seat`, honours `--synthesis-model`, prices **that** model, and **fails the registry gate if it cannot price it** — a paid call left out of the projection is the same hole as an unpriced seat. `reconcile.py` reads that record back — **the model included, passed to `prepare_call` as a pin** rather than resolved through the tier map a second time — so a config cell edited between the panel and the judgment cannot redirect the paid call to a model the projection never weighed. The one thing that overrides it is an explicit `--synthesis-model` on the reconcile invocation itself, which is an operator overriding the run's own choice on purpose and is recorded as `family_source: "--synthesis-model"`. A manifest with no `judge_seat` — a run made before the record existed — falls back to resolving the seat from the same inputs Resolve had. With the seat now following the run's tier, the autonomous column in `references/panel-design.md` falls with the tier: the judgment call is $1.70 at `frontier`, $0.34 at `standard`, $0.04 at `fast`.
+
+**The call is accounted like a seat and is deliberately not one.** It lands in the manifest as `judge`, with its model, family, tier, effort, cap, attempts, usage, reasoning tokens and cost, and its cost goes into `cost_usd_total` — including when it failed or was refused, because a call that spent money and reads as free is the under-accounting this skill has now closed three times. It is **not** in `manifest.seats`: that array is the `unanimous` denominator and every entry in it with no report file is reported as a missing seat, so a judge seated there would make every autonomous run reconcile as under-seated by exactly one.
+
+**One command, unattended.** `run_panel.py --autonomous` runs the Judge and Reconcile stages itself at the end, so the run directory holds all three products when it exits; `--reconcile off` stops after Collect and prints the command. The reconciler's exit code is carried out of the panel, so a run whose reconciliation was never written does not exit 0.
+
+**Zero reporting seats is exit 2 at the judge stage too.** `run_panel.py` already halts there — a reconciliation over zero reports is a lie — and the judge stage halts for the same reason one step later, before spending a call to discover there is nothing to judge. The spec's exit table names the condition for the panel and is silent about the reconciler; this is the consistent reading.
+
+## Auto-apply
+
+`apply_fixes.py` is the only thing here that modifies the document under review, it is off by default, and it reads `reconciliation.json` and `manifest.json` and nothing else — never a report, never a patch, never re-derived prose. Everything the gate turns on was decided upstream by a mind and recorded in the product.
+
+The five conditions, all of which must hold: `disposition` is `fix-now`; `contradicted_by` is empty and `edit_conflict` is false; a `canonical_edit` is present and was explicitly accepted in the patch, with an `old_text` occurring exactly once; the tier is `consensus` or `unanimous` with `n_families >= 2` and never a same-family tier; and the artifact's current content hash equals the manifest's `artifact_revision`.
+
+**Condition 4 is checked in both of its wordings** — the enum half and the evidence half — on every cluster, because the spec states it twice on purpose so the gate cannot silently change meaning if the tier table does. A tier neither wording knows is refused rather than guessed at.
+
+**The authorship assertion is the defence the gate is not.** The artifact is inlined verbatim into every seat's user message, so a hostile document can ask its own reviewers to return a consensus-shaped replacement whose `new_text` is the attacker's paragraph, and if two families comply the five conditions see a well-formed cluster with nothing wrong with any of them. `--i-authored-this` is the operator saying, in the one place it can be checked, that this is their own document; `run_panel.py --auto-apply on` refuses as a composition error without it.
+
+**All-or-nothing, and the distinction that makes it workable.** Every candidate anchor is resolved first, no two edits may overlap, and the file is written once, atomically, with its mode carried across — `os.replace` swaps the directory entry, so without that the document would quietly take the temp file's private mode. A failure at any _anchor_ aborts the whole set. Failing the _gate_ is not failing an anchor: such a cluster is reported as unapplied with its reason and the candidates that passed are still applied. A single-family run cannot satisfy condition 4 at all, so auto-apply there is a no-op that says so.
+
+`applied.md` is written whether or not anything was applied, because a reader has to be able to tell "the gate found nothing to apply" from "the gate found four things and refused all of them". Per applied edit: the cluster, its tier and families, every contributing reviewer, the source seat whose wording was used, who accepted it, and the before/after diff. The one case that writes no log is the single-family no-op, where the gate never weighed anything.
+
+**Three deltas here are this build's rather than the spec's, and all three are user-facing.** `--dry-run` runs **without** the authorship assertion — the spec states that refusal unconditionally — because a reader deciding whether to assert authorship should be able to see what they would be asserting it for, and a dry run has no write path at all: not the artifact, not `applied.md`. `run_panel.py --auto-apply on` adds a **sixth condition**, that the panel exited 0, so a run that exited 3 for one missing seat never writes back unattended; `apply_fixes.py` run by hand still will. And `applied.md` is written whenever the gate ran, where the spec's output layout says "present only when auto-apply ran".
+
+## First-run setup
+
+`install.sh` checks python3 3.10 or newer, checks that the OpenRouter key resolves **through `dispatch.py`'s own chain** rather than through a copy of it — vault first, then the environment, printing which path answered and never the value — and then calls `refresh_models.py` to seed the registry. Idempotent, non-zero with a clear message on any failure, and no third-party dependency anywhere in it.
+
+`--workspace <project>` seeds that project's registry instead of the package's; `--dry-run` shows the diff without writing; `--check-only` skips the catalogue entirely. **All three flags are this build's** — the Shape tree names the script and its three jobs and no interface — and `--check-only` in particular exists because the two checks that can fail on a fresh machine are worth being able to run without a network. `$ENSEMBLE_REVIEW_CATALOGUE_URL` overrides the endpoint, which is how `test_install.py` exercises the whole script in a subprocess against a `file://` fixture with **no network call**: the proof is in the registry afterwards, which carries the fixture's prices, and a `PATH` stub proves the version check fires before anything else.
+
 ## Smoke test
 
 Run on 2026-09-18 against a 40-line sample spec with two planted contradictions — a digest cap stated as 2000 characters in one section and enforced at 2500 in another, and a "three tiers" sentence followed by a four-item list. One persona (`lens-consistency`), one call per family, `fast` tier, `--max-tokens 6000`.
@@ -267,18 +327,17 @@ Six of seven rated the cap conflict `blocker`; `glm` rated it `should-fix`. A on
 
 Total recorded spend across every smoke call, including the discarded first round run before the final model picks landed: roughly **$1.10**. The `.smoke/` directory was deleted afterwards.
 
-## What v0 does not have
+## What the build does not have
 
-This is a deliberate subset of `design/v1-spec.md`, built to be usable today and fed back through itself. Absent, not stubbed:
+Absent, not stubbed:
 
-- **`apply_fixes.py` and the auto-apply gate** — nothing is written back to the artifact. `change_kind` and `literal_edit` are collected, and `reconciliation.json` carries a `canonical_edit` and an `edit_conflict` flag per cluster so the gate can be built later, but no code reads them today.
-- **`install.sh`** — no installer. The key check is `dispatch.py --help`.
-- **The `synthesis` persona and autonomous mode** — `reconcile.py` accepts a judgment patch from either author, but nothing here produces one unattended: no reconciler persona, no unattended run.
 - **Mid-flight budget metering** — the projection is a dispatch gate only. Nothing meters spend as seats return, so a panel that overruns its projection runs to completion.
+- **A budget gate on the judgment call itself.** `run_panel.py` charges for it in the pre-flight when the run will make one, but `reconcile.py --reconciler synthesis` invoked on its own makes a paid call with nothing in front of it.
+- **Per-seat `timeout_s`** — a specified default of 900 seconds and a specified behaviour, and no implementation. A hung provider hangs that seat until the process is killed.
 - **`mode: identical`** — the knob does not exist, so it is not refused by name.
 - **`verify_web`** — every live template declares it `false` and nothing reads it, and the composition error the spec requires for `verify_web: true` on a tool-less seat is not implemented, so a workspace panel setting it true runs unrefused.
 
-Built since the first cut of this list: the completion cap and its length retry, the per-model cap floor, the model registry and `refresh_models.py`, the cost and token pre-flight with its budget gate and `budget-refusal.json`, content-hash revisions with a read-only `inputs/` directory, resume with a compare-and-set claim, the two-root workspace cascade, the tier resolution order, the `non-claude` and `distinct` constraint resolvers, re-seating on a missing cell or an unreachable model, the five remaining lenses, the three remaining panel templates, panel inference with its references rule, and `min_families` counted at both ends.
+Built since the first cut of this list: the completion cap and its length retry, the per-model cap floor, the model registry and `refresh_models.py`, the cost and token pre-flight with its budget gate and `budget-refusal.json`, content-hash revisions with a read-only `inputs/` directory, resume with a compare-and-set claim, the two-root workspace cascade, the tier resolution order, the `non-claude` and `distinct` constraint resolvers, re-seating on a missing cell or an unreachable model, the five remaining lenses, the three remaining panel templates, panel inference with its references rule, `min_families` counted at both ends, **`install.sh`**, **the `synthesis` persona and the whole unattended path**, **`apply_fixes.py` and the five-condition gate**, and **the four reference documents plus the connector contract in `backends/base.py`**.
 
 ## Rebuild items
 
@@ -301,6 +360,8 @@ The first panel against a real document (`design/v1-spec.md`, 2026-09-18, four s
 - **The catalog is complete, and the panel is chosen rather than assumed.** Five lenses were written (`completeness`, `source-credibility`, `security`, `alternatives`, `second-order`), three panel templates landed beside `spec-review`, and the personas were retiered from `model: high` to `model: frontier` so framework §6's frontmatter level of the tier order is live. `--panel` is now optional: the template is inferred from the artifact's name and a run with no references never lands on one that needs them. A `fidelity` or `source-credibility` seat with nothing to cite is a composition error rather than a stderr warning, `min_families` is counted at both ends and named in the method caveat, and `judgment-call` was sharpened to mean a design fork rather than a thin spot. The four sections above carry the reasoning; `test_catalog.py`, `test_panel_selection.py` and `test_min_families.py` carry the tests.
 - **The artifact has a revision, and three mechanisms use it.** `run_panel.py` copies the artifact and every reference into a read-only `<run-dir>/inputs/`, and a revision is the SHA-256 of the bytes written there, with the commit id beside it when that file's tree is clean. Seats read those bytes; resume refuses when the input fingerprint has moved; `reconcile.py` hashes the artifact it resolves against the manifest's `artifact_revision` and refuses on a mismatch. **In the ordinary case that refusal never fires**, because `reconcile.py` resolves the run's own `inputs/` copy first and those bytes cannot change — editing the working-tree document afterwards is fine and always was. It fires only when `--artifact <path>` overrides the resolution, or when the `inputs/` copy is gone and the working-tree file has moved on since. A null revision is unpinned, warned about, and allowed through, which is what keeps the frozen replay fixture running.
 
+- **The pipeline closes: judge, reconcile, apply.** The `synthesis` persona was written and `reconcile.py` gained the Judge stage, dispatching it through `dispatch.py`'s own `prepare_call()` and `attempt_loop()` rather than a second copy of the retry paths — the same driver, the same doubled-cap length retry, the same registry gate, the same per-call cost record. Who judges is resolved once in `lib/judge.py` and recorded in the manifest, so `reconcile.py` never re-derives it from its own stdin. `apply_fixes.py` landed with the five-condition gate, all-or-nothing application and `applied.md`; `install.sh` landed with the python check, the key check through the real chain and the registry seed; and the four reference documents the Shape tree names were written, plus `backends/base.py` stating the connector contract with two structural checks a test runs against every shipped driver.
+
 ### Still open
 
 - **Reasoning tokens bill as output, and several frontier models will not let you opt out.** `_meta.reasoning_tokens` records them per seat from `usage.completion_tokens_details.reasoning_tokens` when the provider reports it. They are often the larger half of a seat's bill and are invisible in the completion, which is why the projection is built on a measured output-token prior rather than on prompt size.
@@ -314,6 +375,8 @@ The first panel against a real document (`design/v1-spec.md`, 2026-09-18, four s
 - **A refused model's first call is recorded as a failure, not as spend.** `dispatch.py` returns before writing `<reviewer-id>.failed.json` when the provider never answered with a body, so a re-seated seat's manifest record carries the re-seated dispatch's cost and not the refused one's. A 404 costs nothing, so this is right today and would be wrong the moment a provider starts billing for one.
 - **The manifest's compare-and-set is guarded by a lock directory, not by a transaction.** `manifest.lock` is an exclusive `mkdir` held across one read-modify-write, and a lock older than five minutes is broken so a crashed run cannot wedge a resume. That is enough for the two cases this skill has — several seat threads in one run, and two resumes on one directory — and it is not a distributed lock.
 - **Per-seat `timeout_s` is unimplemented.** The spec gives it a 900-second default and a defined behaviour — expiry flags the seat missing at stage `timeout` and the panel continues — and `run_panel.py` passes no timeout to the `dispatch.py` subprocess at all. A hung provider hangs that seat, and with it the `as_completed` loop, until the process is killed. `MISSING_STAGE` already maps a `timeout` status, so the reconciliation half is ready for the run half that is missing.
+- **Nothing re-gates the judgment call against the budget.** The pre-flight charges for it when `run_panel.py` knows the run will make one, and that is the only gate it ever passes. `reconcile.py --reconciler synthesis` run directly — resuming into the judge stage, say — makes a paid call that no budget has been consulted about. Same shape as the mid-flight metering gap, one stage later.
+- **Auto-apply invalidates the reconciliation that authorised it.** Writing to the artifact changes its content hash, so condition 5 fails on any second `apply_fixes.py` against the same run. That is correct — re-applying a review of bytes that no longer exist is what the condition is for — but it means there is no partial-retry story: a set that aborts at one anchor has to be fixed and re-run in full, or applied by hand.
 - **The exclusive-mkdir claim does not stop two runs sharing a directory; the seat compare-and-set does.** The spec says two concurrent runs on one artifact can never write into the same directory, and the claim alone delivers that only for a directory that does not yet exist. Because an existing run directory **resumes** by design, two runs both naming the same `--out` do share it. What actually protects the money is one level down: a seat moves `pending`/`failed` → `dispatching` by compare-and-set before its first paid call, so only one of the two runs pays for any given seat, and the other reports it held.
 
 ## Conventions

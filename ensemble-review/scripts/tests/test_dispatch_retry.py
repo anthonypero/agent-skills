@@ -18,6 +18,9 @@ sys.path.insert(0, TESTS_DIR)
 sys.path.insert(0, os.path.dirname(TESTS_DIR))
 
 import dispatch  # noqa: E402
+from backends import load_driver  # noqa: E402
+from lib import paths as paths_lib  # noqa: E402
+from lib import report as report_lib  # noqa: E402
 import harness  # noqa: E402
 from backends import AuthFailure  # noqa: E402
 from lib import registry as registry_lib  # noqa: E402
@@ -442,6 +445,133 @@ class AuthAndBackoffTest(DispatchTestCase):
         finally:
             dispatch.urllib.request.urlopen = saved
         self.assertEqual(slept, [], "an auth failure must not spend three more calls proving itself")
+
+
+
+
+class DriverContractTest(unittest.TestCase):
+    """`backends/base.py` states the connector contract; these assert it describes what ships.
+
+    A contract document nothing checks is a contract that drifts, and the cost of the drift lands on
+    whoever writes the next driver — the `azure_openai` one a project needs to route a confidential
+    review to a host with a data agreement.
+    """
+
+    def test_the_shipped_driver_satisfies_the_documented_contract(self):
+        from backends import base, openai_compat
+        self.assertEqual(base.check_driver(openai_compat), [])
+
+    def test_the_scripted_test_driver_satisfies_it_too(self):
+        from backends import base
+        driver = load_driver(harness.FAKE_BACKEND)
+        self.assertEqual(base.check_driver(driver), [])
+
+    def test_one_dispatch_detailed_return_carries_every_field_the_manifest_promises(self):
+        from backends import base
+        driver = load_driver(harness.FAKE_BACKEND)
+        workspace = harness.Workspace()
+        self.addCleanup(workspace.close)
+        workspace.apply_env()
+        result = driver.dispatch_detailed("system", "user", harness.FAST_MODEL,
+                                          {"max_tokens": 1000}, {"type": "json_object"}, None)
+        self.assertEqual(base.check_result(result), [])
+
+
+class PersonaContextTest(unittest.TestCase):
+    """The system message is built from the persona's declared `context`, on both legs.
+
+    It used to be built two ways: the judge leg read the declaration and the seat leg hardcoded the
+    finding schema. A workspace persona naming a second reference therefore got it as a judge and
+    silently lost it as a reviewer — and the persona's system message is the one thing this skill
+    promises is identical across families.
+    """
+
+    EXTRA = "house-style.md"
+    MARKER = "The house style forbids the passive voice in a finding's claim."
+
+    def setUp(self):
+        self.workspace = harness.Workspace()
+        self.workspace.apply_env()
+        self.out = self.workspace.path("run")
+        os.makedirs(self.out)
+        self.addCleanup(self.workspace.close)
+        self.workspace.plan({harness.SLOW_MODEL: [{"body": harness.valid_report()}]})
+
+    def override_persona(self, context_lines):
+        """A workspace copy of a shipped lens, with its `context` list rewritten."""
+        packaged = os.path.join(harness.SKILL_DIR, "agents", "lens-consistency.md")
+        with open(packaged, "r", encoding="utf-8") as handle:
+            text = handle.read()
+        before, marker, after = text.partition("context:\n  - finding-schema.md\n")
+        self.assertTrue(marker, "the shipped persona no longer declares its context the expected way")
+        self.workspace.override(os.path.join("agents", "lens-consistency.md"),
+                                text=before + context_lines + after)
+        self.workspace.override(os.path.join("references", self.EXTRA), text="# House style\n\n" + self.MARKER + "\n")
+
+    def dispatch_seat(self):
+        argv = [
+            "--persona", "lens-consistency", "--family", "kimi",
+            "--artifact", self.workspace.artifact,
+            "--out", self.out,
+            "--workspace", self.workspace.root,
+            "--config", self.workspace.config,
+            "--models", self.workspace.registry,
+            "--tier", "standard",
+        ]
+        stderr, saved = io.StringIO(), sys.stderr
+        sys.stderr = stderr
+        try:
+            code = dispatch.main(argv)
+        finally:
+            sys.stderr = saved
+        return code, stderr.getvalue()
+
+    def expected_system_chars(self, order):
+        """The exact system message this persona should produce, built by the real builder.
+
+        Exact rather than "longer than the finding schema": the persona body alone clears that bar,
+        so a seat leg that had dropped the second reference would still pass a size floor. Length
+        equality against the builder's own output is what makes the assertion bite.
+        """
+        paths = paths_lib.Paths(workspace=self.workspace.root)
+        _frontmatter, body = report_lib.parse_agent_file(paths.persona("lens-consistency"))
+        return len(dispatch.build_system_prompt(body, [paths.reference(name) for name in order]))
+
+    def test_a_second_declared_reference_reaches_the_seats_system_message(self):
+        self.override_persona("context:\n  - finding-schema.md\n  - {0}\n".format(self.EXTRA))
+        code, err = self.dispatch_seat()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.workspace.calls()[0]["system_chars"],
+                         self.expected_system_chars(["finding-schema.md", self.EXTRA]),
+                         "the persona body, the finding schema and the second reference, in declaration order")
+
+    def test_declaration_order_is_the_order_the_blocks_are_concatenated_in(self):
+        self.override_persona("context:\n  - {0}\n  - finding-schema.md\n".format(self.EXTRA))
+        code, err = self.dispatch_seat()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.workspace.calls()[0]["system_chars"],
+                         self.expected_system_chars([self.EXTRA, "finding-schema.md"]))
+        self.assertNotIn("does not name finding-schema.md", err, "it is declared, just not first")
+
+    def test_the_finding_schema_is_loaded_even_when_the_declaration_forgets_it(self):
+        """By invariant, not by declaration: a reviewer never sees a schema it was not shown."""
+        self.override_persona("context:\n  - {0}\n".format(self.EXTRA))
+        code, err = self.dispatch_seat()
+        self.assertEqual(code, 0, err)
+        self.assertIn("does not name finding-schema.md", err)
+        self.assertEqual(self.workspace.calls()[0]["system_chars"],
+                         self.expected_system_chars([self.EXTRA, "finding-schema.md"]),
+                         "appended last, after everything the persona did declare")
+
+    def test_the_resolver_is_the_one_the_judge_leg_uses(self):
+        """Same function, so the two legs cannot drift apart again without a test moving."""
+        paths = paths_lib.Paths(workspace=harness.SKILL_DIR)
+        frontmatter, _body = report_lib.parse_agent_file(
+            os.path.join(harness.SKILL_DIR, "agents", "synthesis.md"))
+        resolved = dispatch.persona_context_paths(paths, frontmatter)
+        self.assertEqual([os.path.basename(p) for p in resolved],
+                         ["reconciliation.md", "finding-schema.md"],
+                         "declaration order, which is the order the blocks are concatenated in")
 
 
 if __name__ == "__main__":

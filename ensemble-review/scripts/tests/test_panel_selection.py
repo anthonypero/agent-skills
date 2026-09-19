@@ -185,6 +185,9 @@ class PanelRunTestCase(unittest.TestCase):
             "--workspace", self.workspace.root,
             "--tier", "standard",
             "--autonomous",
+            # The Judge stage is pinned off: these tests are about dispatch, and an autonomous run
+            # would otherwise finish the pipeline by asking the fake backend for a judgment patch.
+            "--reconcile", "off",
         ]
         for ref in refs:
             argv += ["--ref", ref]

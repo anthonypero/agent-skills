@@ -72,6 +72,7 @@ import datetime
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -80,7 +81,9 @@ import time
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPTS_DIR)
 
+import dispatch  # noqa: E402
 from lib import budget as budget_lib  # noqa: E402
+from lib import judge as judge_lib  # noqa: E402
 from lib import paths as paths_lib  # noqa: E402
 from lib import registry as registry_lib  # noqa: E402
 from lib import report as report_lib  # noqa: E402
@@ -88,6 +91,8 @@ from lib import runs as runs_lib  # noqa: E402
 from lib import seating as seating_lib  # noqa: E402
 
 DISPATCH = os.path.join(SCRIPTS_DIR, "dispatch.py")
+RECONCILE = os.path.join(SCRIPTS_DIR, "reconcile.py")
+APPLY_FIXES = os.path.join(SCRIPTS_DIR, "apply_fixes.py")
 FINDING_SCHEMA = "finding-schema.md"
 PROVIDER = "openrouter"
 
@@ -201,16 +206,49 @@ def available_panels(paths):
 
 
 def persona_chars(lens, paths):
-    """Characters in this lens's system message: the persona body plus the finding schema."""
-    total = 0
+    """Characters in this lens's system message: the persona body plus every reference it declares.
+
+    It used to sum the body plus the finding schema, which is the same thing for a shipped lens and
+    is not the same thing for a workspace one. A project that gives a lens a second reference — a
+    house style, a glossary — makes every one of that seat's prompts bigger, and a projection that
+    could not see it would gate a run against a prompt size the run does not have. The resolver is
+    `dispatch.py`'s own, so the projection and the dispatch agree by construction.
+
+    Silently: `dispatch.py` prints the missing-schema note once per seat when it actually composes
+    the prompt, and printing it again here would say it twice for every seat before anything ran.
+    """
     persona = paths.find("persona", "lens-" + lens)
-    if persona:
-        _frontmatter, body = report_lib.parse_agent_file(persona["path"])
-        total += len(body)
-    reference = paths.find("reference", FINDING_SCHEMA)
-    if reference:
-        total += os.path.getsize(reference["path"])
+    if not persona:
+        return 0
+    frontmatter, body = report_lib.parse_agent_file(persona["path"])
+    total = len(body)
+    try:
+        references = dispatch.persona_context_paths(paths, frontmatter, warn=lambda _message: None)
+    except paths_lib.PathError:
+        # A reference that does not resolve is a composition error `dispatch.py` will raise with a
+        # better message than a projection could. Here it is simply a prompt this cannot measure.
+        return total
+    for path in references:
+        total += os.path.getsize(path)
     return total
+
+
+def _synthesis_persona_tier(paths):
+    """The `synthesis` persona's frontmatter `model`, the lowest level of the judge's tier order.
+
+    Returned raw; `judge_lib.synthesis_seat` is what decides whether it names a tier this config
+    offers, exactly as `seating.py` does for a lens. Missing persona, missing key, unreadable file:
+    all mean "this level contributes nothing", never an error — the levels above it are the ones a
+    run is normally decided by.
+    """
+    found = paths.find("persona", judge_lib.SYNTHESIS_PERSONA)
+    if not found:
+        return None
+    try:
+        frontmatter, _body = report_lib.parse_agent_file(found["path"])
+    except OSError:
+        return None
+    return frontmatter.get("model")
 
 
 def persona_frontmatter(paths):
@@ -365,8 +403,16 @@ def parse_args(argv):
                         help="Pre-flight budget (default: {0:.2f})".format(DEFAULT_BUDGET_USD))
     parser.add_argument("--approve-budget", action="store_true", help="Dispatch even when the projection exceeds the budget")
     parser.add_argument("--autonomous", action="store_true", help="Nobody to ask: an over-budget projection refuses and exits 4 instead of prompting")
-    parser.add_argument("--reconciler", choices=("host", "synthesis", "default"), default=None,
+    parser.add_argument("--reconciler", choices=judge_lib.RECONCILERS, default=None,
                         help="Who supplies the judgment patch (default: the panel's, else `default` — host interactive, synthesis autonomous). Decides whether the projection charges for a synthesis call")
+    parser.add_argument("--synthesis-model", default=None,
+                        help="Pin the judgment call to a concrete model id, overriding the tier map. Priced in the pre-flight and passed to the judge stage")
+    parser.add_argument("--reconcile", choices=("auto", "off"), default="auto",
+                        help="`auto` runs reconcile.py at the end of an autonomous run whose judgment comes from `synthesis`, so the whole pipeline is one command; `off` always stops after Collect and prints the reconcile command (default: auto)")
+    parser.add_argument("--auto-apply", choices=("on", "off"), default="off", dest="auto_apply",
+                        help="`on` arms apply_fixes.py's five-condition gate after the reconciliation is written. Off by default, and refused without --i-authored-this")
+    parser.add_argument("--i-authored-this", action="store_true", dest="authored",
+                        help="Assert that you wrote the document under review. Required by --auto-apply on: the artifact is untrusted input, so nothing is written back to a document the operator did not author")
     parser.add_argument("--fresh", action="store_true", help="Claim a new run directory instead of resuming an existing one")
     parser.add_argument("--skip-claude", action="store_true", help="Leave claude seats to the host session's harness subagents")
     parser.add_argument("--run-id", default=None, help="Recorded in the manifest; defaults to the run directory's basename")
@@ -375,6 +421,14 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
+
+    if args.auto_apply == "on" and not args.authored:
+        sys.stderr.write(
+            "composition error: --auto-apply on needs --i-authored-this.\n"
+            "  The artifact is inlined verbatim into every seat's user message, so a document can\n"
+            "  instruct its own reviewers to return a consensus-shaped replacement. Nothing is ever\n"
+            "  written back to a document the operator has not claimed as their own.\n")
+        return EXIT_COMPOSITION
 
     if not os.path.isfile(args.artifact):
         sys.exit("Not a file: {0}".format(args.artifact))
@@ -522,19 +576,63 @@ def main(argv=None):
         record["materialized_abs"] = os.path.join(run_dir, record["materialized"])
     inputs = {"artifact": artifact_record, "references": reference_records}
 
+    # Who will supply the judgment patch, decided here and recorded in the manifest, so the panel
+    # and `reconcile.py` cannot disagree about it later. `default` means host when a human is
+    # attached and `synthesis` when nobody is — the same test the budget gate turns on, which is
+    # why both read it from `lib/judge.py` rather than each asking stdin its own question.
+    autonomous = judge_lib.is_autonomous(args.autonomous)
+    try:
+        reconciler = judge_lib.resolve_reconciler(args.reconciler, panel.get("reconciler"), autonomous)
+    except judge_lib.JudgeError as failure:
+        sys.stderr.write("composition error: {0}\n".format(failure))
+        return EXIT_COMPOSITION
+    with_synthesis = reconciler == judge_lib.SYNTHESIS_AUTHOR
+
+    # **The judge's seat is resolved here, not guessed at in the projection.** It is resolved by
+    # the same `judge_lib.synthesis_seat()` the judge stage uses — the tier following the run's,
+    # the family preferring one the panel seated — and then recorded in the manifest as
+    # `judge_seat`, model included. `reconcile.py` reads that record back rather than repeating
+    # the derivation, so the model the budget gate priced is the model the judgment call makes
+    # even if the config is edited between the panel and the judgment. The projection used to
+    # price this call on the dearest *seated* model, which is not what runs the judge.
+    synthesis_model = args.synthesis_model
+    judge_seat = None
+    if with_synthesis:
+        try:
+            judge_seat = judge_lib.synthesis_seat(
+                config_entry, panel,
+                cli_tier=args.tier,
+                seated_families=[seat["family"] for seat in seats if seat.get("family")],
+                persona_tier=_synthesis_persona_tier(paths))
+        except judge_lib.JudgeError as failure:
+            sys.stderr.write("composition error: {0}\n".format(failure))
+            return EXIT_COMPOSITION
+        if synthesis_model:
+            judge_seat["family_source"] = "--synthesis-model"
+        else:
+            synthesis_model = seating_lib.model_at(config_entry, judge_seat["tier"], judge_seat["family"])
+        judge_seat["model"] = synthesis_model
+
     # --- Resolve, part two: the registry gate -----------------------------------------------------
     try:
         registry = registry_lib.load(paths.registry(args.models))
     except (paths_lib.PathError, registry_lib.RegistryError) as failure:
         sys.stderr.write("{0}\n".format(failure))
         return EXIT_COMPOSITION
-    uncovered = registry.covers([s["model"] for s in dispatched])
+    # The judge is checked alongside the seats, because it is a paid call this run will make and an
+    # unpriced one is the same hole: a seat left out of the projection is a budget gate that does
+    # not gate. It is appended only when it is not already a seated model, so it is named once.
+    seat_models = [s["model"] for s in dispatched]
+    to_price = list(seat_models)
+    if synthesis_model and synthesis_model not in seat_models:
+        to_price.append(synthesis_model)
+    uncovered = registry.covers(to_price)
     if uncovered:
-        sys.stderr.write("composition error: the model registry cannot price {0} seat(s).\n".format(len(uncovered)))
+        sys.stderr.write("composition error: the model registry cannot price {0} model(s) this run will call.\n".format(len(uncovered)))
         for model, reason in uncovered:
-            seat = next(s for s in dispatched if s["model"] == model)
+            seat = next((s for s in dispatched if s["model"] == model), None)
             sys.stderr.write("  {0} resolves to {1}, which {2} at {3}\n".format(
-                seat["reviewer_id"], model, reason, registry.path))
+                seat["reviewer_id"] if seat else "the judgment call", model, reason, registry.path))
         sys.stderr.write("Every resolved seat must be priced before dispatch: a seat left out of the "
                          "projection is a budget gate that does not gate. Fix:\n")
         for model, _reason in uncovered:
@@ -555,7 +653,8 @@ def main(argv=None):
 
     manifest = _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
                                dispatched, harness, inputs, fingerprint, tier_default, registry,
-                               min_families, seated_families, inference)
+                               min_families, seated_families, inference, reconciler, autonomous,
+                               judge_seat)
     if resuming:
         manifest = _merge_resume(manifest, runs_lib.read_manifest(run_dir))
     runs_lib.write_manifest(run_dir, manifest)
@@ -567,13 +666,9 @@ def main(argv=None):
         "model": seat["model"],
         "prompt_tokens": budget_lib.approx_tokens(budget_lib.prompt_chars(persona_chars(seat["lens"], paths), document_chars)),
     } for seat in dispatched]
-    # `default` means host interactive, synthesis autonomous — so whether this run pays for a
-    # synthesis call is decided by the same two facts the budget gate itself turns on.
-    autonomous = args.autonomous or not sys.stdin.isatty()
-    reconciler = args.reconciler or panel.get("reconciler") or "default"
-    with_synthesis = reconciler == "synthesis" or (reconciler == "default" and autonomous)
-
-    projection = budget_lib.project(projection_seats, registry, args.budget_usd, with_synthesis=with_synthesis)
+    projection = budget_lib.project(projection_seats, registry, args.budget_usd,
+                                    with_synthesis=with_synthesis, synthesis_model=synthesis_model,
+                                    synthesis_seat=judge_seat)
     print(budget_lib.render(projection))
     print("")
 
@@ -626,7 +721,99 @@ def main(argv=None):
         results = list(by_id.values())
     elapsed = time.time() - started
 
-    return _wrap_up(args, run_dir, results, harness, dispatched, elapsed, halt, held)
+    code = _wrap_up(args, run_dir, results, harness, dispatched, elapsed, halt, held)
+    return _judge(args, run_dir, reconciler, code, synthesis_model)
+
+
+def _judge(args, run_dir, reconciler, code, synthesis_model=None):
+    """Run the Judge and Reconcile stages, or say how to.
+
+    An autonomous run whose judgment comes from `synthesis` finishes the pipeline here, because
+    there is nobody to type the second command: the whole point of the unattended path is that one
+    invocation produces the reconciliation. Every other run stops after Collect and prints the
+    command, because the judgment is the host's to write and the host is sitting right there.
+
+    The panel's own exit code wins over the reconciler's when the panel already failed — a run that
+    halted on an auth failure has not become a patch problem — and otherwise the reconciler's code
+    is returned, so a run whose reconciliation did not get written does not exit 0.
+    """
+    if args.reconcile == "off" or reconciler != judge_lib.SYNTHESIS_AUTHOR:
+        print("")
+        print("Next: reconcile. `reconcile.py` is the only writer of both reconciliation files.")
+        print("  {0}".format(_printable(_reconcile_argv(args, run_dir, judge=False))))
+        return code
+    if code == EXIT_TERMINAL:
+        return code
+
+    child = _reconcile_argv(args, run_dir, judge=True)
+    print("")
+    print("-" * 72)
+    print("Judge and Reconcile: {0}".format(_printable(child)))
+    result = subprocess.run(child, capture_output=True, text=True)
+    if result.stdout:
+        print(result.stdout.rstrip())
+    if result.stderr:
+        sys.stderr.write(result.stderr)
+    if result.returncode:
+        return result.returncode
+    return _apply(args, run_dir, code)
+
+
+def _reconcile_argv(args, run_dir, judge):
+    """The `reconcile.py` invocation, whether this run makes it or prints it for the host.
+
+    **One builder for both**, because they had drifted once already: the child carried
+    `--synthesis-model` and the printed line did not, so an operator copying the line would have got
+    a judgment call the projection never priced. Everything that changes which call is made travels
+    on both — the pin above all, then the operator paths, which are read as given and are not
+    recoverable from the run directory.
+
+    `judge` adds the two flags that say a synthesis judgment is wanted now. They are deliberately
+    absent from the printed form: that line is for a host who is about to write the patch itself.
+    """
+    argv = [sys.executable, RECONCILE, "--run-dir", run_dir]
+    if judge:
+        argv += ["--reconciler", "synthesis", "--autonomous"]
+    if args.synthesis_model:
+        argv += ["--synthesis-model", args.synthesis_model]
+    if args.workspace:
+        argv += ["--workspace", args.workspace]
+    if args.config:
+        argv += ["--config", args.config]
+    if args.models:
+        argv += ["--models", args.models]
+    return argv
+
+
+def _printable(argv):
+    """The argv as a line an operator can paste, quoted where a path would otherwise split."""
+    return "python3 " + " ".join(shlex.quote(part) for part in argv[1:])
+
+
+def _apply(args, run_dir, code):
+    """The Apply stage: only when armed, only through the five-condition gate, only on a clean run.
+
+    A reconciliation written over a run with a missing seat is still the product, but it is not a
+    document to write back from unattended: the agreement counts it is about to apply edits on were
+    computed against a panel that did not all report. So the gate is armed only after a clean run.
+    """
+    if args.auto_apply != "on":
+        return code
+    if code != EXIT_OK:
+        print("")
+        print("auto-apply not armed: this run did not finish clean (exit {0}), so the agreement "
+              "counts behind any edit are not the ones the panel was composed to produce.".format(code))
+        return code
+
+    print("")
+    print("-" * 72)
+    child = [sys.executable, APPLY_FIXES, "--run-dir", run_dir, "--i-authored-this"]
+    result = subprocess.run(child, capture_output=True, text=True)
+    if result.stdout:
+        print(result.stdout.rstrip())
+    if result.stderr:
+        sys.stderr.write(result.stderr)
+    return result.returncode or code
 
 
 def _fan_out(seats, args, run_dir, inputs, halt):
@@ -704,7 +891,7 @@ def _min_families_target(args, panel):
 
 def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats, dispatched, harness,
                     inputs, fingerprint, tier_default, registry, min_families, seated_families,
-                    inference):
+                    inference, reconciler, autonomous, judge_seat=None):
     """The manifest as it stands at Resolve: every seat pending, every input pinned."""
     artifact = inputs["artifact"]
     references = inputs["references"]
@@ -776,6 +963,14 @@ def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
         "max_tokens_requested": args.max_tokens,
         "budget_usd": args.budget_usd,
         "skip_claude": args.skip_claude,
+        # Resolved here rather than left as `default`, so `reconcile.py` reads a decision instead of
+        # asking its own stdin a question the panel already answered.
+        "reconciler": reconciler,
+        "autonomous": autonomous,
+        # The judge's seat as Resolve worked it out, so the projection that gated this run and
+        # the call `reconcile.py` later makes are the same seat rather than two derivations of
+        # one rule. Null on a run whose judgment comes from the host: it makes no such call.
+        "judge_seat": judge_seat,
         "seats": seat_records,
         "families_dispatched": sorted({s["family"] for s in dispatched}),
         # The target and both counts against it. `seated` is over every expected seat, harness seats

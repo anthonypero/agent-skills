@@ -32,6 +32,14 @@ the files the parent resolved. `--config` and `--models` stay available as opera
 Every call is recorded in `_meta.attempts` with the cap it was sent, its finish reason, its
 validation errors, its usage and its cost — including calls that produced nothing usable, because a
 failed seat still spent money and a manifest that says $0.00 for it is wrong.
+
+**Two pieces of this file are shared with the judge stage.** `prepare_call()` turns a family and a
+tier into a resolved model, a priced registry entry, a checked effort, a key and a loaded driver;
+`attempt_loop()` runs the three retry paths above around whatever validator the caller supplies.
+`reconcile.py` dispatches the `synthesis` persona through both, so the judgment call is made by the
+same driver, under the same length retry, through the same registry gate and with the same per-call
+cost record as a review seat. What differs is the validator — a judgment patch, not a report — and
+that is exactly the callback `attempt_loop` takes.
 """
 
 import argparse
@@ -200,9 +208,58 @@ def read_file(path):
         return handle.read()
 
 
-def build_system_prompt(persona_body, finding_schema_path):
-    finding_schema = read_file(finding_schema_path)
-    return persona_body.rstrip() + "\n\n---\n\n" + finding_schema.rstrip() + "\n"
+def build_system_prompt(persona_body, reference_paths):
+    """The persona body, then every reference its frontmatter `context` names, in that order.
+
+    One separator rule between blocks. A lens persona names one reference and gets exactly what it
+    always got; `synthesis` names two, so its system message carries `reconciliation.md` as well.
+    """
+    blocks = [persona_body.rstrip()]
+    for path in reference_paths:
+        blocks.append(read_file(path).rstrip())
+    return "\n\n---\n\n".join(blocks) + "\n"
+
+
+def persona_context_paths(paths, frontmatter, warn=None):
+    """The references a persona's frontmatter `context` names, resolved in declaration order.
+
+    **One implementation for both legs of the system message.** The seat leg used to hardcode the
+    finding schema while the judge leg read the declaration, so a workspace persona naming a second
+    reference got it as a judge and silently lost it as a reviewer — and a persona's system message
+    is the one thing this skill promises is identical across families.
+
+    The finding schema is appended when the declaration omits it rather than refused. Every seat's
+    system message carries the output contract by invariant, not by declaration: a reviewer asked
+    for JSON against a schema it was never shown produces a repair re-ask and then a missing seat.
+    A workspace persona that forgot the line gets it, and is told so.
+    """
+    warn = warn or sys.stderr.write
+    declared = (frontmatter or {}).get("context") or []
+    if isinstance(declared, str):
+        declared = [declared]
+
+    # Deduped, first occurrence winning, so a reference named twice is inlined once. A repeated
+    # block does not make the reviewer follow it harder; it costs prompt tokens on every seat of
+    # every run, and it makes the seat's message differ from the judge's for no reason anyone chose.
+    names = []
+    repeated = []
+    for name in declared:
+        if not name:
+            continue
+        if name in names:
+            if name not in repeated:
+                repeated.append(name)
+            continue
+        names.append(name)
+    if repeated:
+        warn("note: this persona's `context` names {0} more than once; each reference is loaded "
+             "once, in the order it first appears.\n".format(", ".join(repeated)))
+
+    if FINDING_SCHEMA not in names:
+        warn("note: this persona's `context` does not name {0}; it is loaded anyway, because every "
+             "seat's system message carries the output contract.\n".format(FINDING_SCHEMA))
+        names.append(FINDING_SCHEMA)
+    return [paths.reference(name) for name in names]
 
 
 def build_user_prompt(artifact_path, reference_paths, artifact_label=None, reference_labels=None):
@@ -341,6 +398,194 @@ def build_meta(attempts, tier, model, key_source, elapsed, effort, connector, pr
     }
 
 
+# --- the shared call machinery ------------------------------------------------------------------
+
+class CompositionError(Exception):
+    """A seat that cannot be resolved into a paid call. Every caller turns this into exit 1."""
+
+
+class DispatchFailed(Exception):
+    """The driver raised something that is not an auth failure. Carries the original exception."""
+
+    def __init__(self, cause):
+        super(DispatchFailed, self).__init__(str(cause))
+        self.cause = cause
+
+
+class Call(object):
+    """Everything resolved between a family name and the first paid request.
+
+    Built by `prepare_call` and consumed by `attempt_loop`. It holds the connector entry the driver
+    is handed — including the key, the effort and the prices — so the two halves can be reused by
+    any caller that needs one model call made this skill's way.
+    """
+
+    def __init__(self, label, model, tier, entry, driver, http_request_fn, cap, effort,
+                 key_source, connector, provider, registry_entry):
+        self.label = label
+        self.model = model
+        self.tier = tier
+        self.entry = entry
+        self.driver = driver
+        self.http_request_fn = http_request_fn
+        self.cap = cap
+        self.effort = effort
+        self.key_source = key_source
+        self.connector = connector
+        self.provider = provider
+        self.registry_entry = registry_entry
+
+
+def prepare_call(paths, family, tier=None, model=None, max_tokens=None, config_override=None,
+                 models_override=None, label="seat", warn=None):
+    """Resolve one model call: model, registry entry, cap, effort, key, driver, transport.
+
+    The gates are the run's, in the run's order: the registry must price the model (a composition
+    error otherwise, never a silent zero in the projection), the config's effort must be inside that
+    model's vocabulary, and the key must resolve through the vault-then-environment chain. Raises
+    `CompositionError` for the first two; `resolve_api_key` exits on the third, naming both paths.
+    """
+    warn = warn or sys.stderr.write
+    config, _config_path = load_config(paths, config_override)
+    entry = dict(config[PROVIDER])
+    tier = tier or entry.get("default_tier") or "frontier"
+    model, tier = resolve_model(entry, tier, family, model)
+
+    try:
+        registry = registry_lib.load(paths.registry(models_override))
+        registry_entry = registry.require(model)
+    except (paths_lib.PathError, registry_lib.RegistryError, registry_lib.MissingModel) as failure:
+        raise CompositionError("{0}: {1}".format(label, failure))
+
+    requested_cap = registry_lib.DEFAULT_MAX_TOKENS if max_tokens is None else max_tokens
+    cap = registry_lib.cap_for(registry_entry, requested_cap)
+    if cap != requested_cap:
+        warn("{0}: the registry raises the cap for {1} from {2} to {3} (min_max_tokens)\n".format(
+            label, model, requested_cap, cap))
+
+    input_price, output_price = registry_lib.prices(registry_entry)
+    try:
+        effort = resolve_effort(entry, model, registry_entry)
+    except EffortRefused as failure:
+        raise CompositionError("{0}: composition error: {1}".format(label, failure))
+
+    api_key, key_source = resolve_api_key(entry)
+    entry["api_key"] = api_key
+    entry["reasoning_effort"] = effort
+    entry["prices"] = {"input": input_price, "output": output_price}
+    routing = (entry.get("provider_routing") or {}).get(model)
+    if routing:
+        entry["provider_routing_for_model"] = routing
+
+    try:
+        driver_ref = paths.driver_ref(entry.get("type", "openai_compat"))
+    except paths_lib.PathError as failure:
+        raise CompositionError("{0}: composition error: {1}".format(label, failure))
+    driver = load_driver(driver_ref)
+
+    return Call(
+        label=label, model=model, tier=tier, entry=entry, driver=driver,
+        http_request_fn=make_http_request_fn(driver), cap=cap, effort=effort,
+        key_source=key_source, connector=entry.get("type", "openai_compat"), provider=PROVIDER,
+        registry_entry=registry_entry)
+
+
+class CallResult(object):
+    """What one seat's or one judge's whole call history came to.
+
+    `raw` is the last response verbatim — what `<reviewer-id>.invalid.txt` keeps when nothing
+    validated, and the only place the model's own bytes survive a failed call.
+    """
+
+    def __init__(self, parsed, errors, attempts, cap, connector, provider, raw):
+        self.parsed = parsed
+        self.errors = errors
+        self.attempts = attempts
+        self.cap = cap
+        self.connector = connector
+        self.provider = provider
+        self.raw = raw
+
+
+def attempt_loop(call, system_prompt, user_prompt, check, repair, warn=None, attempts=None):
+    """The three retry paths, around whatever validator the caller supplies.
+
+    `check(raw)` returns `(parsed_or_None, errors)`; `repair(original_prompt, raw, errors)` returns
+    the one repair prompt. Returns a `CallResult`.
+
+    `attempts` lets the caller own the history list. A `check` that refuses outright — a judgment
+    patch from `synthesis` carrying `rulings`, which is a hard error and earns no repair — raises
+    rather than returning errors, and the call it refused is recorded before the exception leaves,
+    so a caller holding the list can still put that call's cost in the manifest. A failed call that
+    spent money and is accounted at $0.00 is the defect this skill has closed twice already.
+
+    The order is the one the spec fixes and it is not the same order three times over. A transient
+    provider error never reaches here — `http_request_fn` has already retried it three times. A
+    **truncation** is handled before validation, because `finish_reason: length` is not a reviewer
+    error: one retry at double the cap with a fresh prompt, the truncated bytes discarded rather than
+    quoted back. Only a response that parsed and failed *validation* earns the repair re-ask, and
+    only one, and it is the single prompt that does quote the previous response.
+    """
+    warn = warn or sys.stderr.write
+    attempts = attempts if attempts is not None else []
+    parsed = None
+    errors = []
+    raw = ""
+    cap = call.cap
+    prompt = user_prompt
+    length_retried = False
+    repaired = False
+    connector = call.connector
+    provider = call.provider
+
+    while True:
+        call.entry["max_tokens"] = cap
+        try:
+            result = call.driver.dispatch_detailed(
+                system_prompt, prompt, call.model, call.entry, {"type": "json_object"}, call.http_request_fn)
+        except AuthFailure:
+            raise
+        except Exception as exc:  # noqa: BLE001 — the caller decides whether to flag-and-advance
+            raise DispatchFailed(exc)
+
+        raw = result.get("text") or ""
+        connector = result.get("connector") or connector
+        provider = result.get("provider") or provider
+        driver_attempt = (result.get("attempts") or [{}])[0]
+
+        if result.get("finish_reason") == "length" and not length_retried:
+            doubled = cap * registry_lib.LENGTH_RETRY_MULTIPLIER
+            attempts.append(finish_attempt(
+                driver_attempt, len(attempts) + 1, ["finish_reason: length — truncated completion"],
+                "truncated at {0}; retrying once at {1} with a fresh prompt".format(cap, doubled)))
+            warn("{0}: truncated at max_tokens={1}; one retry at {2} with a fresh prompt\n".format(
+                call.label, cap, doubled))
+            length_retried = True
+            cap = doubled
+            prompt = user_prompt
+            continue
+
+        try:
+            parsed, errors = check(raw)
+        except Exception as refusal:  # noqa: BLE001 — a validator that refuses outright, not an error here
+            attempts.append(finish_attempt(driver_attempt, len(attempts) + 1, ["refused: {0}".format(refusal)]))
+            raise
+        attempts.append(finish_attempt(driver_attempt, len(attempts) + 1, errors))
+
+        if not errors:
+            break
+        if repaired:
+            break
+        repaired = True
+        warn("{0}: the response failed validation ({1} error(s)); one repair re-ask\n".format(
+            call.label, len(errors)))
+        for error in errors:
+            warn("  - {0}\n".format(error))
+        prompt = repair(user_prompt, raw, errors)
+
+    return CallResult(parsed, errors, attempts, cap, connector, provider, raw)
+
+
 # --- main --------------------------------------------------------------------------------------
 
 def parse_args(argv):
@@ -376,7 +621,8 @@ def main(argv=None):
     persona_name = args.persona[:-3] if args.persona.endswith(".md") else args.persona
     try:
         persona_path = paths.persona(persona_name)
-        finding_schema_path = paths.reference(FINDING_SCHEMA)
+        frontmatter, persona_body = report_lib.parse_agent_file(persona_path)
+        context_paths = persona_context_paths(paths, frontmatter)
     except paths_lib.PathError as failure:
         sys.stderr.write("{0}\n".format(failure))
         return EXIT_COMPOSITION
@@ -385,129 +631,51 @@ def main(argv=None):
         if not os.path.isfile(path):
             sys.exit("Not a file: {0}".format(path))
 
-    _frontmatter, persona_body = report_lib.parse_agent_file(persona_path)
     lens = persona_name[len("lens-"):] if persona_name.startswith("lens-") else persona_name
     reviewer_id = args.reviewer_id or "{0}-{1}{2}".format(lens, args.family, args.suffix)
 
     try:
-        config, _config_path = load_config(paths, args.config)
-    except paths_lib.PathError as failure:
+        call = prepare_call(paths, args.family, tier=args.tier, model=args.model,
+                            max_tokens=args.max_tokens, config_override=args.config,
+                            models_override=args.models, label=reviewer_id)
+    except (paths_lib.PathError, CompositionError) as failure:
         sys.stderr.write("{0}\n".format(failure))
         return EXIT_COMPOSITION
-    entry = dict(config[PROVIDER])
-    tier = args.tier or entry.get("default_tier") or "frontier"
-    model, tier = resolve_model(entry, tier, args.family, args.model)
 
-    # The registry covers every resolved seat or the run does not start. A model with no price is a
-    # composition error, not a silent zero in the projection.
-    try:
-        registry = registry_lib.load(paths.registry(args.models))
-        registry_entry = registry.require(model)
-    except (paths_lib.PathError, registry_lib.RegistryError, registry_lib.MissingModel) as failure:
-        sys.stderr.write("{0}: {1}\n".format(reviewer_id, failure))
-        return EXIT_COMPOSITION
-
-    base_cap = registry_lib.cap_for(registry_entry, args.max_tokens)
-    if base_cap != args.max_tokens:
-        sys.stderr.write("{0}: the registry raises the cap for {1} from {2} to {3} (min_max_tokens)\n".format(
-            reviewer_id, model, args.max_tokens, base_cap))
-
-    input_price, output_price = registry_lib.prices(registry_entry)
-    try:
-        effort = resolve_effort(entry, model, registry_entry)
-    except EffortRefused as failure:
-        sys.stderr.write("{0}: composition error: {1}\n".format(reviewer_id, failure))
-        return EXIT_COMPOSITION
-
-    api_key, key_source = resolve_api_key(entry)
-    entry["api_key"] = api_key
-    entry["reasoning_effort"] = effort
-    entry["prices"] = {"input": input_price, "output": output_price}
-    routing = (entry.get("provider_routing") or {}).get(model)
-    if routing:
-        entry["provider_routing_for_model"] = routing
-
-    try:
-        driver_ref = paths.driver_ref(entry.get("type", "openai_compat"))
-    except paths_lib.PathError as failure:
-        sys.stderr.write("{0}: composition error: {1}\n".format(reviewer_id, failure))
-        return EXIT_COMPOSITION
-    driver = load_driver(driver_ref)
-    http_request_fn = make_http_request_fn(driver)
-
-    system_prompt = build_system_prompt(persona_body, finding_schema_path)
+    system_prompt = build_system_prompt(persona_body, context_paths)
     user_prompt = build_user_prompt(args.artifact, args.refs, args.artifact_name, args.ref_names)
 
-    started = time.time()
-    attempts = []
-    parsed = None
-    errors = []
-    raw = ""
-    cap = base_cap
-    prompt = user_prompt
-    length_retried = False
-    repaired = False
-    connector = entry.get("type", "openai_compat")
-    provider = PROVIDER
-
-    while True:
-        entry["max_tokens"] = cap
+    def check(raw_text):
+        """Parse, stamp the audit fields over the model's guesses, then validate at ingest."""
         try:
-            result = driver.dispatch_detailed(system_prompt, prompt, model, entry, {"type": "json_object"}, http_request_fn)
-        except AuthFailure as failure:
-            sys.stderr.write("{0}: provider auth failure: {1}\n".format(reviewer_id, failure))
-            sys.stderr.write("  auth failures are not transient; no further paid calls from this seat.\n")
-            return EXIT_AUTH
-        except Exception as exc:  # noqa: BLE001 — flag-and-advance: the panel continues without this seat
-            # Exhausted transient retries, a provider error, a malformed body: this seat is missing,
-            # stage `dispatch`. It is not exit 2 — only an auth failure halts the whole panel.
-            sys.stderr.write("{0}: dispatch failed: {1}\n".format(reviewer_id, exc))
-            if model_is_unavailable(exc, model):
-                sys.stderr.write("{0}: the provider will not serve {1}; this family is unreachable "
-                                 "for this run\n".format(reviewer_id, model))
-                return EXIT_MODEL_UNAVAILABLE
-            return EXIT_INVALID
-
-        raw = result.get("text") or ""
-        connector = result.get("connector") or connector
-        provider = result.get("provider") or provider
-        driver_attempt = (result.get("attempts") or [{}])[0]
-
-        # A truncation is not a reviewer error, so it is handled before validation: one retry at
-        # double the cap, with the original prompt. The truncated bytes are discarded, never quoted.
-        if result.get("finish_reason") == "length" and not length_retried:
-            attempts.append(finish_attempt(driver_attempt, len(attempts) + 1, ["finish_reason: length — truncated completion"],
-                                           "truncated at {0}; retrying once at {1} with a fresh prompt".format(cap, cap * registry_lib.LENGTH_RETRY_MULTIPLIER)))
-            sys.stderr.write("{0}: truncated at max_tokens={1}; one retry at {2} with a fresh prompt\n".format(
-                reviewer_id, cap, cap * registry_lib.LENGTH_RETRY_MULTIPLIER))
-            length_retried = True
-            cap = cap * registry_lib.LENGTH_RETRY_MULTIPLIER
-            prompt = user_prompt
-            continue
-
-        candidate = report_lib.strip_fence(raw)
-        try:
-            parsed = json.loads(candidate)
+            parsed_report = json.loads(report_lib.strip_fence(raw_text))
         except ValueError as exc:
-            parsed = None
-            errors = ["the response was not parseable JSON: {0}".format(exc)]
-        if parsed is not None:
-            parsed = stamp_authoritative(parsed, reviewer_id, lens, args, model, artifact=args.artifact)
-            errors = report_lib.validate_report(parsed, lens=lens, ingest=True)
-        attempts.append(finish_attempt(driver_attempt, len(attempts) + 1, errors))
+            return None, ["the response was not parseable JSON: {0}".format(exc)]
+        parsed_report = stamp_authoritative(parsed_report, reviewer_id, lens, args, call.model, artifact=args.artifact)
+        return parsed_report, report_lib.validate_report(parsed_report, lens=lens, ingest=True)
 
-        if not errors:
-            break
-        if repaired:
-            break
-        repaired = True
-        sys.stderr.write("{0}: report failed validation ({1} error(s)); one repair re-ask\n".format(reviewer_id, len(errors)))
-        for error in errors:
-            sys.stderr.write("  - {0}\n".format(error))
-        prompt = build_repair_prompt(user_prompt, raw, errors)
+    started = time.time()
+    try:
+        outcome = attempt_loop(call, system_prompt, user_prompt, check, build_repair_prompt)
+    except AuthFailure as failure:
+        sys.stderr.write("{0}: provider auth failure: {1}\n".format(reviewer_id, failure))
+        sys.stderr.write("  auth failures are not transient; no further paid calls from this seat.\n")
+        return EXIT_AUTH
+    except DispatchFailed as failure:
+        # Exhausted transient retries, a provider error, a malformed body: this seat is missing,
+        # stage `dispatch`. It is not exit 2 — only an auth failure halts the whole panel.
+        sys.stderr.write("{0}: dispatch failed: {1}\n".format(reviewer_id, failure.cause))
+        if model_is_unavailable(failure.cause, call.model):
+            sys.stderr.write("{0}: the provider will not serve {1}; this family is unreachable "
+                             "for this run\n".format(reviewer_id, call.model))
+            return EXIT_MODEL_UNAVAILABLE
+        return EXIT_INVALID
 
     elapsed = time.time() - started
-    meta = build_meta(attempts, tier, model, key_source, elapsed, effort, connector, provider, cap)
+    model, tier, effort, key_source = call.model, call.tier, call.effort, call.key_source
+    parsed, errors, attempts, raw = outcome.parsed, outcome.errors, outcome.attempts, outcome.raw
+    meta = build_meta(attempts, tier, model, key_source, elapsed, effort,
+                      outcome.connector, outcome.provider, outcome.cap)
 
     if errors or parsed is None:
         sys.stderr.write("{0}: report still invalid after the repair re-ask:\n".format(reviewer_id))
