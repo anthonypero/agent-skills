@@ -1,0 +1,179 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://anthonypero.dev/ensemble-review/judgment-patch.schema.json",
+  "title": "ensemble-review judgment patch",
+  "description": "What reconcile.py cannot compute: claim joins, splits, singleton labels, severity arbitrations, dispositions, contradictions, canonical-edit acceptances, stated rulings and the method caveat. Written to judgment.json in the run directory by the host (interactive) or by the synthesis persona (autonomous), and merged over the script's own mechanical clustering. Cluster references are provisional ids — `P-n` as the mechanical pass assigned them, `P-n.k` for a product of one of this patch's own splits. There is no verdict field: the run-level verdict is computed from arbitrated severity and disposition, and a supplier who disagrees with it changes a disposition.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "author", "generated_at", "dispositions", "method_caveat"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "run_id": { "type": "string", "minLength": 1, "description": "Must match the manifest; a mismatch is a hard error" },
+    "author": { "type": "string", "enum": ["host", "synthesis"] },
+    "generated_at": { "type": "string", "description": "ISO 8601 with offset" },
+    "note": { "type": "string", "description": "Free prose for the human reading the patch. Not carried into the product" },
+    "claim_joins": {
+      "type": "array",
+      "description": "Provisional clusters that name the same defect from different anchors. The merged cluster is match_key `claim` and judgment true. Applied after `splits`, so an entry may name a split's product",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["merge", "reason"],
+        "properties": {
+          "merge": { "type": "array", "minItems": 2, "items": { "type": "string" } },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "splits": {
+      "type": "array",
+      "description": "A mechanically joined group whose members name different defects. Applied first. Products are numbered `<from>.<n>` by the order of `groups`; any member left unplaced lands in a final group of its own",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["from", "groups", "reason"],
+        "properties": {
+          "from": { "type": "string" },
+          "groups": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["reviewer_id", "finding_id"],
+                "properties": {
+                  "reviewer_id": { "type": "string" },
+                  "finding_id": { "type": "string" }
+                }
+              }
+            }
+          },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "singleton_labels": {
+      "type": "array",
+      "description": "Required for every POST-MERGE singleton or corroborated-same-family cluster, and forbidden on any other. Both conditions are checked after the tiers are recomputed, and either one re-asks the judgment supplier",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cluster", "label", "reason"],
+        "properties": {
+          "cluster": { "type": "string" },
+          "label": { "type": "string", "enum": ["blind-spot-catch", "family-specific-false-positive"] },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "severities": {
+      "type": "array",
+      "description": "The arbitrated severity and why it survived. Absent for a cluster whose members all agree, where the script takes the agreed severity and records the spread",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cluster", "severity", "arbitration_reason"],
+        "properties": {
+          "cluster": { "type": "string" },
+          "severity": { "type": "string", "enum": ["blocker", "should-fix", "nice-to-have"] },
+          "arbitration_reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "dispositions": {
+      "type": "array",
+      "description": "Required for every cluster",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cluster", "disposition", "disposition_reason"],
+        "properties": {
+          "cluster": { "type": "string" },
+          "disposition": { "type": "string", "enum": ["fix-now", "flag-for-human", "defer"] },
+          "disposition_reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "contradictions": {
+      "type": "array",
+      "description": "A reviewer that explicitly approved what this cluster flags. Non-empty forces flag-for-human",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cluster", "contradicted_by"],
+        "properties": {
+          "cluster": { "type": "string" },
+          "contradicted_by": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["reviewer_id", "finding_id"],
+              "properties": {
+                "reviewer_id": { "type": "string" },
+                "finding_id": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "canonical_edits": {
+      "type": "array",
+      "description": "Which literal edit in the cluster is the canonical one and whether the judgment supplier accepts it for application. `accepted: false`, or no entry at all, leaves canonical_edit null",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cluster", "source", "accepted", "reason"],
+        "properties": {
+          "cluster": { "type": "string" },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["reviewer_id", "finding_id"],
+            "properties": {
+              "reviewer_id": { "type": "string" },
+              "finding_id": { "type": "string" }
+            }
+          },
+          "accepted": { "type": "boolean" },
+          "accepted_by": { "type": "string" },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "rulings": {
+      "type": "array",
+      "description": "A stated ruling on a judgment-call cluster, so an owner has something concrete to confirm or overrule. The synthesis persona may not emit this array; a patch from synthesis carrying a non-empty `rulings` is a hard error",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cluster", "ruling", "owner_to_confirm"],
+        "properties": {
+          "cluster": { "type": "string" },
+          "ruling": { "type": "string", "minLength": 1 },
+          "owner_to_confirm": { "type": "boolean" }
+        }
+      }
+    },
+    "altitude_splits": {
+      "type": "array",
+      "description": "One lens rating a document's seams high-severity while the others rate the same gaps by consequence. Reported in `disagreements` as a split and never as a conflict",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["reviewer_id", "clusters", "note"],
+        "properties": {
+          "reviewer_id": { "type": "string" },
+          "clusters": { "type": "array", "items": { "type": "string" } },
+          "note": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "method_caveat": { "type": "string", "minLength": 1, "description": "How many families actually ran, what was not supplied to the seats, and any salvage or deviation from the runbook" }
+  }
+}

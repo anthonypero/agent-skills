@@ -11,7 +11,7 @@ The prototype that motivates this skill is on disk at `.agents/subprojects/annot
 
 The value is governed by **independence**, not by count. Everything here is machinery around that one sentence.
 
-> **This is v0.** It runs a panel end to end and leaves reconciliation to you. See *What v0 does not have* at the bottom before you promise anyone anything.
+> **This is v0.** It runs a panel end to end and reconciles it with `reconcile.py`, which takes the half of the judgment no script can compute from you as a patch. See *What v0 does not have* at the bottom before you promise anyone anything.
 
 ## First-run setup
 
@@ -106,19 +106,34 @@ python3 skills/ensemble-review/scripts/render_harness_report.py <run-dir>/<lens>
 
 It validates against the same schema the OpenRouter leg is held to and writes the `.md` beside the JSON, so both legs leave the same artifacts. If it reports validation errors, send them back to that subagent as one repair re-ask; if the second attempt also fails, retire the seat and record it as a **missing seat** in the manifest and in the reconciliation. Never silently drop a reviewer — a four-seat panel that reconciled three reports has to say so, because agreement counts are meaningless otherwise.
 
-### 6. Reconcile, in session
+### 6. Reconcile
 
-This is the product. The reports are inputs. Read every `<run-dir>/*.json` and follow these seven steps, then write `<run-dir>/reconciliation.md`.
+This is the product. The reports are inputs. **`reconcile.py` is the only writer of `reconciliation.json` and `reconciliation.md`** — you never write either by hand. It computes what a script can compute and takes the rest from you as a **judgment patch**.
 
-1. **Collect and validate.** Load every report in the run directory. Record any seat that is missing and why.
-2. **Cluster.** Group findings that name the same defect: match on overlapping `location`, then on `quote` overlap, then on `claim` equivalence. Collapse each reviewer's own duplicates first, so one reviewer contributes at most one finding per cluster. Cluster ids follow the prototype: `BK-n` blocker, `SF-n` should-fix, `NH-n` nice-to-have.
-3. **Tier by agreement, weighted by family.** For each cluster record `n_reviewers` **and** `n_families`. **Consensus** = two or more families, or every seated reviewer. **Majority** = more than half the seats but one family. Otherwise **singleton**. Two cross-family agreements outrank three same-family agreements, and the document must show both counts so a reader can check the ruling. Every singleton is labelled explicitly as either a blind-spot catch or a family-specific false positive, with the reason. An unlabelled singleton is not an allowed output.
-4. **Arbitrate severity.** Where reviewers rate one cluster differently, take the highest severity whose reasoning survives scrutiny. A severity argued with a `citation` beats one argued without. Downgrade one step when a finding is a singleton, below `high` confidence, and uncited. Record the spread, not just the result.
-5. **Dispose.** Each cluster gets `fix-now`, `flag-for-human`, or `defer`. Anything with `change_kind: judgment-call` is always `flag-for-human`. Any cluster another reviewer explicitly contradicts is `flag-for-human` regardless of counts. A design fork that needs an owner's ruling is called out as such, never disposed silently.
-6. **Surface disagreements.** A required section, written even when it is empty. It carries three things: direct contradictions (one reviewer flags what another approved), severity spreads of two or more steps, and **altitude splits** — two lenses rating a document clean while two rate its seams high-severity is not a conflict and must not be reported as one. This is the section the human reads first.
-7. **Record choices.** Every arbitration and disposition names the reviewers on each side and the reason, so any fix can be audited backwards from the artifact to the finding to the reviewer that raised it.
+```bash
+python3 skills/ensemble-review/scripts/reconcile.py --run-dir <run-dir>
+```
 
-Shape `reconciliation.md` like `.agents/subprojects/annotate/pm/reviews/fullspec-reconciliation.md`: verdict matrix, blockers, corroborated should-fixes with their lens counts, single-lens should-fixes, nice-to-haves, disagreements, action plan. End with a method caveat stating how many families actually ran — a run that ended single-family captured lens decorrelation only, and the document has to say so.
+The first run calls no models and writes nothing but `<run-dir>/judgment-request.json`, then exits 3 saying a patch is required. That file is your worksheet: one entry per **provisional cluster**, with its members, the key that joined them, its provisional tier and the fields you owe it.
+
+**What the script did on its own.** It collapsed each reviewer's duplicates, then grouped findings across reviewers on the two keys it can compute, in order — **normalized location equality** (NFKC, case-folded, markup and a leading `§` stripped, every run of non-alphanumerics collapsed to a space; equal, or one a prefix of the other at a space boundary) and then **quote overlap** (normalized the same way; containment either direction, or a longest common substring of at least 60 characters). Each group is a provisional cluster `P-n`. It tiered them, provisionally.
+
+**What you owe it**, written to `<run-dir>/judgment.json` against `schemas/judgment-patch.schema.json`:
+
+- **`claim_joins`** — provisional clusters that name the same defect from different anchors. Claim equivalence is a semantic call and is never computed; every cluster it forms is marked `match_key: "claim"` and `judgment: true`, so a reader auditing the document knows which clusters rest on a mind.
+- **`splits`** — a mechanically joined group whose members turn out to name different defects. Two reviewers quoting one sentence to make two arguments is the common case. Splits apply first, so a join can name a split's product (`P-4.1`).
+- **`singleton_labels`** — every **post-merge** `singleton` or `corroborated-same-family` cluster is either a **blind-spot catch** or a **family-specific false positive**, with the reason. An unlabelled one is not an allowed output, and the script refuses the patch.
+- **`severities`** — the arbitrated severity and why it survived, for any cluster whose members disagree. A severity argued with a `citation` beats one argued without; downgrade one step when a finding is a singleton, below `high` confidence, and uncited. Where the members agree the script takes their severity and records the spread.
+- **`dispositions`** — `fix-now`, `flag-for-human` or `defer`, for **every** cluster, with the reason and the reviewers on each side. A `judgment-call` change kind is `flag-for-human` unless you state a ruling on it in `rulings`, which is a thing an interactive host may do and the `synthesis` persona may not.
+- **`contradictions`**, **`canonical_edits`**, **`altitude_splits`** and the **`method_caveat`** — who flatly disagreed with whom, which literal edit you accept for application and why, which lens is rating a document's seams at a different altitude than the rest (not a conflict, and never reported as one), and how many families actually ran.
+
+Then run it again. It merges your patch, **recomputes every tier from the post-merge membership** — a tier computed before your joins is a tier computed against the wrong member set — validates, mints the final `BK-n` / `SF-n` / `NH-n` ids, computes the run-level verdict from arbitrated severity and disposition together, and writes both files atomically:
+
+```bash
+python3 skills/ensemble-review/scripts/reconcile.py --run-dir <run-dir> --judgment <run-dir>/judgment.json
+```
+
+There is no verdict field in the patch. If you disagree with the verdict, change a **disposition** — a claim about what should happen to a cluster, which is reviewable — rather than the number a rule produced. If the patch does not hold against the post-merge state, nothing is written and the failing entries are named; fix them and re-run. `--render-only` re-renders the Markdown from the JSON, and `--artifact <path>` checks that every quoted anchor is real text in the pinned document.
 
 ## Independence invariants
 
@@ -136,6 +151,10 @@ A v0 that violates these is not this skill.
 | --- | --- |
 | "How do I fill a finding?" | `references/finding-schema.md` |
 | "What exactly is a valid report?" | `schemas/review-report.schema.json` |
+| "What do I owe the reconciler?" | `schemas/judgment-patch.schema.json`, and `<run-dir>/judgment-request.json` for this run |
+| "What shape is the reconciliation?" | `schemas/reconciliation.schema.json` |
+| "How do the mechanical match keys work?" | `scripts/lib/reconcile_core.py` — `normalize_location`, `location_match`, `quote_match` |
+| "Does the clustering still work?" | `python3 scripts/tests/test_replay.py` — the deterministic replay of the 2026-09-18 panel |
 | "Which models run which family?" | `templates/config.json` |
 | "What does the measured panel seat?" | `templates/panels/spec-review.json` |
 | "What does each lens actually ask?" | `agents/lens-*.md` |
@@ -147,6 +166,11 @@ A v0 that violates these is not this skill.
 | Key | File | Domain | Used by |
 | --- | --- | --- | --- |
 | `finding-schema` | `references/finding-schema.md` | Domain knowledge — the output contract | every persona, both legs |
+| `reconcile` | `scripts/reconcile.py` | The only writer of both reconciliation files | step 6, interactively and autonomously |
+| `reconcile-core` | `scripts/lib/reconcile_core.py` | Match keys, tiers, patch merge, verdict — importable without the CLI | `reconcile.py`, the replay test |
+| `judgment-patch` | `schemas/judgment-patch.schema.json` | The contract for the judgment you supply | step 6 |
+| `reconciliation` | `schemas/reconciliation.schema.json` | The contract for the product | `reconcile.py`, later `apply_fixes.py` |
+| `replay` | `scripts/tests/test_replay.py` | Acceptance (a): the clustering replayed against a hand reconciliation | run it after any change to the core |
 
 ## Dynamic context loading matrix
 
@@ -161,10 +185,9 @@ A v0 that violates these is not this skill.
 
 Say this plainly to anyone who asks what the skill does. None of it is stubbed; it is absent.
 
-- **`reconcile.py`** — reconciliation is done by the host session, by hand, following step 6 above. There is no `reconciliation.json`, no clustering code, and no `reconciliation.schema.json`.
-- **`apply_fixes.py` and auto-apply** — nothing is ever written back to the artifact. `change_kind` and `literal_edit` are collected so the gate can be built, and are not read by anything yet.
+- **`apply_fixes.py` and auto-apply** — nothing is ever written back to the artifact. `change_kind` and `literal_edit` are collected, and `reconciliation.json` now carries a `canonical_edit` and an `edit_conflict` flag per cluster so the gate can be built, but no code reads them yet.
 - **`install.sh`** — there is no installer. The key check is `dispatch.py --help`.
-- **The `synthesis` persona and autonomous mode** — there is no reconciler persona and no unattended run. Every run has a human at the reconciliation step.
+- **The `synthesis` persona and autonomous mode** — `reconcile.py` reads a judgment patch from either author, but nothing here can *produce* one unattended: there is no reconciler persona and no unattended run. Every run has a human writing `judgment.json`.
 - **Four of the eight lenses** — `completeness`, `security`, `alternatives` and `second-order` are specced and not written. `spec-review.json` carries a fifth seat under `optional_seats` (completeness on `xai`) that cannot be enabled until that persona exists.
 - **Family constraint resolvers** — `non-claude` and `distinct` are not implemented. A seat's `family` must be a named family from the config tier map. `spec-review.json` therefore names four concrete families where the spec writes constraints.
 - **Budget projection** — no pre-flight estimate and no `budget_usd` knob. Cost is reported after the fact, per seat in `_meta.cost_usd` and per run in the manifest.

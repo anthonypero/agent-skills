@@ -30,7 +30,9 @@ skills/ensemble-review/
 ├── references/
 │   └── finding-schema.md           # how to fill a finding; loaded into every persona prompt
 ├── schemas/
-│   └── review-report.schema.json   # the report envelope and the finding, draft 2020-12
+│   ├── review-report.schema.json   # the report envelope and the finding, draft 2020-12
+│   ├── judgment-patch.schema.json  # the judgment a mind supplies to the reconciler
+│   └── reconciliation.schema.json  # the consensus document reconcile.py writes
 ├── templates/
 │   ├── config.json                 # tier × family → concrete model id
 │   └── panels/spec-review.json     # the measured four-lens panel
@@ -38,8 +40,12 @@ skills/ensemble-review/
     ├── dispatch.py                 # one persona × one family → a validated report on disk
     ├── run_panel.py                # every seat in parallel, plus the manifest
     ├── render_harness_report.py    # the same artifacts for the harness leg
+    ├── reconcile.py                # the only writer of both reconciliation files
     ├── backends/openai_compat.py   # the only driver: POST {base_url}/chat/completions
-    └── lib/report.py               # agent-file parsing, validation, rendering, digests
+    ├── lib/report.py               # agent-file parsing, validation, rendering, digests
+    ├── lib/reconcile_core.py       # match keys, tiers, judgment-patch merge, verdict
+    ├── lib/schema.py               # the JSON Schema subset both contracts are checked against
+    └── tests/test_replay.py        # the deterministic replay of the 2026-09-18 panel
 ```
 
 ## Tiers and model picks
@@ -83,6 +89,16 @@ Validation is hand-written in `scripts/lib/report.py` — required fields, types
 
 The dispatcher **overwrites the audit fields** — `schema_version`, `reviewer_id`, `lens`, `family`, `model`, `leg`, `artifact`, `references` — with what it knows, before validating. The model cannot get the audit record wrong, and validation bites on the part that is actually the reviewer's work: verdict, summary, findings, method notes.
 
+## Reconciliation and the judgment patch
+
+`reconcile.py` is the **only** writer of `reconciliation.json` and `reconciliation.md`, in every mode. It splits the algorithm along the line that can actually be drawn: what a script can compute, and what it cannot.
+
+The script computes the clustering on two keys it can reproduce — **normalized location equality** and **quote overlap at a 60-character longest-common-substring threshold** — then the agreement tiers, the final `BK` / `SF` / `NH` ids and the run-level verdict. What it cannot compute arrives as a **judgment patch** at `<run-dir>/judgment.json`, validated against `schemas/judgment-patch.schema.json`: claim joins (two findings naming one defect from different anchors), splits (one anchor carrying two arguments), singleton labels, severity arbitrations, dispositions, contradictions, canonical-edit acceptances and the method caveat. Run the script with no patch and it writes `judgment-request.json` — one entry per provisional cluster with the fields it owes — and exits 3.
+
+Order is load-bearing and is fixed in `lib/reconcile_core.py`: provisional clusters → provisional tiers → merge the patch's splits and joins → **recompute every tier from the post-merge membership** → apply labels, severities and dispositions → validate → mint ids. A tier computed before the joins is a tier computed against the wrong member set, so two patch errors fall straight out of the recompute: a post-merge singleton with no label, and a label that lands on a cluster that is no longer one. Either one writes nothing and names the failing entry.
+
+Every cluster records the `match_key` that joined it and a `judgment` flag that is true exactly when the join was semantic, so a reader can see which clusters rest on a mind. `scripts/tests/test_replay.py` is the control: it feeds the four reports of the 2026-09-18 panel and a `judgment.json` transcribed from that run's hand reconciliation through the core and checks membership, tiers, labels, spreads and the verdict against the hand document. No models are called and nothing is written.
+
 ## Smoke test
 
 Run on 2026-09-18 against a 40-line sample spec with two planted contradictions — a digest cap stated as 2000 characters in one section and enforced at 2500 in another, and a "three tiers" sentence followed by a four-item list. One persona (`lens-consistency`), one call per family, `fast` tier, `--max-tokens 6000`.
@@ -113,10 +129,9 @@ Total recorded spend across every smoke call, including the discarded first roun
 
 This is a deliberate subset of `design/v1-spec.md`, built to be usable today and fed back through itself. Absent, not stubbed:
 
-- **`reconcile.py`** — reconciliation is done by the host session by hand, following `SKILL.md` step 6. No `reconciliation.json`, no clustering code, no `reconciliation.schema.json`.
-- **`apply_fixes.py` and the auto-apply gate** — nothing is written back to the artifact. `change_kind` and `literal_edit` are collected so the gate can be built later and are read by nothing today.
+- **`apply_fixes.py` and the auto-apply gate** — nothing is written back to the artifact. `change_kind` and `literal_edit` are collected, and `reconciliation.json` carries a `canonical_edit` and an `edit_conflict` flag per cluster so the gate can be built later, but no code reads them today.
 - **`install.sh`** — no installer. The key check is `dispatch.py --help`.
-- **The `synthesis` persona and autonomous mode** — no reconciler persona, no unattended run.
+- **The `synthesis` persona and autonomous mode** — `reconcile.py` accepts a judgment patch from either author, but nothing here produces one unattended: no reconciler persona, no unattended run.
 - **Four of the eight lenses** — `completeness`, `security`, `alternatives`, `second-order` are specced and unwritten. `spec-review.json` carries a fifth seat under `optional_seats` (completeness on `xai`) that cannot be enabled until that persona exists.
 - **The `non-claude` and `distinct` family constraint resolvers** — not implemented. A seat's `family` must be a named family from the config tier map, so `spec-review.json` names four concrete families where the spec writes constraints. Composing a panel means choosing families by hand.
 - **Budget projection** — no pre-flight estimate, no `budget_usd` knob. Cost is reported after the fact, per seat in `_meta.cost_usd` and per run in `manifest.cost_usd_total`.
