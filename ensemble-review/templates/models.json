@@ -2,7 +2,7 @@
   "schema_version": "1",
   "description": "The model registry: per concrete model id, what a token costs, how much room the model has, which effort strings it accepts, and how many completion tokens one review seat spends on it. refresh_models.py refreshes prices, context limits and effort vocabularies from the OpenRouter catalogue and never touches output_token_prior — the catalogue knows what a token costs and only a run knows how many a lens spends. Priors are estimates and are labelled as such everywhere they are used.",
   "source": "https://openrouter.ai/api/v1/models",
-  "refreshed_at": "2026-09-18",
+  "refreshed_at": "2026-09-19",
   "models": {
     "anthropic/claude-sonnet-5": {
       "input_price_per_token": 2e-06,
@@ -91,8 +91,8 @@
       "measured_output_price_source": "no frozen run dispatched this model"
     },
     "moonshotai/kimi-k3": {
-      "input_price_per_token": 2.1e-06,
-      "output_price_per_token": 1.095e-05,
+      "input_price_per_token": 1.7e-06,
+      "output_price_per_token": 8.5e-06,
       "family": "kimi",
       "context_limit": 1048576,
       "effort_vocabulary": [
@@ -105,7 +105,7 @@
       "min_max_tokens": 64000,
       "price_source": "openrouter catalogue",
       "source": "https://openrouter.ai/api/v1/models",
-      "refreshed_at": "2026-09-18",
+      "refreshed_at": "2026-09-19",
       "measured_output_price": 1.5e-05,
       "measured_output_price_source": "run 2 (2026-09-18) consistency-kimi attempt 1: 0.48 / 32000 completion tokens"
     },
