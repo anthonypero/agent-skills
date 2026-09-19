@@ -89,7 +89,7 @@ Each brief must carry the persona body verbatim plus the finding schema, the art
 
 ## The judge leg
 
-One harness agent, and it is not a reviewer. `agents/judge.md` installs as `ensemble-judge`, pinned to frontier Claude at `high` effort with read-only tools, and it supplies the **judgment patch** on an unattended run where it is installed. It is the same job the `synthesis` persona does under the same rubric — its body references `agents/synthesis.md` rather than restating it — and the differences are all about tools: the persona is handed everything in one message and this goes and reads it, from the package, the run directory and the pinned `inputs/` copies, and nothing else.
+One harness agent, and it is not a reviewer. `agents/judge.md` installs as `ensemble-judge`, pinned to frontier Claude at `high` effort with three read tools and one `Write` bound to its staging path, and it supplies the **judgment patch** on an unattended run where it is installed. It is the same job the `synthesis` persona does under the same rubric — its body references `agents/synthesis.md` rather than restating it — and the differences are all about tools: the persona is handed everything in one message and this goes and reads it, from the package, the run directory and the pinned `inputs/` copies, and nothing else.
 
 It follows the harness leg's rules, not the OpenRouter leg's. Its model is pinned in the agent definition rather than at spawn. It writes to a seat-private staging path, `<run-dir>/../.ensemble-staging/<run-id>/ensemble-judge/judgment.json`, and never into the run directory. Its blinding is prompt-enforced. It costs the run nothing, so `manifest.judge` records it with `leg: harness` and a null cost, and `cost_usd_total` does not move.
 
