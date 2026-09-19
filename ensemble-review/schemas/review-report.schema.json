@@ -40,8 +40,18 @@
       "type": "string",
       "minLength": 1
     },
+    "artifact_revision": {
+      "description": "SHA-256 of the artifact bytes this seat actually read — the copy in the run's inputs/ directory. Null when the seat was dispatched against a working-tree path rather than a materialized one, which is how every report written before revisions existed reads. reconcile.py compares it to the manifest's and refuses on a mismatch; null is unpinned, warned about, and allowed through.",
+      "type": ["string", "null"]
+    },
     "references": {
-      "description": "Repo-relative paths of the source-of-truth documents supplied to the reviewer, each with its revision when one is known.",
+      "description": "Repo-relative paths of the source-of-truth documents supplied to the reviewer.",
+      "type": "array",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "reference_revisions": {
+      "description": "SHA-256 of each reference's materialized bytes, positionally aligned with `references`. Absent when the seat read working-tree paths.",
       "type": "array",
       "items": { "type": "string" },
       "default": []

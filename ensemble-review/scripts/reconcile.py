@@ -27,6 +27,7 @@ Exit codes: 0 success, meaning both files were written and every expected seat v
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import sys
@@ -329,6 +330,10 @@ def main(argv=None):
             "the anchor check is not optional: every `quote` and every `literal_edit.old_text` is "
             "verified against the pinned artifact. Pass --artifact <path>.\n")
         return 1
+    revision_error = _check_revision(run_dir, artifact_path)
+    if revision_error:
+        sys.stderr.write("{0}\n".format(revision_error))
+        return 1
     with open(artifact_path, "r", encoding="utf-8") as handle:
         artifact_text = handle.read()
 
@@ -403,13 +408,54 @@ def main(argv=None):
     return 0
 
 
-def _resolve_artifact(run_dir, override):
-    """The pinned artifact: `--artifact` wins, otherwise the manifest's own `artifact` path.
+def _check_revision(run_dir, artifact_path):
+    """Refuse when the resolved artifact is not the bytes the seats read. Returns a message or None.
 
-    Returns (path, None) or (None, why). The manifest records the path the panel was dispatched
-    with, which is repo-relative, so it is tried against the working directory and then against the
-    ancestors of the run directory — enough to find it from anywhere inside the repo, and honest
-    about failing rather than reconciling with the check silently off.
+    The manifest's `artifact_revision` is the SHA-256 of the bytes materialized into `inputs/`, so
+    this is the check that stops a reconciliation being computed against a document that has moved on
+    since the panel ran — the anchors would be checked against text no reviewer ever saw.
+
+    `artifact_revision: null` is **unpinned, not mismatched**: every report written before revisions
+    existed reads that way, including the replay fixture. It warns and proceeds.
+    """
+    try:
+        manifest = core.load_manifest(run_dir)
+    except core.ReconcileError:
+        return None
+    recorded = manifest.get("artifact_revision")
+    if not recorded:
+        sys.stderr.write(
+            "warning: this run's manifest records no `artifact_revision`, so the artifact at {0} is "
+            "unpinned — the anchor check runs against whatever is on disk today.\n".format(artifact_path))
+        return None
+    actual = _sha256(artifact_path)
+    if actual == recorded:
+        return None
+    return (
+        "refusing to reconcile: {0} is not the artifact this run reviewed.\n"
+        "  manifest artifact_revision: {1}\n"
+        "  the file on disk hashes to: {2}\n"
+        "Reconcile against the run's own `inputs/` copy, or re-run the panel against the current "
+        "document. `--render-only` re-renders the existing reconciliation without this check.".format(
+            artifact_path, recorded, actual))
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(65536), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _resolve_artifact(run_dir, override):
+    """The pinned artifact: `--artifact` wins, then the run's own `inputs/` copy, then the manifest path.
+
+    Returns (path, None) or (None, why). `inputs/` is preferred because it is the bytes the seats
+    actually read, and it does not move when the working-tree document does. The manifest records the
+    path the panel was dispatched with, which is repo-relative, so it is tried against the working
+    directory and then against the ancestors of the run directory — enough to find it from anywhere
+    inside the repo, and honest about failing rather than reconciling with the check silently off.
     """
     if override:
         if os.path.isfile(override):
@@ -420,6 +466,13 @@ def _resolve_artifact(run_dir, override):
         manifest = core.load_manifest(run_dir)
     except core.ReconcileError as failure:
         return None, str(failure)
+
+    materialized = manifest.get("artifact_input")
+    if materialized:
+        candidate = os.path.join(run_dir, materialized)
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate), None
+
     recorded = manifest.get("artifact")
     if not recorded:
         return None, "the manifest for this run records no `artifact` path"

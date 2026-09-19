@@ -171,6 +171,17 @@ def validate_report(report, lens=None):
         if not isinstance(refs, list) or any(not _is_str(item) for item in refs):
             errors.append("`references` must be an array of strings")
 
+    # The revision the seat read, stamped by the dispatcher from the bytes in `inputs/`. Null is the
+    # honest value for a seat dispatched against a working-tree path, and for every report written
+    # before revisions existed, so it is optional and nullable rather than required.
+    revision = report.get("artifact_revision")
+    if revision is not None and (not _is_str(revision) or not revision.strip()):
+        errors.append("`artifact_revision` must be a non-empty string or null")
+    reference_revisions = report.get("reference_revisions")
+    if reference_revisions is not None:
+        if not isinstance(reference_revisions, list) or any(not _is_str(item) for item in reference_revisions):
+            errors.append("`reference_revisions` must be an array of strings")
+
     findings = report.get("findings")
     if findings is None:
         pass

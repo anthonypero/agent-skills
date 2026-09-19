@@ -35,17 +35,29 @@ skills/ensemble-review/
 │   └── reconciliation.schema.json  # the consensus document reconcile.py writes
 ├── templates/
 │   ├── config.json                 # tier × family → concrete model id
+│   ├── models.json                 # the registry: prices, context limits, effort vocabularies, priors
 │   └── panels/spec-review.json     # the measured four-lens panel
 └── scripts/
     ├── dispatch.py                 # one persona × one family → a validated report on disk
-    ├── run_panel.py                # every seat in parallel, plus the manifest
+    ├── run_panel.py                # claim → materialize → resolve → project → dispatch → manifest
     ├── render_harness_report.py    # the same artifacts for the harness leg
     ├── reconcile.py                # the only writer of both reconciliation files
-    ├── backends/openai_compat.py   # the only driver: POST {base_url}/chat/completions
+    ├── refresh_models.py           # pull the OpenRouter catalogue, diff the registry, report what moved
+    ├── backends/__init__.py        # load_driver: a package module, or a driver at a file path
+    ├── backends/openai_compat.py   # the only shipped driver: POST {base_url}/chat/completions
     ├── lib/report.py               # agent-file parsing, validation, rendering, digests
     ├── lib/reconcile_core.py       # match keys, tiers, judgment-patch merge, verdict
+    ├── lib/registry.py             # the model registry: caps, prices, priors, the missing-model error
+    ├── lib/budget.py               # the cost and token pre-flight, and the refusal document
+    ├── lib/runs.py                 # claim, materialize, hash, the manifest's compare-and-set
     ├── lib/schema.py               # the JSON Schema subset both contracts are checked against
-    └── tests/test_replay.py        # the deterministic replay of the 2026-09-18 panel
+    └── tests/                      # stdlib unittest, no network, no paid call
+        ├── test_replay.py          # the deterministic replay of the 2026-09-18 panel
+        ├── test_dispatch_retry.py  # the cap, the length retry, the registry gate, backoff
+        ├── test_run_lifecycle.py   # claim, materialize, projection, budget gate, CAS, resume
+        ├── test_reconcile_revision.py  # the artifact-revision check
+        ├── harness.py              # a temp workspace: artifact, config, registry, panel
+        └── fake_backend.py         # a scripted connector, loaded by file path like any driver
 ```
 
 ## Tiers and model picks
@@ -115,7 +127,7 @@ Run on 2026-09-18 against a 40-line sample spec with two planted contradictions 
 
 **All seven families found both planted contradictions.** Six of seven also independently raised a third defect nobody planted — the cap's stated rationale does not survive its own arithmetic (three 2000-character digests exceed the 5500-character channel it cites). That is the corroboration signal the skill is built to produce, arriving unprompted on a 40-line toy.
 
-Six of seven rated the cap conflict `blocker`; `glm` rated it `should-fix`. A one-step severity spread across families on a defect every family found is exactly what the reconciliation's *arbitrate severity* step exists to resolve, and it showed up on the first run.
+Six of seven rated the cap conflict `blocker`; `glm` rated it `should-fix`. A one-step severity spread across families on a defect every family found is exactly what the reconciliation's _arbitrate severity_ step exists to resolve, and it showed up on the first run.
 
 `glm` and `deepseek` both failed at `--max-tokens 6000` — GLM burned the cap on reasoning tokens and returned truncated JSON twice, DeepSeek returned an empty `content` with everything in `reasoning`. Both pass at 20000. Two fixes came out of that: the driver now falls back to the `reasoning` field when `content` is empty, and `_meta.reasoning_tokens` is recorded so the cause is visible rather than guessed at. GLM's 11,519 reasoning tokens against a 40-line document is the number to remember when setting a cap.
 
@@ -134,10 +146,13 @@ This is a deliberate subset of `design/v1-spec.md`, built to be usable today and
 - **The `synthesis` persona and autonomous mode** — `reconcile.py` accepts a judgment patch from either author, but nothing here produces one unattended: no reconciler persona, no unattended run.
 - **Four of the eight lenses** — `completeness`, `security`, `alternatives`, `second-order` are specced and unwritten. `spec-review.json` carries a fifth seat under `optional_seats` (completeness on `xai`) that cannot be enabled until that persona exists.
 - **The `non-claude` and `distinct` family constraint resolvers** — not implemented. A seat's `family` must be a named family from the config tier map, so `spec-review.json` names four concrete families where the spec writes constraints. Composing a panel means choosing families by hand.
-- **Budget projection** — no pre-flight estimate, no `budget_usd` knob. Cost is reported after the fact, per seat in `_meta.cost_usd` and per run in `manifest.cost_usd_total`.
 - **The other three panel templates** — `research-report`, `design-decision`, and the deferred `code-review` stub.
-- **Artifact and reference revisions** — the manifest records paths, not the git revision each file was read at, so two runs against a changed file are indistinguishable from the manifest alone.
-- **`mode: identical`** — the corroboration-voting knob is not implemented.
+- **`lib/paths.py` and the workspace override cascade** — every file still loads from the package. `--config` and `--models` point elsewhere by hand, and `backends/__init__.py` will load a driver from a file path so a project can bind a family to its own connector, but there is no `<project>/.agents/ensemble-review/` root and no deep merge of `config.json`. The manifest's `roots` block already records which directory each loaded file came from, so the audit record is ready for a cascade that does not exist.
+- **Mid-flight budget metering** — the projection is a dispatch gate only. Nothing meters spend as seats return, so a panel that overruns its projection runs to completion.
+- **`min_families` enforcement and re-seating** — `min_families_target` is recorded and never acted on, and an unreachable family is not re-seated. A context overflow is deliberately never re-seated and is reported as under-seated instead.
+- **`mode: identical` and `verify_web`** — neither knob exists, so neither is refused by name.
+
+Built since the first cut of this list: the completion cap and its length retry, the per-model cap floor, the model registry and `refresh_models.py`, the cost and token pre-flight with its budget gate and `budget-refusal.json`, content-hash revisions with a read-only `inputs/` directory, and resume with a compare-and-set claim.
 
 ## Rebuild items
 
@@ -150,14 +165,23 @@ The first panel against a real document (`design/v1-spec.md`, 2026-09-18, four s
 - **A failed seat carries its cost.** GLM's two attempts cost about $0.34 by the dashboard and $0 by the manifest. `dispatch.py` now writes `<reviewer-id>.failed.json` — the same `_meta` block a passing seat gets, plus the validation errors and a pointer to the raw response — beside `<reviewer-id>.invalid.txt`, and `run_panel.py` folds its usage, cost and attempt summary into the seat record and into `cost_usd_total`. A failed seat's spend is now in the run total and on the console line.
 - **`render_harness_report.py` no longer assumes the harness leg.** A salvaged OpenRouter report came out labelled `leg: harness, tier: standard`, which is a false audit record. `--leg {harness,openrouter}` (default `harness`) and `--tier` say what the seat was; a `leg` or `_meta.tier` already in the JSON is believed over the flag and a note goes to stderr when the two disagree; `_meta.provider` follows the resolved leg; and an unknown tier on the OpenRouter leg stays unset rather than being invented.
 
+### Fixed in the v1 rebuild
+
+- **`max_tokens` is a knob, and `length` is retried before repair.** Every call carries an explicit cap, `--max-tokens` sets it per run (default 32000), and a per-model `min_max_tokens` floor in the registry raises it for the seat that needs it — Kimi K3 ships at 64000, because run 2's consistency seat spent a whole 32000-token cap on reasoning and returned nothing. A `finish_reason` of `length` is retried **once at double the cap with a fresh prompt**: the truncated bytes are discarded rather than quoted into a 90k-token repair prompt, which is what that run paid $0.66 for. A second `length` falls through to the repair path. Every call's cap, finish reason, usage and cost land in `_meta.attempts`, failed calls included.
+- **Reasoning-effort vocabularies are now data.** `templates/models.json` carries each model's `effort_vocabulary`, refreshed from the catalogue's own `reasoning.supported_efforts`. `dispatch.py` reads the per-model effort map in `config.json`, checks the string against that vocabulary, and sends it as `reasoning.effort`; a model absent from the map is still sent no effort parameter at all, and an effort the model does not accept is dropped with a warning rather than sent into a 400. The manifest records the effort actually sent per seat, so a reader can tell a panel that ran at mixed depths.
+- **A projection exists, and it is built on priors rather than on prompt size.** `lib/budget.py` prices each seat as `input_price × prompt tokens + output_price × the model's output-token prior`, plus a 50% repair allowance per seat and one synthesis call. Against run 2's numbers that lands near $1.5 on a run that cost $1.47 and was projected at $1.00 by prompt size alone. Prompt tokens are approximated at four characters per token — no tokenizer dependency — and every figure is labelled an estimate wherever it is printed.
+- **The artifact has a revision, and three mechanisms use it.** `run_panel.py` copies the artifact and every reference into a read-only `<run-dir>/inputs/`, and a revision is the SHA-256 of the bytes written there, with the commit id beside it when that file's tree is clean. Seats read those bytes; resume refuses when the input fingerprint has moved; `reconcile.py` hashes the artifact it resolves against the manifest's `artifact_revision` and refuses on a mismatch. **In the ordinary case that refusal never fires**, because `reconcile.py` resolves the run's own `inputs/` copy first and those bytes cannot change — editing the working-tree document afterwards is fine and always was. It fires only when `--artifact <path>` overrides the resolution, or when the `inputs/` copy is gone and the working-tree file has moved on since. A null revision is unpinned, warned about, and allowed through, which is what keeps the frozen replay fixture running.
+
 ### Still open
 
-- **Reasoning tokens bill as output, and several frontier models will not let you opt out.** `_meta.reasoning_tokens` records them per seat from `usage.completion_tokens_details.reasoning_tokens` when the provider reports it. They are often the larger half of a seat's bill and are invisible in the completion, so any budget projection that estimates from prompt size alone will be wrong by a multiple.
-- **Reasoning-effort vocabularies differ by vendor** — GLM and Kimi accept only `max`/`high`/`low`, others use their own words. v0 therefore sends **no** `reasoning` or `reasoning_effort` parameter at all and lets each model default, which keeps one prompt working across seven families at the cost of not controlling depth. A rebuild that wants control needs a per-family effort map in `config.json`, and has to decide whether a panel where the seats ran at different depths is still comparable.
-- **`max_tokens` is a real failure mode, not a knob.** The frontier proof call hit its cap mid-JSON and cost a repair re-ask — a full second call, artifact and all, for a truncation. The cap should scale with artifact size, and a `finish_reason` of `length` should be detected and retried with a larger cap rather than sent through the generic repair path.
+- **Reasoning tokens bill as output, and several frontier models will not let you opt out.** `_meta.reasoning_tokens` records them per seat from `usage.completion_tokens_details.reasoning_tokens` when the provider reports it. They are often the larger half of a seat's bill and are invisible in the completion, which is why the projection is built on a measured output-token prior rather than on prompt size.
+- **The priors are four measurements and eight defaults.** `openai/gpt-5.6-sol`, `z-ai/glm-5.3-flash`, `moonshotai/kimi-k3` and `x-ai/grok-4.6` carry run 2's accepted-attempt completion tokens and `openai/gpt-6-astra` carries run 1's; every other model in the registry carries a flat 16000 labelled `default`. A projection for a panel of unmeasured models is a guess with a receipt.
 - **The repair re-ask resends the whole user message.** It has to, because the reviewer must re-quote verbatim — but it roughly doubles the cost of a seat that needed one. A cheaper repair that sends only the previous output and the errors would save money and risk fabricated quotes; measure before choosing.
 - **The spec's `min_families` is recorded and never enforced.** `run_panel.py` writes `min_families_target` into the manifest and does nothing with it. The degradation path — re-seat a lens onto an available family, record the substitution, continue — is specced and unbuilt.
-- **`google` at `frontier` is a Flash model.** If a later Gemini Pro lands on OpenRouter, that row should move, and any comparison of panel rounds across that change is not apples to apples.
+- **`google` at `frontier` is a Flash model.** The v3 spec's normative config block leaves the Google frontier cell **empty**, because no Pro-class Google model is on OpenRouter, and adds the `effort` and `provider_routing` keys. `templates/config.json` still carries the Flash model at frontier and neither key; the file was out of scope for the stage that built the registry, so the config and the spec disagree here today.
+- **The manifest's compare-and-set is guarded by a lock directory, not by a transaction.** `manifest.lock` is an exclusive `mkdir` held across one read-modify-write, and a lock older than five minutes is broken so a crashed run cannot wedge a resume. That is enough for the two cases this skill has — several seat threads in one run, and two resumes on one directory — and it is not a distributed lock.
+- **Per-seat `timeout_s` is unimplemented.** The spec gives it a 900-second default and a defined behaviour — expiry flags the seat missing at stage `timeout` and the panel continues — and `run_panel.py` passes no timeout to the `dispatch.py` subprocess at all. A hung provider hangs that seat, and with it the `as_completed` loop, until the process is killed. `MISSING_STAGE` already maps a `timeout` status, so the reconciliation half is ready for the run half that is missing.
+- **The exclusive-mkdir claim does not stop two runs sharing a directory; the seat compare-and-set does.** The spec says two concurrent runs on one artifact can never write into the same directory, and the claim alone delivers that only for a directory that does not yet exist. Because an existing run directory **resumes** by design, two runs both naming the same `--out` do share it. What actually protects the money is one level down: a seat moves `pending`/`failed` → `dispatching` by compare-and-set before its first paid call, so only one of the two runs pays for any given seat, and the other reports it held.
 
 ## Conventions
 

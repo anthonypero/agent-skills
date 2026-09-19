@@ -11,15 +11,27 @@ The prototype that motivates this skill is on disk at `.agents/subprojects/annot
 
 The value is governed by **independence**, not by count. Everything here is machinery around that one sentence.
 
-> **This is v0.** It runs a panel end to end and reconciles it with `reconcile.py`, which takes the half of the judgment no script can compute from you as a patch. See *What v0 does not have* at the bottom before you promise anyone anything.
+> **This is v0.** It runs a panel end to end and reconciles it with `reconcile.py`, which takes the half of the judgment no script can compute from you as a patch. See _What v0 does not have_ at the bottom before you promise anyone anything.
 
 ## First-run setup
 
-No installer. The scripts are standard-library Python 3 and the only external dependency is an OpenRouter key, which `dispatch.py` resolves itself: `skills/lastpass/scripts/lp get global/OPENROUTER_API_KEY` first, then `$OPENROUTER_API_KEY` in the environment. If neither answers it exits with both paths it tried. Check once, cheaply:
+No installer yet. The scripts are standard-library Python 3 and the only external dependency is an OpenRouter key, which `dispatch.py` resolves itself: `skills/lastpass/scripts/lp get global/OPENROUTER_API_KEY` first, then `$OPENROUTER_API_KEY` in the environment. If neither answers it exits with both paths it tried. Check once, cheaply:
 
 ```bash
 python3 skills/ensemble-review/scripts/dispatch.py --help
 ```
+
+The one thing that does need refreshing is the **model registry**, `templates/models.json` — per concrete model id, what a token costs, how much context it has, which effort strings it accepts, and how many completion tokens one review seat spends on it. It ships seeded, and the cost pre-flight is unimplementable without it:
+
+```bash
+python3 skills/ensemble-review/scripts/refresh_models.py            # prices + context limits from the OpenRouter catalogue
+python3 skills/ensemble-review/scripts/refresh_models.py --dry-run   # show the diff, write nothing
+python3 skills/ensemble-review/scripts/refresh_models.py --add z-ai/glm-5.4
+```
+
+It is idempotent — a refresh that changes nothing writes nothing and says so — and it **never touches `output_token_prior`**. The catalogue knows what a token costs; only a run knows how many tokens a lens spends, so priors are updated from run manifests by hand. Offline it exits 1 and leaves the file untouched.
+
+**A resolved seat the registry cannot price is a composition error**, refused before dispatch with exit 1 naming the model and the `--add` line that fixes it. That covers both failures, because presence is not coverage: a model absent from the registry, and a model present with a null input or output price. A seat left out of the projection is a budget gate that does not gate — the run would clear a $5 budget on a projection that priced three of its four seats.
 
 ## Dispatch model
 
@@ -86,12 +98,42 @@ Every seat runs in parallel as its own `dispatch.py` subprocess, so a seat that 
 
 Add `--skip-claude` **only** when you intend to run the claude seats as harness subagents — which means the panel is at `standard` tier. Skipped seats are recorded in the manifest as `leg: harness, status: pending`.
 
+**What the run does before it spends anything**, in this order:
+
+| Stage | What happens |
+| --- | --- |
+| Claim | The run directory is created with an atomic exclusive `mkdir`. On collision the run id's sequence number increments and the claim retries, and the console says which directory the run actually took. |
+| Materialize | The artifact and every reference are copied into `<run-dir>/inputs/`, made read-only, and hashed. **A revision is the SHA-256 of the bytes in `inputs/`**, with the git commit id recorded beside it when that file's working tree is clean. Seats read those bytes, never the working tree, so a mid-run edit cannot give two seats two different documents. |
+| Resolve | Seats resolve to families, tiers, models and connectors, and the registry is checked to cover every one. **The manifest is written here, before the first dispatch**, with every seat `pending`, so a crash after this point still leaves a manifest that knows how many seats there were. |
+| Project | The cost and token pre-flight, always printed, always labelled an estimate. It prices each seat at the registry's catalogue rate, then adds two labelled allowances — an output overrun multiplier for the routing premium a real call pays over the catalogue, and a repair allowance — plus a synthesis call when the run will actually make one. See the knobs below. |
+| Dispatch | Each seat's record moves `pending` → `dispatching` by compare-and-set before its first paid call, and is updated as it returns. Every structured write is atomic. |
+
+**Knobs on `run_panel.py`:**
+
+| Knob | Default | Effect |
+| --- | --- | --- |
+| `--max-tokens` | `32000` | The completion cap sent on every call. A model's `min_max_tokens` floor in the registry raises it for that seat; the cap actually sent is recorded. |
+| `--budget-usd` | `5.00` | The pre-flight budget. Over it, an autonomous run refuses; an interactive one asks. |
+| `--approve-budget` | off | Dispatch anyway. |
+| `--autonomous` | inferred when stdin is not a tty | There is nobody to ask, so an over-budget projection writes `budget-refusal.json` and exits 4 **before any paid call**. |
+| `--reconciler` | the panel's, else `default` | `host`, `synthesis` or `default` (host interactive, synthesis autonomous). Decides whether the projection charges for a synthesis call — an interactive run whose host writes the judgment patch makes none. |
+| `--fresh` | off | Claim a new run directory instead of resuming the one `--out` names. |
+| `--models` | the skill's `templates/models.json` | Point at another registry. |
+
+**Resume.** Re-running against an existing run directory resumes it, and **the reports on disk are the authority, not the manifest's seat statuses.** A seat whose report is present and validates is never re-dispatched — a repeat of a four-seat frontier panel is not a $2.50 no-op. A seat whose report is missing or invalid **is** re-dispatched, even where the manifest still calls it `ok`: that seat is demoted to `failed` with the reason recorded first, so the manifest stops asserting something the directory contradicts. A seat already `dispatching` is left strictly alone and reported as held by another process. A run whose inputs no longer hash to the manifest's `input_fingerprint` is refused with "start a new run id" rather than mixing two documents' reviews in one directory.
+
+Because an existing directory resumes, **two runs naming the same `--out` share it.** The exclusive `mkdir` only protects a directory that does not exist yet; what protects the money is the per-seat compare-and-set, so only one of the two pays for any given seat.
+
+**Exit codes:** `0` every expected seat validated; `1` usage or composition error, including an unpriced model or a refused resume; `2` terminal infrastructure failure — a provider auth failure halts the run with no further paid call, as does zero reporting seats; `3` the run is under-seated; `4` an autonomous budget refusal.
+
+**The three retry paths inside a seat**, which are not the same thing. A transient provider error (429, 5xx, a socket timeout) is retried three times at 1 s, 4 s and 16 s with the same prompt and the same cap. A truncated completion — `finish_reason: length` — is retried **once at double the cap with a fresh prompt**, and the truncated bytes are discarded rather than quoted back; a second `length` falls through to the repair path. A report that does not validate gets one repair re-ask, which is the only prompt that does quote the previous response back. Every call lands in `_meta.attempts` with its cap, its finish reason, its validation errors, its usage and its cost, failed calls included, and the manifest's `cost_usd_total` counts them.
+
 ### 4. Spawn the Claude seats as harness subagents (only with `--skip-claude`)
 
 One subagent per skipped seat, spawned in a single message so they run concurrently. Each brief must carry:
 
 - **The persona body verbatim** — everything after the frontmatter in `agents/lens-<lens>.md`, plus `references/finding-schema.md`. Byte-identical to what the OpenRouter leg sends. If the legs drift, the comparison this skill exists to make is meaningless.
-- **The artifact and the references by path**, with the instruction to read *only* those paths and nothing else in the repo.
+- **The artifact and the references by path**, with the instruction to read _only_ those paths and nothing else in the repo.
 - **The instruction to write** its report as JSON to `<run-dir>/<lens>-claude.json` and to write nothing else.
 - **The instruction to return a digest under 2000 characters** — reviewer id, verdict, counts by severity, the claim lines of its top three findings, and the report path. Nothing more: inter-agent messages truncate near 5500 characters, so disk is the channel and the message is only a pointer.
 - **The instruction not to look for, read, or ask about any other reviewer's output.** Blindness is the invariant.
@@ -114,7 +156,9 @@ This is the product. The reports are inputs. **`reconcile.py` is the only writer
 python3 skills/ensemble-review/scripts/reconcile.py --run-dir <run-dir>
 ```
 
-The first run calls no models and writes nothing but `<run-dir>/judgment-request.json`, then exits 3 saying a patch is required. It needs the **pinned artifact** to do even that: it verifies that every `quote` and every `literal_edit.old_text` is real text in the document the seats read, and drops from its cluster any member whose anchor is not, recording the drop in `anchor_drops`. It resolves the artifact from the manifest's `artifact` path; pass `--artifact <path>` when that does not resolve, and it refuses to run — exit 1 — when neither does. That file is your worksheet: one entry per **provisional cluster**, with its members, the key that joined them, its provisional tier and the fields you owe it.
+The first run calls no models and writes nothing but `<run-dir>/judgment-request.json`, then exits 3 saying a patch is required. It needs the **pinned artifact** to do even that: it verifies that every `quote` and every `literal_edit.old_text` is real text in the document the seats read, and drops from its cluster any member whose anchor is not, recording the drop in `anchor_drops`. It resolves the artifact from the run's own `inputs/` copy first — so a working-tree document that has since moved no longer matters — then from the manifest's `artifact` path; pass `--artifact <path>` when neither resolves, and it refuses to run, exit 1, when none of them does. That file is your worksheet: one entry per **provisional cluster**, with its members, the key that joined them, its provisional tier and the fields you owe it.
+
+It also checks the **revision**: the resolved artifact's SHA-256 against the manifest's `artifact_revision`. A mismatch refuses, exit 1, naming both hashes — `reconciliation.json` is a function of the artifact's bytes, so reconciling against a document that has moved on checks anchors no reviewer ever saw. **In the ordinary case the check passes silently**: the resolution prefers the run's own `inputs/` copy, whose bytes cannot change, so editing the working-tree document after the panel ran does not stop you reconciling it. The refusal is there for the two cases where it can go wrong — `--artifact <path>` pointing the check at a different file, and an `inputs/` copy that has been deleted, leaving only a working-tree file that may have moved on. A manifest with no `artifact_revision` is **unpinned, not mismatched**: it warns and proceeds, which is how every run written before revisions existed still reconciles. `--render-only` is the one mode that runs without either check.
 
 **What the script did on its own.** It collapsed each reviewer's duplicates, then grouped findings across reviewers on the two keys it can compute, in order — **normalized location equality** (NFKC, case-folded, markup and a leading `§` stripped, every run of non-alphanumerics collapsed to a space; equal, or one a prefix of the other at a space boundary) and then **quote overlap** (normalized the same way; containment either direction, or a longest common substring of at least 60 characters). Each group is a provisional cluster `P-n`. It tiered them, provisionally.
 
@@ -187,10 +231,15 @@ Say this plainly to anyone who asks what the skill does. None of it is stubbed; 
 
 - **`apply_fixes.py` and auto-apply** — nothing is ever written back to the artifact. `change_kind` and `literal_edit` are collected, and `reconciliation.json` now carries a `canonical_edit` and an `edit_conflict` flag per cluster so the gate can be built, but no code reads them yet.
 - **`install.sh`** — there is no installer. The key check is `dispatch.py --help`.
-- **The `synthesis` persona and autonomous mode** — `reconcile.py` reads a judgment patch from either author, but nothing here can *produce* one unattended: there is no reconciler persona and no unattended run. Every run has a human writing `judgment.json`.
+- **The `synthesis` persona and autonomous mode** — `reconcile.py` reads a judgment patch from either author, but nothing here can _produce_ one unattended: there is no reconciler persona and no unattended run. Every run has a human writing `judgment.json`.
 - **Four of the eight lenses** — `completeness`, `security`, `alternatives` and `second-order` are specced and not written. `spec-review.json` carries a fifth seat under `optional_seats` (completeness on `xai`) that cannot be enabled until that persona exists.
 - **Family constraint resolvers** — `non-claude` and `distinct` are not implemented. A seat's `family` must be a named family from the config tier map. `spec-review.json` therefore names four concrete families where the spec writes constraints.
-- **Budget projection** — no pre-flight estimate and no `budget_usd` knob. Cost is reported after the fact, per seat in `_meta.cost_usd` and per run in the manifest.
 - **The other three panel templates** — `research-report`, `design-decision` and the deferred `code-review` stub are not written.
-- **Reference and artifact revisions** — the manifest records paths, not the git revision they were read at. A re-run against a changed file is not distinguishable from the manifest alone.
+- **`lib/paths.py` and the workspace override cascade** — every file still loads from the package. `--config` and `--models` point elsewhere by hand, and a connector can be bound by file path in a config's `type`, but there is no `<project>/.agents/ensemble-review/` root and no deep merge of `config.json`. The manifest's `roots` block records where each loaded file came from, so the record is ready for the cascade that is not built.
+- **Mid-flight budget metering** — the projection is a **dispatch gate only**. Nothing meters spend as seats return, and a panel that overruns its projection runs to completion.
+- **Per-seat `timeout_s`** — the knob has a specified default of 900 seconds and a specified behaviour, and no implementation. A hung provider hangs that seat until the process is killed.
+- **`min_families` enforcement and re-seating** — `min_families_target` is recorded and never acted on, and a seat whose family is unreachable is not re-seated onto another. The one exception is deliberate: a **context overflow** is never re-seated, per the spec, and is reported as under-seated instead.
+- **`mode: identical` and `verify_web`** — neither knob exists, so neither is refused by name yet.
 - **Code review** — out of lane. Code diffs go to `/code-review`.
+
+Built since v0 and no longer on this list: the completion cap and its length retry, the per-model cap floor, the model registry and `refresh_models.py`, the cost and token pre-flight with its budget gate, content-hash revisions with a materialized `inputs/` directory, and resume with a compare-and-set claim.

@@ -44,7 +44,8 @@ SKIP_FILES = ("manifest.json", "reconciliation.json", "judgment.json", "judgment
 # Manifest seat status → the `missing_seats[].stage` enum the reconciliation schema allows. Only
 # consulted for a seat with no readable report, and deliberately exhaustive: see `missing_stage`.
 MISSING_STAGE = {
-    "pending": "dispatch",      # dispatched and never came back
+    "pending": "dispatch",      # resolved and never dispatched
+    "dispatching": "dispatch",  # claimed by a run that did not finish, or held by another process
     "failed": "dispatch",       # the call itself failed
     "dispatch": "dispatch",
     "ok": "validation",         # the manifest says the seat reported; the file did not survive
