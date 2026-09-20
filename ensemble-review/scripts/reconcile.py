@@ -779,7 +779,7 @@ def main(argv=None):
     parser.add_argument("--artifact", help="The pinned artifact. Defaults to the manifest's `artifact` path; required when that does not resolve, because the anchor check is not optional")
     parser.add_argument("--render-only", action="store_true", help="Re-render reconciliation.md from an existing reconciliation.json and write nothing else")
     parser.add_argument("--workspace", default=None,
-                        help="The project holding the artifact. Schemas resolve from <workspace>/.agents/ensemble-review/schemas/ first, then the skill package (default: the working directory)")
+                        help="The project holding the artifact. Schemas resolve from <workspace>/.config/ensemble-review/schemas/ first, then the skill package (default: the working directory)")
     parser.add_argument("--reconciler", choices=judge_lib.RECONCILERS, default=None,
                         help="Who supplies the judgment patch (default: the manifest's, else `default` — host when a human is attached, synthesis when nobody is)")
     parser.add_argument("--autonomous", action="store_true",

@@ -20,7 +20,7 @@ read-only during a run; registry maintenance is the spec's one explicit exceptio
 writes each model's facts back into **the outermost root that already holds a file for that model**
 — the project's, else this machine's, else the package's. So a project that has taken a copy of one
 model file keeps getting price refreshes into its own copy, and an installation that must be strictly
-immutable puts a model file under `<project>/.agents/ensemble-review/models/` or
+immutable puts a model file under `<project>/.config/ensemble-review/models/` or
 `~/.config/ensemble-review/models/` first, after which nothing writes into the package.
 
 **And it writes a fragment as a fragment.** An outer model file is usually two or three keys, not a
@@ -274,7 +274,7 @@ def _refreshed_document(path, entry, fields):
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Refresh the model registry from the connector's catalogue.")
     parser.add_argument("--models", default=None, help="Directory of model files, taken as given (default: the workspace-first cascade, so a project's own models/ is the one refreshed)")
-    parser.add_argument("--workspace", default=None, help="The project whose registry to refresh; its .agents/ensemble-review/models/ wins over this machine's and over the packaged one (default: the working directory)")
+    parser.add_argument("--workspace", default=None, help="The project whose registry to refresh; its .config/ensemble-review/models/ wins over this machine's and over the packaged one (default: the working directory)")
     parser.add_argument("--add", action="append", default=[], help="Add a model id from the catalogue; repeat for several")
     parser.add_argument("--connector", default=None, help="Which connector file supplies the catalogue URL (default: the config's default_connector)")
     parser.add_argument("--url", default=None, help="Catalogue URL, overriding the connector's")

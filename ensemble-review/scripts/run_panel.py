@@ -32,7 +32,7 @@ The run lifecycle, in the order the stages run:
 
 Every file the run loads — the panel, the config, the connector file, the model files, the personas,
 the finding schema, the backend driver — resolves through `lib/paths.py`'s three-root cascade:
-`<workspace>/.agents/ensemble-review/` first, then `~/.config/ensemble-review/`, then the skill
+`<workspace>/.config/ensemble-review/` first, then `~/.config/ensemble-review/`, then the skill
 package, which is read-only and is never written to. Files replace whole; `config.json` and the
 model files deep-merge. The root each one came from lands in the manifest's `roots`, with the
 project's overrides and this machine's kept in separate lists.
@@ -568,7 +568,7 @@ def parse_args(argv):
     parser.add_argument("--ref", action="append", default=[], dest="refs", help="Path to a source-of-truth reference; repeat for several")
     parser.add_argument("--out", required=True, help="Run directory")
     parser.add_argument("--workspace", default=None,
-                        help="The project holding the artifact. Every file resolves from <workspace>/.agents/ensemble-review/ first, ~/.config/ensemble-review/ second and the skill package third; config.json and the model files deep-merge rather than replacing (default: the working directory)")
+                        help="The project holding the artifact. Every file resolves from <workspace>/.config/ensemble-review/ first, ~/.config/ensemble-review/ second and the skill package third; config.json and the model files deep-merge rather than replacing (default: the working directory)")
     parser.add_argument("--config", default=None, help="Config JSON, taken as given (default: the workspace-first cascade, deep-merged)")
     parser.add_argument("--models", default=None, help="Directory of model files, taken as given (default: the workspace-first cascade, deep-merged per model)")
     parser.add_argument("--tier", default=None, help="Tier for every seat that does not set its own (default: the panel's, then the config's)")

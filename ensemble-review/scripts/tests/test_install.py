@@ -46,7 +46,7 @@ class InstallTestCase(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="ensemble-review-install-")
         self.addCleanup(shutil.rmtree, self.root, True)
-        self.workspace_root = os.path.join(self.root, ".agents", "ensemble-review")
+        self.workspace_root = os.path.join(self.root, ".config", "ensemble-review")
         os.makedirs(self.workspace_root)
 
         # The shipped opt-out of the vault leg: a connector whose credential is not in the fleet

@@ -75,7 +75,7 @@ Three rules follow from it.
 | `draft-review` | fidelity, buildability, consistency, adversarial — all four on `claude` | no | The **draft pass**, with `--draft`. Every seat a harness subagent on the subscription; $0, one family, no corroboration claim, never a gate. With no references the `fidelity` seat is retired rather than the run refused |
 | `code-review` | none | — | Ships **deferred**: a named stub routing to `/code-review` |
 
-A template is a starting point, not a wall: compose seats ad hoc, or drop an edited copy under `<workspace>/.agents/ensemble-review/panels/` and it replaces the shipped one whole.
+A template is a starting point, not a wall: compose seats ad hoc, or drop an edited copy under `<workspace>/.config/ensemble-review/panels/` and it replaces the shipped one whole.
 
 ## What it costs
 
@@ -138,6 +138,6 @@ What was wrong until stage 2d's second fix round was not the prompt rule but the
 
 ## Where the bytes go
 
-**Egress is a property of the connector a family is bound to, not of the artifact.** The default connector — `openai_compat` against OpenRouter — routes to third-party hosts, which is why GLM is cheaper there than at Z.ai's own API. A confidential artifact is handled by binding its families to connectors that carry data agreements — Azure OpenAI, Bedrock, a direct vendor endpoint — each of which is one more `backends/<type>.py` file plus a config fragment, **placed under `<project>/.agents/ensemble-review/` as a workspace override** so the shipped package stays read-only and the binding travels with the project that needs it. Personas and panel templates are unchanged either way, and the manifest records the connector and the upstream provider that served each seat, so the audit trail says where the content went.
+**Egress is a property of the connector a family is bound to, not of the artifact.** The default connector — `openai_compat` against OpenRouter — routes to third-party hosts, which is why GLM is cheaper there than at Z.ai's own API. A confidential artifact is handled by binding its families to connectors that carry data agreements — Azure OpenAI, Bedrock, a direct vendor endpoint — each of which is one more `backends/<type>.py` file plus a config fragment, **placed under `<project>/.config/ensemble-review/` as a workspace override** so the shipped package stays read-only and the binding travels with the project that needs it. Personas and panel templates are unchanged either way, and the manifest records the connector and the upstream provider that served each seat, so the audit trail says where the content went.
 
 There is no per-artifact gate and no prompt. A gate the operator answers the same way every time is not a control; the configuration is the control.

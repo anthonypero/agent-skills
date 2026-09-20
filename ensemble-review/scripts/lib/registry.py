@@ -368,7 +368,7 @@ def _same_root_collision(family, tier, held, model_id, declaration):
         "    {3}: {5}\n"
         "  A model file declared at an **outer** root wins a cell over one declared further in, so "
         "the ordinary way to point a family at your own model is to drop one model file that "
-        "declares that tier into <project>/.agents/ensemble-review/models/ or "
+        "declares that tier into <project>/.config/ensemble-review/models/ or "
         "~/.config/ensemble-review/models/.\n"
         "  **The packaged copy is read-only** and is not the file to edit. To empty a cell from an "
         "outer layer instead, write `\"tiers\": []` into your own copy of that model's file — a "

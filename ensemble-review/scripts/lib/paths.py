@@ -3,8 +3,12 @@
 **The skill package is read-only.** Nothing in a run ever writes into `skills/ensemble-review/`, and
 every file a run loads is resolved through three roots, in this order:
 
-1. `<workspace>/.agents/ensemble-review/` — the project holding the artifact under review, named by
-   `--workspace` on `run_panel.py` and `reconcile.py`, else the working directory.
+1. `<workspace>/.config/ensemble-review/` — the project holding the artifact under review, named by
+   `--workspace` on `run_panel.py` and `reconcile.py`, else the working directory. It is `.config/`
+   and not `.agents/` because `.agents/` is the agents framework's working folder — notes, ideas,
+   runs, operational state — and this skill is published into projects that do not use that
+   framework; `.config/<skill>/` mirrors the user tier's `~/.config/<skill>/`, so every project-like
+   root follows one rule.
 2. `~/.config/ensemble-review/` — **the user tier**, this machine's owner. `$XDG_CONFIG_HOME` is
    honoured when it is set, so the root is `$XDG_CONFIG_HOME/ensemble-review/` there. It exists so a
    per-owner choice — a key source, a connector this owner trusts, one model's effort rung — is made
@@ -33,7 +37,7 @@ file. `registry.derive_tiers` does the deciding and records each displaced model
 claiming one cell is still a composition error: one layer, so there is no outer and no inner.
 
 **Where a file goes in an outer root.** The spec gives one example — a driver at
-`.agents/ensemble-review/backends/azure_openai.py` — and no full layout, so this module defines one:
+`.config/ensemble-review/backends/azure_openai.py` — and no full layout, so this module defines one:
 an outer root mirrors the *logical* category rather than the package's internal nesting.
 `config.json` sits at the top of it, connectors in `connectors/`, model files in `models/`, panels in
 `panels/`, drivers in `backends/`, and personas, references and schemas keep the package's own folder
@@ -69,7 +73,7 @@ import os
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # The workspace root, relative to the project holding the artifact under review.
-WORKSPACE_SUBDIR = os.path.join(".agents", "ensemble-review")
+WORKSPACE_SUBDIR = os.path.join(".config", "ensemble-review")
 
 # The user tier's directory name, under `$XDG_CONFIG_HOME` or `~/.config`.
 USER_SUBDIR = "ensemble-review"

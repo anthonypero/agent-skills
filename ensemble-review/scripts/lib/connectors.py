@@ -181,7 +181,7 @@ def refusal(connector, seats, projection_usd=None, flag="--approve-spend"):
     lines.append(
         "  A machine that trusts this endpoint sets `requires_approval: false` in its own copy of "
         "the connector file, under ~/.config/ensemble-review/connectors/ or the project's "
-        ".agents/ensemble-review/connectors/.")
+        ".config/ensemble-review/connectors/.")
     return "\n".join(lines)
 
 

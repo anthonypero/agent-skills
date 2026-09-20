@@ -107,7 +107,7 @@ The patch that comes back is held to `author: "harness-judge"` and to the same m
 
 Every seat goes through a **connector**: a driver module loaded by its config entry's `type`. v1 ships one, `openai_compat`, pointed at OpenRouter, which serves every family — Anthropic included — through one OpenAI-compatible endpoint.
 
-A `type` that names a `.py` file, or that resolves to one under `<workspace>/.agents/ensemble-review/backends/`, is loaded from that path. That is how a project binds a confidential review to a connector carrying a data agreement without editing the read-only package. `backends/base.py` states the contract a driver must satisfy; `scripts/backends/__init__.py` loads it.
+A `type` that names a `.py` file, or that resolves to one under `<workspace>/.config/ensemble-review/backends/`, is loaded from that path. That is how a project binds a confidential review to a connector carrying a data agreement without editing the read-only package. `backends/base.py` states the contract a driver must satisfy; `scripts/backends/__init__.py` loads it.
 
 The key is resolved by `dispatch.py` itself: `skills/lastpass/scripts/lp get global/OPENROUTER_API_KEY` first, then `$OPENROUTER_API_KEY` in the environment, then exit naming both paths it tried. A connector whose `api_key_secret` is null skips the vault leg. **No key value is written to any file in this repo**, which is public.
 

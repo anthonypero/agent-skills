@@ -7,7 +7,7 @@ to the local agent CLI, a `claude_cli` driver — with no change to the caller.
 
 A `type` that names a **file** rather than a package module is loaded from that file. This is how a
 project binds a confidential review to a connector that carries a data agreement without editing the
-read-only skill package: it drops `.agents/ensemble-review/backends/azure_openai.py` beside its
+read-only skill package: it drops `.config/ensemble-review/backends/azure_openai.py` beside its
 config fragment and points `type` at it. Anything that is not an existing `.py` path is treated as a
 package module name, so the shipped `"type": "openai_compat"` is unaffected.
 

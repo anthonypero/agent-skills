@@ -2,7 +2,7 @@
 
 **This module is documentation with a runnable shape, not a base class to inherit from.** Drivers
 are loaded by module — `backends/<type>.py` for the packaged ones, an absolute path for one a
-project drops under `<workspace>/.agents/ensemble-review/backends/` — and `load_driver` looks for
+project drops under `<workspace>/.config/ensemble-review/backends/` — and `load_driver` looks for
 two module-level functions and nothing else. There is no registration step and no class to subclass,
 because the seam framework §9 defines is a function signature and adding an inheritance requirement
 on top of it would make a driver harder to write than the thing it wraps.

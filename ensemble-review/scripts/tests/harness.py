@@ -54,7 +54,7 @@ THIRD_MODEL = "test/third-model"
 HARNESS_MODEL = "test/harness-opus"
 
 # Where a workspace override lives, relative to the project holding the artifact.
-WORKSPACE_SUBDIR = os.path.join(".agents", "ensemble-review")
+WORKSPACE_SUBDIR = os.path.join(".config", "ensemble-review")
 
 ARTIFACT_TEXT = """# A test artifact
 
@@ -349,7 +349,7 @@ class Workspace(object):
         return os.path.join(self.root, WORKSPACE_SUBDIR)
 
     def override(self, relpath, data=None, text=None):
-        """Write a file into `<root>/.agents/ensemble-review/`, the cascade's first root."""
+        """Write a file into `<root>/.config/ensemble-review/`, the cascade's first root."""
         return _write_into(os.path.join(self.workspace_root(), relpath), data, text)
 
     def close(self):

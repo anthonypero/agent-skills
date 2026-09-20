@@ -14,7 +14,7 @@ Standard library only. The HTTP call itself lives in `backends/`, loaded by the 
 so another access path is another file there rather than a change here.
 
 The persona, the finding schema, the config, the connector file, the model files and the driver all
-resolve through `lib/paths.py`'s three-root cascade — `<workspace>/.agents/ensemble-review/` first,
+resolve through `lib/paths.py`'s three-root cascade — `<workspace>/.config/ensemble-review/` first,
 then `~/.config/ensemble-review/`, then the read-only package — so `--workspace` is the only thing
 `run_panel.py` has to pass for the child to read exactly the files the parent resolved. `--config`
 and `--models` stay available as operator paths; `--models` names the *directory* of model files.
@@ -794,7 +794,7 @@ def parse_args(argv):
     parser.add_argument("--ref-revision", action="append", default=[], dest="ref_revisions", help="SHA-256 for the reference in the same position")
     parser.add_argument("--out", required=True, help="Run directory; the report and its rendering land here")
     parser.add_argument("--workspace", default=None,
-                        help="The project holding the artifact. Files resolve from <workspace>/.agents/ensemble-review/ first, then the skill package (default: the working directory)")
+                        help="The project holding the artifact. Files resolve from <workspace>/.config/ensemble-review/ first, then the skill package (default: the working directory)")
     parser.add_argument("--config", default=None, help="Config JSON, taken as given (default: the workspace-first cascade, deep-merged)")
     parser.add_argument("--models", default=None, help="Directory of model files, taken as given (default: the workspace-first cascade, deep-merged per model)")
     parser.add_argument("--reviewer-id", default=None,
