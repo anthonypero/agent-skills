@@ -225,7 +225,7 @@ class MissingCellTest(unittest.TestCase):
     def setUp(self):
         self.paths = paths_lib.Paths(os.devnull + "-no-such-workspace")
         config, _path = self.paths.config()
-        self.entry = config["openrouter"]
+        self.entry = harness.shipped()["entry"]
 
     def test_google_at_frontier_re_seats_and_records_the_substitution(self):
         """The spec's own worked example: the shipped config leaves the Google frontier cell empty."""
@@ -319,10 +319,11 @@ class ShippedConfigTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.paths = paths_lib.Paths(os.devnull + "-no-such-workspace")
-        config, _path = cls.paths.config()
-        cls.entry = config["openrouter"]
-        cls.registry = registry_lib.load(registry_lib.DEFAULT_REGISTRY)
+        shipped = harness.shipped()
+        cls.paths = shipped["paths"]
+        cls.entry = shipped["entry"]
+        cls.connector = shipped["connector"]
+        cls.registry = shipped["registry"]
 
     def test_the_registry_prices_every_model_the_config_names_at_any_tier(self):
         """The two files cannot drift: an unpriced seat is a budget gate that does not gate, and the
@@ -335,23 +336,100 @@ class ShippedConfigTest(unittest.TestCase):
         self.assertEqual(self.registry.covers(named), [],
                          "every model the shipped config names must be in the shipped registry, priced")
 
-    def test_every_effort_the_config_asks_for_is_in_that_models_registry_vocabulary(self):
-        for model, effort in (self.entry.get("effort") or {}).items():
-            entry = self.registry.get(model)
-            self.assertIsNotNone(entry, "the effort map names {0}, which is not in the registry".format(model))
-            self.assertEqual(registry_lib.effort_is_supported(entry, effort), True,
-                             "effort {0!r} on {1} is outside {2}".format(
-                                 effort, model, (entry or {}).get("effort_vocabulary")))
+    def test_every_shipped_model_binds_all_three_abstract_levels_inside_its_own_vocabulary(self):
+        """The effort gate, run over the whole shipped registry rather than over one panel.
 
-    def test_every_model_the_effort_map_names_is_a_model_some_tier_actually_seats(self):
-        seated = {model for cells in self.entry["tiers"].values() for model in cells.values() if model}
-        for model in (self.entry.get("effort") or {}):
-            self.assertIn(model, seated, "the effort map names a model no tier seats")
+        Every model file has to answer `light`, `standard` and `deep` with a word its own recorded
+        vocabulary contains, or the first run that asks for that level on that model is a
+        composition error nobody saw coming.
+        """
+        for model in sorted(self.registry.models):
+            entry = self.registry.get(model)
+            for level in registry_lib.EFFORT_LEVELS:
+                kind, value = registry_lib.effort_binding(entry, level, model)
+                self.assertEqual(kind, "word", "{0} binds {1} to something other than a rung".format(model, level))
+                self.assertEqual(registry_lib.effort_is_supported(entry, value), True,
+                                 "effort {0!r} on {1} is outside {2}".format(
+                                     value, model, entry.get("effort_vocabulary")))
+
+    def test_every_model_file_names_the_connector_that_serves_it(self):
+        for model in sorted(self.registry.models):
+            self.assertEqual(self.registry.get(model).get("connector"), self.connector["name"],
+                             "{0} names no connector, so no endpoint claims it".format(model))
+
+    def test_the_derived_tier_map_is_the_map_the_spec_prints(self):
+        """The migration's acceptance condition: the tiers x families map is no longer written
+        anywhere, it is derived from the model files' own `family` and `tiers`, and the derivation
+        has to reproduce the map the spec prints — key order included, because declaration order is
+        what the `non-claude` pass and every re-seat walk."""
+        expected = {
+            "frontier": {
+                "claude": "anthropic/claude-sonnet-5",
+                "openai": "openai/gpt-6-astra",
+                "kimi": "moonshotai/kimi-k3",
+                "glm": "z-ai/glm-5.3",
+                "xai": "x-ai/grok-4.6",
+                "deepseek": "deepseek/deepseek-v4-pro-0813",
+            },
+            "standard": {
+                "claude": "anthropic/claude-sonnet-5",
+                "openai": "openai/gpt-5.6-sol",
+                "kimi": "moonshotai/kimi-k3",
+                "glm": "z-ai/glm-5.3-flash",
+                "xai": "x-ai/grok-4.6",
+                "google": "google/gemini-3.8-flash",
+                "deepseek": "deepseek/deepseek-v4-pro-0813",
+            },
+            "fast": {
+                "claude": "anthropic/claude-sonnet-5",
+                "openai": "openai/gpt-5.6-luna",
+                "kimi": "moonshotai/kimi-k3",
+                "glm": "z-ai/glm-5.3-flash",
+                "xai": "x-ai/grok-4.6",
+                "google": "google/gemini-3.6-flash",
+                "deepseek": "deepseek/deepseek-v4.1-flash",
+            },
+        }
+        self.assertEqual(self.entry["tiers"], expected)
+        self.assertEqual(list(self.entry["tiers"]), list(expected), "tier declaration order")
+        for tier in expected:
+            self.assertEqual(list(self.entry["tiers"][tier]), list(expected[tier]),
+                             "family declaration order at {0} — the order every re-seat walks".format(tier))
+
+    def test_two_models_at_one_root_cannot_claim_one_family_at_one_tier(self):
+        """A derived map has a failure mode a written one did not: two files, one cell, one root.
+
+        From two *different* roots this is not an error at all — the outer one wins, which is what
+        `test_config_restructure.TierCellOverrideTest` covers. Here both are declared at the same
+        layer, so there is no outer and no inner and nothing to prefer.
+        """
+        registry = registry_lib.Registry({"models": {
+            "a/one": {"id": "a/one", "family": "glm", "tiers": ["standard"]},
+            "a/two": {"id": "a/two", "family": "glm", "tiers": ["standard"]},
+        }}, "inline")
+        with self.assertRaises(registry_lib.RegistryError) as caught:
+            registry_lib.derive_tiers(registry, ["glm"], ["standard"])
+        self.assertIn("a/one", str(caught.exception))
+        self.assertIn("a/two", str(caught.exception))
+
+    def test_the_collision_message_says_the_package_is_read_only_and_how_to_empty_a_cell(self):
+        """"Drop the tier from one of the two model files" is not actionable against the packaged
+        one: the package is read-only during a run and editing it is nobody's fix."""
+        registry = registry_lib.Registry({"models": {
+            "a/one": {"id": "a/one", "family": "glm", "tiers": ["standard"]},
+            "a/two": {"id": "a/two", "family": "glm", "tiers": ["standard"]},
+        }}, "inline")
+        with self.assertRaises(registry_lib.RegistryError) as caught:
+            registry_lib.derive_tiers(registry, ["glm"], ["standard"])
+        message = str(caught.exception)
+        self.assertIn("read-only", message)
+        self.assertIn('"tiers": []', message, "the recipe for emptying a cell from an outer layer")
+        self.assertIn("~/.config/ensemble-review/models/", message, "and where to put the file")
 
     def test_provider_routing_is_keyed_by_concrete_model_id(self):
         seated = {model for cells in self.entry["tiers"].values() for model in cells.values() if model}
-        routing = self.entry.get("provider_routing") or {}
-        self.assertTrue(routing, "the shipped config carries the spec's provider_routing map")
+        routing = self.connector.get("provider_routing") or {}
+        self.assertTrue(routing, "the shipped connector file carries the spec's provider_routing map")
         for model in routing:
             self.assertIn(model, seated)
 

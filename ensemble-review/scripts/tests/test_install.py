@@ -8,7 +8,7 @@ was the thing read is in the registry afterwards: it carries the fixture's price
 catalogue would return.
 
 Everything else is controlled the same way. `--workspace` puts the registry under a temp directory
-so the package's own `templates/models.json` is never touched; a workspace `config.json` fragment
+so the package's own `templates/models/` is never touched; a project connector file
 sets `api_key_secret: null`, which is the shipped opt-out of the vault leg, so no test shells out
 to LastPass; and the key itself comes from `$OPENROUTER_API_KEY`.
 
@@ -50,25 +50,37 @@ class InstallTestCase(unittest.TestCase):
         os.makedirs(self.workspace_root)
 
         # The shipped opt-out of the vault leg: a connector whose credential is not in the fleet
-        # vault resolves from the environment alone. It deep-merges over the packaged config, so
-        # every other cell — the tier map, the effort map — is the real one.
-        _write_json(os.path.join(self.workspace_root, "config.json"),
-                    {"openrouter": {"api_key_secret": None}})
+        # vault resolves from the environment alone. A connector is a whole file through the
+        # cascade — no merge — so this is the packaged endpoint restated with that one field
+        # changed, under the project root where it wins.
+        _write_json(os.path.join(self.workspace_root, "connectors", "openrouter.json"), {
+            "name": "openrouter",
+            "type": "openai_compat",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_secret": None,
+            "api_key_env": "OPENROUTER_API_KEY",
+            "catalogue_url": "https://openrouter.ai/api/v1/models",
+            "billing": "metered",
+            "requires_approval": True,
+        })
 
-        self.registry = os.path.join(self.workspace_root, "models.json")
+        # One model file in the project's own registry directory. `refresh_models.py` writes each
+        # model back into the outermost root that holds a file for it, so this one is refreshed here
+        # and the packaged twelve stay in the package.
+        self.registry = os.path.join(self.workspace_root, "models", MODEL.replace("/", "__") + ".json")
         _write_json(self.registry, {
-            "schema_version": "1",
-            "models": {
-                MODEL: {
-                    "input_price_per_token": 1e-09,
-                    "output_price_per_token": 2e-09,
-                    "context_limit": 1000,
-                    "effort_vocabulary": ["high", "low"],
-                    "output_token_prior": 12345,
-                    "prior_source": "test fixture",
-                    "min_max_tokens": None,
-                },
-            },
+            "id": MODEL,
+            "connector": "openrouter",
+            "family": None,
+            "tiers": [],
+            "effort": {"light": "low", "standard": "high", "deep": "high"},
+            "input_price_per_token": 1e-09,
+            "output_price_per_token": 2e-09,
+            "context_limit": 1000,
+            "effort_vocabulary": ["high", "low"],
+            "output_token_prior": 12345,
+            "prior_source": "test fixture",
+            "min_max_tokens": None,
         })
 
         self.catalogue = os.path.join(self.root, "catalogue.json")
@@ -87,6 +99,8 @@ class InstallTestCase(unittest.TestCase):
             "HOME": self.root,
             "OPENROUTER_API_KEY": SECRET,
             "ENSEMBLE_REVIEW_CATALOGUE_URL": "file://" + self.catalogue,
+            # No test reads the developer's own ~/.config; this one does not exist.
+            "ENSEMBLE_REVIEW_USER_DIR": os.path.join(self.root, "no-user-tier"),
         }
         environment.update(env or {})
         if path_prefix:
@@ -96,7 +110,7 @@ class InstallTestCase(unittest.TestCase):
 
     def registry_entry(self):
         with open(self.registry, "r", encoding="utf-8") as handle:
-            return json.load(handle)["models"][MODEL]
+            return json.load(handle)
 
 
 class HappyPathTest(InstallTestCase):
@@ -139,10 +153,32 @@ class HappyPathTest(InstallTestCase):
         self.assertEqual(_read(self.registry), after_first, "a refresh that changes nothing writes nothing")
 
     def test_the_packages_own_registry_is_left_alone_when_a_workspace_is_given(self):
-        packaged = os.path.join(SKILL_DIR, "templates", "models.json")
-        before = _read(packaged)
+        packaged = os.path.join(SKILL_DIR, "templates", "models")
+        before = {name: _read(os.path.join(packaged, name)) for name in sorted(os.listdir(packaged))}
         self.install()
-        self.assertEqual(_read(packaged), before)
+        after = {name: _read(os.path.join(packaged, name)) for name in sorted(os.listdir(packaged))}
+        self.assertEqual(after, before)
+
+    def test_it_reports_the_user_tier_without_creating_one(self):
+        """The cascade's middle root is optional, and a directory install.sh made on its own would
+        change which files a run resolves without anybody asking for it."""
+        user_root = os.path.join(self.root, "user-config")
+        result = self.install(env={"ENSEMBLE_REVIEW_USER_DIR": user_root})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("user:", result.stdout)
+        self.assertIn(user_root, result.stdout)
+        self.assertIn("no user tier", result.stdout)
+        self.assertFalse(os.path.exists(user_root), "reported, never created")
+
+    def test_check_only_reports_a_user_tier_that_does_exist(self):
+        user_root = os.path.join(self.root, "user-config")
+        os.makedirs(os.path.join(user_root, "connectors"))
+        result = self.install(args=["--check-only"],
+                              env={"ENSEMBLE_REVIEW_USER_DIR": user_root,
+                                   "ENSEMBLE_REVIEW_CATALOGUE_URL": ""})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(user_root, result.stdout)
+        self.assertIn("connectors", result.stdout)
 
     def test_dry_run_writes_nothing(self):
         before = _read(self.registry)
@@ -287,6 +323,9 @@ class ShippedFileTest(unittest.TestCase):
 
 
 def _write(path, text):
+    directory = os.path.dirname(path)
+    if not os.path.isdir(directory):
+        os.makedirs(directory)
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(text)
 

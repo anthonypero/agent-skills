@@ -2,6 +2,7 @@
 name: lens-buildability
 description: Buildability reviewer. Judges whether someone could execute this artifact without inventing a missing decision, and whether its altitude and seams are right.
 model: frontier
+effort: standard
 output_type: json_report
 context:
   - finding-schema.md

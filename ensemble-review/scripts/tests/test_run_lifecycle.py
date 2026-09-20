@@ -186,7 +186,7 @@ class ProjectionTest(unittest.TestCase):
 
     def setUp(self):
         self.workspace = harness.Workspace()
-        self.registry = registry_lib.load(self.workspace.registry)
+        self.registry = registry_lib.load_dir(self.workspace.registry)
         self.addCleanup(self.workspace.close)
 
     def test_a_projection_prices_prompt_tokens_plus_the_prior_plus_both_allowances(self):
@@ -208,15 +208,33 @@ class ProjectionTest(unittest.TestCase):
         for label in ("catalogue prices", "output overrun allowance", "repair allowance"):
             self.assertIn(label, rendered, "each allowance is printed as its own labelled line")
 
-    def test_the_overrun_allowance_reproduces_run_twos_actual_spend_from_catalogue_prices(self):
-        """The seed's calibration, pinned against the frozen manifest it was derived from.
+    # Run 2's own prices, per token, as the catalogue carried them on 2026-09-18 — the registry the
+    # run resolved against, recovered from the packaged registry as it stood at that date (skills
+    # submodule commits `ebfca43` and `515701c`, both identical here). They are pinned inline rather
+    # than read from the live registry because the calibration is against what run 2 *paid*, and the
+    # live catalogue moves: the 2026-09-19 refresh cut `moonshotai/kimi-k3` from 2.1e-06/1.095e-05 to
+    # 1.7e-06/8.5e-06, which drops the same projection to $1.35 and would retire a calibration that
+    # has not changed. Pinning the prices keeps the assertion pointed at the one thing it is a guard
+    # on — the multiplier.
+    RUN_TWO_REGISTRY = {
+        "openai/gpt-5.6-sol": {"input_price_per_token": 2e-06, "output_price_per_token": 1e-05, "output_token_prior": 7340, "context_limit": 1050000, "prior_source": "measured — run 2 (2026-09-18, standard panel), fidelity-openai accepted attempt"},
+        "z-ai/glm-5.3-flash": {"input_price_per_token": 9e-08, "output_price_per_token": 3e-07, "output_token_prior": 14268, "context_limit": 1310720, "prior_source": "measured — run 2 (2026-09-18, standard panel), buildability-glm accepted attempt"},
+        "moonshotai/kimi-k3": {"input_price_per_token": 2.1e-06, "output_price_per_token": 1.095e-05, "output_token_prior": 21297, "context_limit": 1048576, "min_max_tokens": 64000, "prior_source": "measured — run 2 (2026-09-18, standard panel), consistency-kimi accepted attempt"},
+        "x-ai/grok-4.6": {"input_price_per_token": 2e-06, "output_price_per_token": 6e-06, "output_token_prior": 14745, "context_limit": 500000, "prior_source": "measured — run 2 (2026-09-18, standard panel), adversarial-xai accepted attempt"},
+    }
 
-        Run 2 cost $1.47. Its four seats' measured prompt tokens and the shipped registry's priors
-        and catalogue prices are the inputs; the multiplier is what closes the gap. If a future
-        refresh moves the catalogue prices far enough that this no longer holds, the multiplier is
-        the thing to re-derive, and this test is how that is noticed.
+    def test_the_overrun_allowance_reproduces_run_twos_actual_spend_from_catalogue_prices(self):
+        """The seed's calibration, pinned against the prices the run it calibrates on actually paid.
+
+        Run 2 cost $1.47. Its four seats' measured prompt tokens and the priors and catalogue prices
+        **as the registry carried them on the day of the run** are the inputs; the multiplier is what
+        closes the gap. At 1.6 this projects $1.51; at 1.5 it projects $1.45 and under-reads the run.
+        So the assertion still fails the moment the multiplier stops closing the gap, which is what
+        it is for — and it no longer fails when the live catalogue moves a price under it, which is
+        not a statement about the multiplier at all.
         """
-        registry = registry_lib.load(registry_lib.DEFAULT_REGISTRY)
+        registry = registry_lib.Registry({"models": dict(self.RUN_TWO_REGISTRY)},
+                                         "run 2's prices, pinned inline")
         seats = [
             {"reviewer_id": "fidelity-openai", "model": "openai/gpt-5.6-sol", "prompt_tokens": 59287},
             {"reviewer_id": "buildability-glm", "model": "z-ai/glm-5.3-flash", "prompt_tokens": 60939},
@@ -249,7 +267,7 @@ class ProjectionTest(unittest.TestCase):
         self.addCleanup(workspace.close)
         projection = budget_lib.project(
             [{"reviewer_id": "adversarial-xai", "model": harness.FAST_MODEL, "prompt_tokens": 10}],
-            registry_lib.load(workspace.registry), 5.0)
+            registry_lib.load_dir(workspace.registry), 5.0)
         self.assertIsNone(projection["per_seat"][0]["projected_usd"])
         self.assertIsNone(projection["per_seat"][0]["base_usd"])
 
@@ -260,7 +278,7 @@ class ProjectionTest(unittest.TestCase):
         self.addCleanup(workspace.close)
         projection = budget_lib.project(
             [{"reviewer_id": "adversarial-xai", "model": harness.FAST_MODEL, "prompt_tokens": 500000}],
-            registry_lib.load(workspace.registry), 5.0)
+            registry_lib.load_dir(workspace.registry), 5.0)
         self.assertEqual(projection["context_overflows"], ["adversarial-xai"])
         self.assertEqual(projection["projection_usd"], 0.0, "an overflowing seat is never dispatched, so never priced")
 
@@ -275,7 +293,7 @@ class ProjectionTest(unittest.TestCase):
         self.addCleanup(workspace.close)
         projection = budget_lib.project(
             [{"reviewer_id": "adversarial-xai", "model": harness.FAST_MODEL, "prompt_tokens": 50000}],
-            registry_lib.load(workspace.registry), 5.0,
+            registry_lib.load_dir(workspace.registry), 5.0,
             with_synthesis=True, synthesis_model=harness.FAST_MODEL)
         self.assertEqual(projection["context_overflows"], [], "the seat itself fits")
         self.assertTrue(projection["judge_context_overflow"],
@@ -333,9 +351,24 @@ class RegistryGateTest(PanelTestCase):
     """`run_panel.py`'s own Resolve-stage gate, which is not `dispatch.py`'s."""
 
     def test_a_model_absent_from_the_registry_refuses_the_whole_run(self):
-        models = harness.default_models()
-        del models[harness.SLOW_MODEL]
-        self._refuses(models, "is not in the registry")
+        """A seat pinned to a model no model file covers.
+
+        Since the registry became a directory of model files, a model absent from it is also absent
+        from the derived tier map — so a run that named it by family would re-seat rather than
+        refuse. The way to reach this gate is the way an operator reaches it: pin the seat.
+        """
+        workspace = harness.Workspace()
+        self.addCleanup(workspace.close)
+        workspace.apply_env()
+        workspace.plan({harness.FAST_MODEL: [{"body": harness.valid_report()}]})
+        self.workspace = workspace
+
+        code, _out, err = self.run_panel(extra=["--model", "consistency-kimi=test/no-such-model"])
+        self.assertEqual(code, 1, err)
+        self.assertIn("is not in the registry", err)
+        self.assertIn("test/no-such-model", err)
+        self.assertIn("refresh_models.py --add", err)
+        self.assertEqual(workspace.calls(), [], "nothing is dispatched, not even the priced seat")
 
     def test_a_model_with_a_null_price_refuses_the_whole_run(self):
         """Presence is not coverage: a seat with no price is a budget gate that does not gate."""

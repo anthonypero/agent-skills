@@ -2,6 +2,7 @@
 name: lens-fidelity
 description: Fidelity-to-source reviewer. Judges whether the artifact faithfully implements the source documents it claims to implement, tracing every requirement to a citation.
 model: frontier
+effort: standard
 output_type: json_report
 context:
   - finding-schema.md

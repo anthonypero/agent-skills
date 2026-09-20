@@ -2,6 +2,7 @@
 name: lens-adversarial
 description: Fatal-flaw reviewer. Steelmans the case that the artifact is wrong — attacks its central claim, then asks what is simply missing.
 model: frontier
+effort: standard
 output_type: json_report
 context:
   - finding-schema.md

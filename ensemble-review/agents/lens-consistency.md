@@ -2,6 +2,7 @@
 name: lens-consistency
 description: Internal-consistency reviewer. Judges whether the parts of the artifact agree with each other — contradictions, stale tables, broken cross-references, drifting terminology.
 model: frontier
+effort: standard
 output_type: json_report
 context:
   - finding-schema.md

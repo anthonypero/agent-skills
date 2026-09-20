@@ -30,10 +30,23 @@ The run lifecycle, in the order the stages run:
 - **Dispatch** — each seat's record moves `pending -> dispatching` by compare-and-set before its
   first paid call, and is updated as it returns.
 
-Every file the run loads — the panel, the config, the registry, the personas, the finding schema, the
-backend driver — resolves through `lib/paths.py`'s two-root cascade: `<workspace>/.agents/
-ensemble-review/` first, then the skill package, which is read-only and is never written to. Files
-replace whole; `config.json` deep-merges. The root each one came from lands in the manifest's `roots`.
+Every file the run loads — the panel, the config, the connector file, the model files, the personas,
+the finding schema, the backend driver — resolves through `lib/paths.py`'s three-root cascade:
+`<workspace>/.agents/ensemble-review/` first, then `~/.config/ensemble-review/`, then the skill
+package, which is read-only and is never written to. Files replace whole; `config.json` and the
+model files deep-merge. The root each one came from lands in the manifest's `roots`, with the
+project's overrides and this machine's kept in separate lists.
+
+**The endpoint is a connector file.** `config.json` names one by `default_connector` and the file
+carries the driver, the base URL, the key source and the **billing posture**. A `metered` connector
+refuses to dispatch without `--approve-spend`, which is a different question from `--approve-budget`:
+one answers "you may spend on this endpoint at all" and the other "this projection is over the limit
+you set". The answer lands in the manifest as `spend_approval`.
+
+**Effort is abstract.** `--effort`, a seat's `effort`, a panel's `effort`, the config's
+`default_effort` and the persona's frontmatter all name `light`, `standard` or `deep`; each model
+file binds the level onto that model's own rung. The manifest records the level, the level that
+chose it and the parameter actually sent, per seat.
 
 With no `--panel`, the template is **inferred**: a cheap heuristic over the artifact's own filename
 picks `research-report` or `design-decision` when the name says so and `spec-review` otherwise, and a
@@ -101,6 +114,7 @@ sys.path.insert(0, SCRIPTS_DIR)
 
 import dispatch  # noqa: E402
 from lib import budget as budget_lib  # noqa: E402
+from lib import connectors as connectors_lib  # noqa: E402
 from lib import judge as judge_lib  # noqa: E402
 from lib import panels as panels_lib  # noqa: E402
 from lib import paths as paths_lib  # noqa: E402
@@ -262,6 +276,23 @@ def persona_chars(lens, paths):
     return total
 
 
+def _synthesis_persona_frontmatter(paths):
+    """The `synthesis` persona's frontmatter, the lowest level of both of the judge's orders.
+
+    Missing persona, unreadable file: both mean "these levels contribute nothing", never an error —
+    the levels above them are the ones a run is normally decided by. Returned as an empty dict so
+    callers can read a key off it either way.
+    """
+    found = paths.find("persona", judge_lib.SYNTHESIS_PERSONA)
+    if not found:
+        return {}
+    try:
+        frontmatter, _body = report_lib.parse_agent_file(found["path"])
+    except OSError:
+        return {}
+    return frontmatter or {}
+
+
 def _synthesis_persona_tier(paths):
     """The `synthesis` persona's frontmatter `model`, the lowest level of the judge's tier order.
 
@@ -270,14 +301,7 @@ def _synthesis_persona_tier(paths):
     all mean "this level contributes nothing", never an error — the levels above it are the ones a
     run is normally decided by.
     """
-    found = paths.find("persona", judge_lib.SYNTHESIS_PERSONA)
-    if not found:
-        return None
-    try:
-        frontmatter, _body = report_lib.parse_agent_file(found["path"])
-    except OSError:
-        return None
-    return frontmatter.get("model")
+    return _synthesis_persona_frontmatter(paths).get("model")
 
 
 def persona_frontmatter(paths):
@@ -299,7 +323,7 @@ def _registry_for_labels(paths, args):
     with a better message and the right consequences.
     """
     try:
-        return registry_lib.load(paths.registry(args.models))
+        return registry_lib.load(paths, args.models)
     except (paths_lib.PathError, registry_lib.RegistryError):
         return None
 
@@ -344,6 +368,7 @@ def run_seat(seat, args, run_dir, inputs, halt):
         "--out", run_dir,
         "--workspace", args.workspace or os.getcwd(),
         "--tier", seat["tier"],
+        "--effort", seat["effort_level"],
         "--max-tokens", str(args.max_tokens),
     ]
     if args.config:
@@ -437,21 +462,25 @@ def parse_args(argv):
     parser.add_argument("--ref", action="append", default=[], dest="refs", help="Path to a source-of-truth reference; repeat for several")
     parser.add_argument("--out", required=True, help="Run directory")
     parser.add_argument("--workspace", default=None,
-                        help="The project holding the artifact. Every file resolves from <workspace>/.agents/ensemble-review/ first and the skill package second; config.json deep-merges rather than replacing (default: the working directory)")
+                        help="The project holding the artifact. Every file resolves from <workspace>/.agents/ensemble-review/ first, ~/.config/ensemble-review/ second and the skill package third; config.json and the model files deep-merge rather than replacing (default: the working directory)")
     parser.add_argument("--config", default=None, help="Config JSON, taken as given (default: the workspace-first cascade, deep-merged)")
-    parser.add_argument("--models", default=None, help="Model registry, taken as given (default: the workspace-first cascade)")
+    parser.add_argument("--models", default=None, help="Directory of model files, taken as given (default: the workspace-first cascade, deep-merged per model)")
     parser.add_argument("--tier", default=None, help="Tier for every seat that does not set its own (default: the panel's, then the config's)")
+    parser.add_argument("--effort", default=None, metavar="LEVEL", choices=registry_lib.EFFORT_LEVELS,
+                        help="Abstract effort level for every seat that does not set its own: {0} (default: the seat's, the panel's, the config's default_effort, then the persona's). Each model's own file binds the level to its own rung".format("/".join(registry_lib.EFFORT_LEVELS)))
     parser.add_argument("--min-families", type=int, default=None, dest="min_families",
                         help="Target distinct families, overriding the panel's (default: the panel's, else {0}). A target, not a precondition: a run below it proceeds and the reconciliation's method caveat says so".format(DEFAULT_MIN_FAMILIES))
     parser.add_argument("--model", action="append", default=[], dest="models_pinned", metavar="SEAT=MODEL",
                         help="Pin one seat to a concrete model id, e.g. --model fidelity-openai=openai/gpt-6-astra. Repeatable; beats every tier source. The seat's family label is relabelled from the model")
     parser.add_argument("--smoke-test", default=None, metavar="MODEL", dest="smoke_test",
-                        help="Prove the pipeline, not the artifact: pin EVERY seat to this one model, set the family target to 1, mark the manifest `smoke_test` and say in the reconciliation that the run is not evidence. Still priced and still gated by the budget")
+                        help="Prove the pipeline, not the artifact: pin EVERY seat to this one model, set the family target to 1, mark the manifest `smoke_test` and say in the reconciliation that the run is not evidence. Still priced and still gated — by the budget and by the connector's spend gate, since it also spends")
     parser.add_argument("--max-tokens", type=int, default=registry_lib.DEFAULT_MAX_TOKENS,
                         help="Completion cap sent on every call; a model's registry floor raises it for that seat (default: {0})".format(registry_lib.DEFAULT_MAX_TOKENS))
     parser.add_argument("--budget-usd", type=float, default=DEFAULT_BUDGET_USD,
                         help="Pre-flight budget (default: {0:.2f})".format(DEFAULT_BUDGET_USD))
     parser.add_argument("--approve-budget", action="store_true", help="Dispatch even when the projection exceeds the budget")
+    parser.add_argument("--approve-spend", action="store_true", dest="approve_spend",
+                        help="Allow paid calls on a `billing: metered` connector at all. A different question from --approve-budget, which answers \"this projection is over the limit you set\"; this one answers \"you may spend on this endpoint\"")
     parser.add_argument("--autonomous", action="store_true", help="Nobody to ask: an over-budget projection refuses and exits 4 instead of prompting")
     parser.add_argument("--reconciler", choices=judge_lib.RECONCILERS, default=None,
                         help="Who supplies the judgment patch (default: the panel's, else `default` — host interactive, synthesis autonomous). Decides whether the projection charges for a synthesis call")
@@ -519,7 +548,8 @@ def main(argv=None):
         print("This run proves the pipeline, not the artifact: one model behind every lens, a")
         print("family target of 1, and no cross-family corroboration available at any tier. The")
         print("manifest carries `smoke_test: true` and the reconciliation says the run is not")
-        print("evidence. It is still priced and still gated by the budget.")
+        print("evidence. It is still priced and still gated — by the budget, and by the connector's")
+        print("spend gate, which a metered endpoint answers with --approve-spend.")
         print("=" * 72)
 
     if inference["reason"]:
@@ -534,19 +564,17 @@ def main(argv=None):
     # can raise refuses the way the deferred-stub refusal above does: nothing created, nothing to
     # clean up. Only `_adopt_recorded_substitutions` needs the claim, and it waits for it below.
     try:
-        config, config_path = paths.config(args.config)
-        config_entry = config.get(PROVIDER) or {}
-        if not config_entry:
-            sys.stderr.write("config {0} has no `{1}` provider entry\n".format(config_path, PROVIDER))
-            return EXIT_COMPOSITION
+        config_entry, config_path, connector, _registry = dispatch.resolve_entry(
+            paths, args.config, args.models)
         seats = seating_lib.resolve(
             panel, config_entry,
             cli_tier=args.tier,
+            cli_effort=args.effort,
             pinned=parse_model_pins(args.models_pinned),
             pin_all=args.smoke_test,
-            # Read only to relabel a pinned seat's family, and read leniently: the registry **gate**
-            # is further down, after the claim, and moving it up here to satisfy a label would
-            # change which refusals leave a run directory behind.
+            # Read only to relabel a pinned seat's family and to bind each seat's effort, and read
+            # leniently: the registry **gate** is further down, after the claim, and moving it up
+            # here to satisfy a label would change which refusals leave a run directory behind.
             registry=_registry_for_labels(paths, args),
             frontmatter_fn=persona_frontmatter(paths))
         paths.driver_ref(config_entry.get("type", "openai_compat"))
@@ -554,7 +582,7 @@ def main(argv=None):
         # audit record: a project that overrides the finding schema has changed what every reviewer
         # was asked for, which is the last thing `roots` should be silent about.
         paths.require("reference", FINDING_SCHEMA)
-    except (paths_lib.PathError, seating_lib.SeatingError) as failure:
+    except (paths_lib.PathError, seating_lib.SeatingError, dispatch.CompositionError) as failure:
         sys.stderr.write("composition error: {0}\n".format(failure))
         return EXIT_COMPOSITION
 
@@ -682,10 +710,21 @@ def main(argv=None):
         else:
             synthesis_model = seating_lib.model_at(config_entry, judge_seat["tier"], judge_seat["family"])
         judge_seat["model"] = synthesis_model
+        # **The judge's effort level is resolved here too, and recorded beside its family and tier.**
+        # The top of that order is the template's own `synthesis.effort`, and Resolve is the only
+        # stage that certainly holds the template: `reconcile.py` can only re-find it *by name*, so
+        # a panel invoked by absolute path left it with nothing to read and the pin was dropped
+        # without a word. Resolving it once here, from the template in memory and the seats as they
+        # were resolved, makes the level a recorded decision like every other — `run` reads the
+        # levels the seats carry, which is what the manifest is about to record them as.
+        effort_level, effort_source = judge_lib.synthesis_effort(
+            {"seats": seats}, config_entry, _synthesis_persona_frontmatter(paths), panel=panel)
+        judge_seat["effort_level"] = effort_level
+        judge_seat["effort_source"] = effort_source
 
     # --- Resolve, part two: the registry gate -----------------------------------------------------
     try:
-        registry = registry_lib.load(paths.registry(args.models))
+        registry = registry_lib.load(paths, args.models)
     except (paths_lib.PathError, registry_lib.RegistryError) as failure:
         sys.stderr.write("{0}\n".format(failure))
         return EXIT_COMPOSITION
@@ -711,20 +750,20 @@ def main(argv=None):
 
     # The effort a seat is dispatched at is a property of the comparison, not a preference: a value
     # the model does not accept is refused here rather than dropped on the way to the provider.
-    effort_problems = seating_lib.effort_errors(dispatched, registry)
+    effort_problems = seating_lib.effort_errors(seats, registry)
     if effort_problems:
-        sys.stderr.write("composition error: the config asks for an effort {0} model(s) do not accept.\n".format(
-            len(effort_problems)))
+        sys.stderr.write("composition error: {0} seat(s) ask for an effort level their model cannot "
+                         "be run at.\n".format(len(effort_problems)))
         for problem in effort_problems:
             sys.stderr.write("  {0}\n".format(problem))
-        sys.stderr.write("Fix the config's `effort` map, or refresh the vocabularies:\n"
+        sys.stderr.write("Fix that model file's `effort` map, or refresh the vocabularies:\n"
                          "  python3 scripts/refresh_models.py\n")
         return EXIT_COMPOSITION
 
     manifest = _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
                                dispatched, harness, inputs, fingerprint, tier_default, registry,
                                min_families, seated_families, inference, reconciler, autonomous,
-                               judge_seat)
+                               judge_seat, connector=connector)
     if resuming:
         manifest = _merge_resume(manifest, runs_lib.read_manifest(run_dir))
     runs_lib.write_manifest(run_dir, manifest)
@@ -768,6 +807,15 @@ def main(argv=None):
         projection["context_overflows"] = sorted(overflowed)
         projection["excluded_seats"] = sorted(overflowed)
         _record_projection(run_dir, projection, None)
+
+    # --- The spend gate, ahead of the budget gate because it is the prior question ----------------
+    # "May this run pay for calls on this endpoint at all" comes before "is this particular
+    # projection more than you meant to spend". A run can be comfortably under budget and still be
+    # the first time anybody said yes to billing an account, which is the case --approve-budget
+    # never covered: it approves an overrun, not the spending.
+    spend_code = _spend_gate(args, run_dir, connector, dispatched, projection, autonomous)
+    if spend_code is not None:
+        return spend_code
 
     over = budget_lib.over_budget(projection)
     if over and not args.approve_budget:
@@ -902,8 +950,14 @@ def _reconcile_argv(args, run_dir, judge):
     on both — the pin above all, then the operator paths, which are read as given and are not
     recoverable from the run directory.
 
-    `judge` adds the two flags that say a synthesis judgment is wanted now. They are deliberately
-    absent from the printed form: that line is for a host who is about to write the patch itself.
+    `judge` adds the flags that say a synthesis judgment is wanted now — the two that select it, and
+    `--approve-spend` when this run carried one, because the child is about to make a **paid call on
+    the same metered endpoint this run has already been approved for**. Without it the child refuses
+    at exit 4 after the panel has been dispatched and billed: one invocation that both records a
+    person's yes and then refuses on the grounds that nobody said it. They are deliberately absent
+    from the printed form: that line is for a host who is about to write the patch itself, and a
+    reconcile typed later reads the run's own recorded `spend_approval` rather than being handed a
+    pre-typed approval to paste.
 
     The **harness-judge** stage runs this same bare invocation, with neither flag, because its
     first pass is what writes the worksheet and prints the spawn instruction. The `--judgment
@@ -913,6 +967,8 @@ def _reconcile_argv(args, run_dir, judge):
     argv = [sys.executable, RECONCILE, "--run-dir", run_dir]
     if judge:
         argv += ["--reconciler", "synthesis", "--autonomous"]
+        if args.approve_spend:
+            argv += ["--approve-spend"]
     if args.synthesis_model:
         argv += ["--synthesis-model", args.synthesis_model]
     if args.workspace:
@@ -985,7 +1041,8 @@ def _reseat_unavailable(results, seats, config_entry, registry, run_dir, args):
             seat, seats, config_entry, kind="model_unavailable",
             reason="the provider would not serve {0}; re-seated once onto the next available "
                    "family in declaration order".format(refused_model),
-            usable=lambda _family, model: bool(model) and not registry.covers([model]))
+            usable=lambda _family, model: bool(model) and not registry.covers([model]),
+            registry=registry)
         if replacement is None:
             print("{0}: no family left to re-seat onto; the run is under-seated".format(seat["reviewer_id"]))
             continue
@@ -1013,6 +1070,7 @@ def _reseated(seat, entry, run_cap):
         record["family"] = seat["family"]
         record["model"] = seat["model"]
         record["effort"] = seat.get("effort")
+        record["effort_tokens"] = seat.get("effort_tokens")
         record["max_tokens"] = registry_lib.cap_for(entry, run_cap)
         record["substitution"] = seat["substitution"]
     return mutate
@@ -1071,10 +1129,11 @@ def _run_tier(tier_default, seats):
 
 def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats, dispatched, harness,
                     inputs, fingerprint, tier_default, registry, min_families, seated_families,
-                    inference, reconciler, autonomous, judge_seat=None):
+                    inference, reconciler, autonomous, judge_seat=None, connector=None):
     """The manifest as it stands at Resolve: every seat pending, every input pinned."""
     artifact = inputs["artifact"]
     references = inputs["references"]
+    connector = connector or {}
     dispatched_ids = {s["reviewer_id"] for s in dispatched}
 
     seat_records = []
@@ -1093,7 +1152,13 @@ def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
             "provider": None,
             "leg": "harness" if harness_seat else "openrouter",
             "input_delivery": "materialized-paths" if harness_seat else "inlined",
+            # The abstract level and who chose it, beside the concrete parameter. A harness seat
+            # carries the level and no parameter: the harness leg has no per-spawn effort knob, so
+            # what the run *asked for* is knowable and what was *sent* is not.
+            "effort_level": seat.get("effort_level"),
+            "effort_source": seat.get("effort_source"),
             "effort": None if harness_seat else seat.get("effort"),
+            "effort_tokens": None if harness_seat else seat.get("effort_tokens"),
             "max_tokens": None if harness_seat else registry_lib.cap_for(entry, args.max_tokens),
             "status": "pending",
             "report": None,
@@ -1141,6 +1206,20 @@ def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
         "input_fingerprint": fingerprint,
         "config": config_path,
         "models_registry": registry.path,
+        # The endpoint this run billed, named rather than inferred from a driver type: two
+        # connectors can share one driver and bill different accounts.
+        "connector": {
+            "name": connector.get("name"),
+            "type": connector.get("type"),
+            "base_url": connector.get("base_url"),
+            "billing": connector.get("billing"),
+            "requires_approval": connectors_lib.requires_approval(connector),
+            "path": connector.get("path"),
+            "root": connector.get("root"),
+        },
+        # Filled by the spend gate a few lines after this manifest is written: whether a call on
+        # that endpoint needed a person's yes, whether it got one, and where the yes came from.
+        "spend_approval": None,
         "workspace": paths.workspace,
         # The cascade's audit record: the search order, the root each loaded file actually came
         # from, and the ones a workspace override supplied. `config-fragment` appears only when a
@@ -1191,6 +1270,54 @@ def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
     }
 
 
+def _spend_gate(args, run_dir, connector, seats, projection, autonomous):
+    """The connector's own gate: may this run bill an account at all? None means yes, carry on.
+
+    A `metered` connector carries `requires_approval: true` by default, and a metered call without
+    an explicit yes is refused. The three exits mirror the budget gate's, deliberately, because an
+    operator has already learned that shape: an **autonomous** run refuses with exit 4 and never
+    prompts, an **interactive** run asks on stdin, and `--approve-spend` skips the question. What
+    differs is what is being approved — the endpoint, not the amount — which is why it is a separate
+    flag: a run that has approved a $9 overrun has said nothing about whether paying is allowed, and
+    a run that has approved paying has said nothing about how much.
+
+    Whatever the answer, it is recorded in the manifest as `spend_approval`, so the audit trail
+    shows that a person said yes rather than that a default did.
+    """
+    block = connectors_lib.spend_gate(connector, seats)
+    if not block["required"]:
+        _record_spend_approval(run_dir, dict(block, granted=None, source=None))
+        return None
+
+    if args.approve_spend:
+        _record_spend_approval(run_dir, dict(block, granted=True, source="--approve-spend"))
+        return None
+
+    message = connectors_lib.refusal(connector, seats, projection.get("projection_usd"))
+    if autonomous:
+        _record_spend_approval(run_dir, dict(block, granted=False, source="autonomous-refusal"))
+        _record_projection(run_dir, projection, "refused-spend-not-approved")
+        sys.stderr.write(message + "\n  No paid call was made.\n")
+        return EXIT_BUDGET
+
+    print(message)
+    answer = input("Allow paid calls on {0}? [y/N] ".format(connector.get("name") or "?")).strip().lower()
+    if answer not in ("y", "yes"):
+        _record_spend_approval(run_dir, dict(block, granted=False, source="declined-interactively"))
+        _record_projection(run_dir, projection, "declined-spend-not-approved")
+        sys.stderr.write("not dispatched.\n")
+        return EXIT_BUDGET
+    _record_spend_approval(run_dir, dict(block, granted=True, source="approved-interactively"))
+    return None
+
+
+def _record_spend_approval(run_dir, block):
+    """Put the spend gate's answer in the manifest. Written even when nothing was gated."""
+    manifest = runs_lib.read_manifest(run_dir)
+    manifest["spend_approval"] = block
+    runs_lib.write_manifest(run_dir, manifest)
+
+
 def _record_projection(run_dir, projection, decision):
     """Put the pre-flight in the manifest, with the decision the budget gate came to.
 
@@ -1227,6 +1354,7 @@ def _adopt_recorded_substitutions(existing, seats):
         seat["family"] = record["family"]
         seat["model"] = record["model"]
         seat["effort"] = record.get("effort")
+        seat["effort_tokens"] = record.get("effort_tokens")
         seat["substitution"] = substitution
 
 
@@ -1244,7 +1372,7 @@ def _merge_resume(manifest, existing):
         if before.get("status") in ("ok", "dispatching", "failed", "timeout", "skipped"):
             for field in ("status", "report", "verdict", "findings", "attempts", "repairs", "truncations",
                           "usage", "reasoning_tokens", "cost_usd", "upstream_unbilled_usd",
-                          "elapsed_s", "provider", "effort",
+                          "elapsed_s", "provider", "effort", "effort_tokens",
                           "max_tokens", "model", "connector", "substitution", "failure_reason", "error",
                           "claimed_at", "claimed_by", "stale_lease", "string_truncations", "dispatches",
                           "unavailable_model"):

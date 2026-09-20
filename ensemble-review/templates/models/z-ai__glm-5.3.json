@@ -1,0 +1,30 @@
+{
+  "id": "z-ai/glm-5.3",
+  "connector": "openrouter",
+  "family": "glm",
+  "tiers": [
+    "frontier"
+  ],
+  "effort": {
+    "light": "low",
+    "standard": "high",
+    "deep": "max"
+  },
+  "effort_source": "migration 2026-09-19: deep = the model's top rung, light its bottom, standard the middle of three or one below top from four rungs up",
+  "input_price_per_token": 9.1e-07,
+  "output_price_per_token": 2.86e-06,
+  "context_limit": 1310720,
+  "effort_vocabulary": [
+    "max",
+    "high",
+    "low"
+  ],
+  "price_source": "openrouter catalogue",
+  "source": "https://openrouter.ai/api/v1/models",
+  "refreshed_at": "2026-09-18",
+  "output_token_prior": 16000,
+  "prior_source": "default — run 1 seated this model and the seat failed before returning usage",
+  "min_max_tokens": null,
+  "measured_output_price": null,
+  "measured_output_price_source": "no frozen run dispatched this model"
+}

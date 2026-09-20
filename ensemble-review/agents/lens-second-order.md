@@ -2,6 +2,7 @@
 name: lens-second-order
 description: Second-order consequences reviewer. Traces what this artifact commits its owner to and what breaks downstream, after the thing is built and while it is being lived with.
 model: frontier
+effort: standard
 output_type: json_report
 context:
   - finding-schema.md

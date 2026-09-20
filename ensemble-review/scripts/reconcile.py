@@ -68,6 +68,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dispatch  # noqa: E402
 from backends import AuthFailure  # noqa: E402
 from lib import budget as budget_lib  # noqa: E402
+from lib import connectors as connectors_lib  # noqa: E402
 from lib import judge as judge_lib  # noqa: E402
 from lib import panels as panels_lib  # noqa: E402
 from lib import paths as paths_lib  # noqa: E402
@@ -84,6 +85,10 @@ EXIT_USAGE = 1
 EXIT_TERMINAL = 2
 EXIT_PATCH = 3
 EXIT_BUDGET = 4
+
+
+class SpendNotApproved(Exception):
+    """The judgment call would bill a metered endpoint nobody has approved. The caller exits 4."""
 
 
 class HardPatchError(Exception):
@@ -393,6 +398,29 @@ def _materialized_references(run_dir, manifest):
     return references
 
 
+def _spend_approval_source(manifest, args):
+    """Which yes lets this judgment call bill the endpoint, or None when nobody has said one.
+
+    Two sources, and the second is what makes the printed host-run line work. `--approve-spend` on
+    this invocation is the direct answer. Failing that, **the run's own recorded
+    `spend_approval.granted`** for the run directory this process was handed: a person already said
+    yes to paying on this endpoint for this run, the manifest records who and where the yes came
+    from, and re-asking would mean a run that approved its own seats cannot finish its own judgment.
+    The recorded yes is scoped to one run directory, which is the whole of what it claims — it is
+    not a standing approval for the endpoint, and a reconcile pointed at a different run reads that
+    run's own record or none.
+
+    A run that refused, or one that was never gated, records `granted` false or null and answers
+    nothing here.
+    """
+    if args.approve_spend:
+        return "--approve-spend"
+    recorded = (manifest or {}).get("spend_approval")
+    if isinstance(recorded, dict) and recorded.get("granted"):
+        return "manifest"
+    return None
+
+
 def dispatch_synthesis(paths, run_dir, manifest, context, artifact_text, args):
     """Make the judgment call. Returns `(patch, record)`; `patch` is None when nothing survived.
 
@@ -409,10 +437,29 @@ def dispatch_synthesis(paths, run_dir, manifest, context, artifact_text, args):
     # but the finding schema.
     reference_paths = dispatch.persona_context_paths(paths, frontmatter)
 
-    config, _config_path = paths.config(args.config)
-    config_entry = config.get(dispatch.PROVIDER) or {}
-    if not config_entry:
-        raise judge_lib.JudgeError("the config has no `{0}` provider entry".format(dispatch.PROVIDER))
+    try:
+        config_entry, _config_path, connector, _registry = dispatch.resolve_entry(
+            paths, args.config, args.models)
+    except dispatch.CompositionError as failure:
+        raise judge_lib.JudgeError(str(failure))
+
+    # **The judgment call is a paid call, so it is behind the same spend gate the seats are.** A
+    # reconcile typed on its own, hours after the panel, is the case this exists for: the run's own
+    # spend approval covered the seats it dispatched, and this is a new call on the same metered
+    # endpoint.
+    #
+    # **It refuses rather than prompting, which is the shape `_budget_gate` already has here.**
+    # `run_panel.py` is the only place in this skill that reads a tty, and it records what it read;
+    # a reconcile typed into a pipe or a CI step has a stdin that says nothing about whether a
+    # person is waiting, and a paid call must not turn on that. So the answer to "may this spend"
+    # is the flag or the run's own record, and never a prompt.
+    spend_source = _spend_approval_source(manifest, args) if connectors_lib.requires_approval(connector) else None
+    if connectors_lib.requires_approval(connector) and spend_source is None:
+        raise SpendNotApproved(
+            connectors_lib.refusal(connector, [{"reviewer_id": judge_lib.SYNTHESIS_PERSONA}],
+                                   flag="--approve-spend")
+            + "\n  This run's own manifest records no granted `spend_approval` either, so there is "
+              "no yes anywhere to honour.\n  No judgment call was made.")
 
     # **The seat Resolve worked out, model included, when the run recorded one.** The projection
     # that gated this run was computed against that seat, so re-deriving it here would price one
@@ -422,12 +469,13 @@ def dispatch_synthesis(paths, run_dir, manifest, context, artifact_text, args):
     # than left to the tier map to resolve a second time.
     #
     # A run made before `judge_seat` existed, or one reconciled by hand, falls back to resolving it
-    # from the same inputs Resolve had.
+    # from the same inputs Resolve had — and that fallback is the only thing the template is still
+    # loaded for, because Resolve now records the effort level too.
+    panel = _panel_for(paths, manifest)
     recorded = manifest.get("judge_seat")
     if isinstance(recorded, dict) and recorded.get("family") and recorded.get("tier"):
         seat = dict(recorded)
     else:
-        panel = _panel_for(paths, manifest)
         seat = judge_lib.synthesis_seat(
             config_entry, panel,
             cli_tier=manifest.get("tier_default"),
@@ -446,9 +494,28 @@ def dispatch_synthesis(paths, run_dir, manifest, context, artifact_text, args):
     if cap is None:
         cap = manifest.get("max_tokens_requested") or registry_lib.DEFAULT_MAX_TOKENS
 
+    # **The effort level is read back from the record, exactly as the model is.** Resolve worked it
+    # out on the judge's own order — the panel's `synthesis.effort` first, then the level the run's
+    # seats dispatched at, then the config's `default_effort`, then the `synthesis` persona's own
+    # frontmatter — and Resolve is the stage that holds the template. This one re-finds a template
+    # only by name, so re-deriving here dropped a `synthesis.effort` pin on every panel invoked by
+    # path. It is re-derived **only for a manifest written before `judge_seat.effort_level`
+    # existed**, which is the same fallback the seat itself has and reaches the same answer for
+    # every run whose panel the cascade can still find by name. The harness judge is untouched by
+    # any of this — its model and its effort are pinned in its installed agent file and it is not
+    # seated from a tier map at all.
+    effort_level = seat.get("effort_level")
+    effort_source = seat.get("effort_source")
+    if not effort_level:
+        effort_level, effort_source = judge_lib.synthesis_effort(
+            manifest, config_entry, frontmatter, panel=panel)
+    seat["effort_level"] = effort_level
+    seat["effort_source"] = effort_source
+
     call = dispatch.prepare_call(
         paths, family, tier=tier, model=pinned, max_tokens=cap,
-        config_override=args.config, models_override=args.models, label="synthesis")
+        config_override=args.config, models_override=args.models, label="synthesis",
+        effort_level=effort_level)
 
     request = core.judgment_request(context)
     system_prompt = dispatch.build_system_prompt(body, reference_paths)
@@ -480,7 +547,8 @@ def dispatch_synthesis(paths, run_dir, manifest, context, artifact_text, args):
             connector=call.connector, provider=call.provider, effort=call.effort, cap=call.cap,
             attempts=[], elapsed_s=None, status="refused", errors=[str(failure)],
             tier_source=seat.get("tier_source"), family_source=seat.get("family_source"),
-            elisions=elisions))
+            effort_level=call.effort_level, effort_source=effort_source,
+            effort_tokens=call.effort_tokens, elisions=elisions))
         raise
 
     for elision in elisions:
@@ -564,7 +632,9 @@ def dispatch_synthesis(paths, run_dir, manifest, context, artifact_text, args):
             connector=call.connector, provider=call.provider, effort=call.effort, cap=call.cap,
             attempts=attempts, elapsed_s=time.time() - started, status=status, errors=errors,
             tier_source=seat.get("tier_source"), family_source=seat.get("family_source"),
-            elisions=elisions, prompt_tokens=prompt_tokens)
+            effort_level=call.effort_level, effort_source=effort_source,
+            effort_tokens=call.effort_tokens, elisions=elisions, prompt_tokens=prompt_tokens,
+            spend_approval_source=spend_source)
         _record_judge_call(run_dir, record)
 
     return patch, record
@@ -700,7 +770,9 @@ def main(argv=None):
     parser.add_argument("--max-tokens", type=int, default=None,
                         help="Completion cap for the judgment call; a model's registry floor raises it (default: the run's own cap, else {0})".format(registry_lib.DEFAULT_MAX_TOKENS))
     parser.add_argument("--config", default=None, help="Config JSON, taken as given (default: the workspace-first cascade, deep-merged)")
-    parser.add_argument("--models", default=None, help="Model registry, taken as given (default: the workspace-first cascade)")
+    parser.add_argument("--models", default=None, help="Directory of model files, taken as given (default: the workspace-first cascade, deep-merged per model)")
+    parser.add_argument("--approve-spend", action="store_true", dest="approve_spend",
+                        help="Allow the judgment call to be paid for on a `billing: metered` connector. A different question from --approve-budget, which answers \"this run carries no priced allowance for it\"")
     args = parser.parse_args(argv)
 
     paths = paths_lib.Paths(args.workspace)
@@ -837,6 +909,9 @@ def main(argv=None):
 
         try:
             patch, _record = dispatch_synthesis(paths, run_dir, manifest, context, artifact_text, args)
+        except SpendNotApproved as failure:
+            sys.stderr.write("{0}\n".format(failure))
+            return EXIT_BUDGET
         except HardPatchError as failure:
             sys.stderr.write("the judgment patch was refused: {0}\n".format(failure))
             return EXIT_PATCH

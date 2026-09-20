@@ -7,8 +7,9 @@ flag but the four things around it: the family target drops to 1 so the run does
 shortfall the operator asked for, the manifest is marked, the console says so before anything is
 dispatched, and the reconciliation's method caveat opens by saying the run is not evidence.
 
-**It is still priced and still gated.** A smoke test that skipped the budget gate would be a flag
-that turns off the one control in front of the money, which is the opposite of what it is for.
+**It is still priced and still gated, by both gates.** A smoke test that skipped the budget gate —
+or the connector's spend gate, which is the other control in front of the money — would be a flag
+that turns off exactly what it is there to run behind.
 
 No network and no paid call: the connector is `fake_backend.py` throughout.
 
@@ -35,6 +36,20 @@ from lib import seating as seating_lib  # noqa: E402
 RUN_ID = "2026-09-19-1"
 
 
+def _help_text():
+    """`run_panel.py --help`, captured. argparse writes it and then exits, so both are caught."""
+    stream = io.StringIO()
+    saved = sys.stdout
+    sys.stdout = stream
+    try:
+        run_panel.main(["--help"])
+    except SystemExit:
+        pass
+    finally:
+        sys.stdout = saved
+    return stream.getvalue()
+
+
 class SmokeTestCase(unittest.TestCase):
 
     def setUp(self):
@@ -43,11 +58,7 @@ class SmokeTestCase(unittest.TestCase):
         self.workspace = harness.Workspace(models=harness.default_models(third=True))
         self.workspace.apply_env()
         self.addCleanup(self.workspace.close)
-        with open(self.workspace.registry, "r", encoding="utf-8") as handle:
-            registry = json.load(handle)
-        registry["models"][harness.THIRD_MODEL]["family"] = "glm"
-        with open(self.workspace.registry, "w", encoding="utf-8") as handle:
-            json.dump(registry, handle)
+        self.workspace.edit_model(harness.THIRD_MODEL, family="glm")
         self.workspace.plan({harness.THIRD_MODEL: [
             {"body": harness.valid_report()}, {"body": harness.valid_report()}]})
         self.run_dir = self.workspace.path("reviews", RUN_ID)
@@ -129,6 +140,21 @@ class PinningTest(SmokeTestCase):
         self.assertIn(harness.THIRD_MODEL, out)
         self.assertLess(out.index("SMOKE TEST"), out.index("Cost pre-flight"),
                         "the banner comes before the projection, which comes before the money")
+
+    def test_the_banner_and_the_help_name_both_gates_and_not_only_the_budget(self):
+        """The flag is gated by the connector's spend gate as well, and its own text used to say
+        `still gated by the budget` — which reads as a list of one, and left an operator on a
+        metered endpoint expecting a smoke test to be the one run that needs no approval."""
+        _code, out, _err = self.run_panel(extra=["--smoke-test", harness.THIRD_MODEL])
+        banner = out[out.index("SMOKE TEST"):out.index("Cost pre-flight")]
+        self.assertIn("budget", banner)
+        self.assertIn("--approve-spend", banner)
+
+        help_text = _help_text()
+        start = help_text.rindex("--smoke-test")        # the options list, past the usage line
+        smoke = help_text[start:help_text.index("--max-tokens", start)]
+        self.assertIn("budget", smoke)
+        self.assertIn("spend gate", smoke)
 
 
 class StillPricedTest(SmokeTestCase):

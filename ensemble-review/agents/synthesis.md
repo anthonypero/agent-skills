@@ -2,6 +2,7 @@
 name: synthesis
 description: Judgment supplier for autonomous runs. Reads every validated report, the provisional clusters reconcile.py computed, the references and the artifact, and returns the judgment patch — claim joins, splits, singleton labels, severity arbitrations, dispositions, contradictions, canonical-edit acceptances and the method caveat. It never writes the reconciliation and it never states a ruling.
 model: frontier
+effort: standard
 output_type: json_report
 context:
   - reconciliation.md

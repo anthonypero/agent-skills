@@ -1,0 +1,32 @@
+{
+  "id": "moonshotai/kimi-k3",
+  "connector": "openrouter",
+  "family": "kimi",
+  "tiers": [
+    "frontier",
+    "standard",
+    "fast"
+  ],
+  "effort": {
+    "light": "low",
+    "standard": "high",
+    "deep": "max"
+  },
+  "effort_source": "migration 2026-09-19: deep = the model's top rung, light its bottom, standard the middle of three or one below top from four rungs up",
+  "input_price_per_token": 1.7e-06,
+  "output_price_per_token": 8.5e-06,
+  "context_limit": 1048576,
+  "effort_vocabulary": [
+    "max",
+    "high",
+    "low"
+  ],
+  "price_source": "openrouter catalogue",
+  "source": "https://openrouter.ai/api/v1/models",
+  "refreshed_at": "2026-09-19",
+  "output_token_prior": 21297,
+  "prior_source": "measured — run 2 (2026-09-18, standard panel), consistency-kimi accepted attempt",
+  "min_max_tokens": 64000,
+  "measured_output_price": 1.5e-05,
+  "measured_output_price_source": "run 2 (2026-09-18) consistency-kimi attempt 1: 0.48 / 32000 completion tokens"
+}

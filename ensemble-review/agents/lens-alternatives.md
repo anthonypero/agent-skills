@@ -2,6 +2,7 @@
 name: lens-alternatives
 description: Alternatives reviewer. Finds the forks the artifact took, names the road not taken at each one, and reports where an approach was foreclosed without an argument.
 model: frontier
+effort: standard
 output_type: json_report
 context:
   - finding-schema.md

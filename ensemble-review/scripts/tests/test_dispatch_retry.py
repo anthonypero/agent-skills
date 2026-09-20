@@ -207,16 +207,26 @@ class ForkTagAtIngestTest(DispatchTestCase):
 class RegistryGateTest(DispatchTestCase):
 
     def test_a_model_absent_from_the_registry_is_a_composition_error(self):
-        with open(self.workspace.registry, "r", encoding="utf-8") as handle:
-            registry = json.load(handle)
-        del registry["models"][harness.SLOW_MODEL]
-        with open(self.workspace.registry, "w", encoding="utf-8") as handle:
-            json.dump(registry, handle)
-        code, err = self.run_seat()
+        """A seat pinned to a model no model file covers.
+
+        Since the registry became a directory of model files, a model absent from it is also
+        absent from the derived tier map — so the way to reach this gate is the way an operator
+        reaches it in practice: pin the seat to an id nobody has a file for.
+        """
+        code, err = self.run_seat(extra=["--model", "test/no-such-model"])
         self.assertEqual(code, 1, "an unpriced seat is refused before dispatch, not projected at zero")
-        self.assertIn(harness.SLOW_MODEL, err)
+        self.assertIn("test/no-such-model", err)
         self.assertIn("refresh_models.py", err)
         self.assertEqual(self.workspace.calls(), [], "nothing was dispatched")
+
+    def test_a_model_whose_file_carries_no_price_is_the_same_composition_error(self):
+        """Presence is not coverage: a null price would be a silent hole in the projection."""
+        self.workspace.edit_model(harness.SLOW_MODEL, input_price_per_token=None,
+                                  output_price_per_token=None)
+        code, err = self.run_seat()
+        self.assertEqual(code, 1, err)
+        self.assertIn(harness.SLOW_MODEL, err)
+        self.assertIn("carries no", err)
 
 
 class EffortTest(DispatchTestCase):
@@ -250,10 +260,53 @@ class EffortTest(DispatchTestCase):
         self.assertIn("max/high/low", stderr.getvalue(), "the message names the allowed values")
         self.assertIn(harness.SLOW_MODEL, stderr.getvalue())
 
-    def test_a_model_absent_from_the_effort_map_is_sent_no_effort_at_all(self):
-        self.workspace.plan({harness.SLOW_MODEL: [{"body": harness.valid_report()}]})
-        self.assertEqual(self.run_seat()[0], 0)
-        self.assertIsNone(self.workspace.calls(harness.SLOW_MODEL)[0]["effort"])
+    def test_a_level_the_model_does_not_map_is_a_composition_error(self):
+        """The other half of the effort gate, and the half abstract effort made possible.
+
+        A model file with no `effort` map used to mean "send no effort parameter at all". Under an
+        abstract level that reading is gone: the run asked for `standard` and the answer is not
+        "whatever depth the provider defaults to", it is that nobody has said what `standard` means
+        on this model. The refusal names the model and the levels the file does map.
+        """
+        workspace = harness.Workspace(effort={harness.SLOW_MODEL: None})
+        self.addCleanup(workspace.close)
+        workspace.apply_env()
+        workspace.plan({harness.SLOW_MODEL: [{"body": harness.valid_report()}]})
+        stderr, saved = io.StringIO(), sys.stderr
+        sys.stderr = stderr
+        try:
+            code = dispatch.main([
+                "--persona", "lens-consistency", "--family", "kimi",
+                "--artifact", workspace.artifact, "--out", self.out,
+                "--config", workspace.config, "--models", workspace.registry, "--tier", "standard",
+                "--effort", "standard",
+            ])
+        finally:
+            sys.stderr = saved
+        self.assertEqual(code, 1, stderr.getvalue())
+        self.assertEqual(workspace.calls(harness.SLOW_MODEL), [], "nothing is dispatched")
+        self.assertIn("composition error", stderr.getvalue())
+        self.assertIn(harness.SLOW_MODEL, stderr.getvalue())
+        self.assertIn("no effort levels at all", stderr.getvalue())
+
+    def test_a_reasoning_token_budget_is_sent_instead_of_a_word_when_the_file_binds_one(self):
+        """Both shapes ship. A file may bind a level to that model's rung or to a token budget."""
+        workspace = harness.Workspace()
+        self.addCleanup(workspace.close)
+        workspace.apply_env()
+        workspace.edit_model(harness.SLOW_MODEL,
+                             effort={"light": "low", "standard": {"max_tokens": 8000}, "deep": "max"})
+        workspace.plan({harness.SLOW_MODEL: [{"body": harness.valid_report()}]})
+        code = dispatch.main([
+            "--persona", "lens-consistency", "--family", "kimi",
+            "--artifact", workspace.artifact, "--out", self.out,
+            "--config", workspace.config, "--models", workspace.registry, "--tier", "standard",
+            "--effort", "standard",
+        ])
+        self.assertEqual(code, 0)
+        call = workspace.calls(harness.SLOW_MODEL)[0]
+        self.assertIsNone(call["effort"], "a budget is not a word and no word is sent")
+        self.assertEqual(call.get("effort_tokens"), 8000)
 
 
 class EnvelopeTest(DispatchTestCase):
@@ -286,29 +339,45 @@ class WireShapeTest(DispatchTestCase):
 
     def setUp(self):
         DispatchTestCase.setUp(self)
-        self.config = self.workspace.path("wire-config.json")
-        with open(self.config, "w", encoding="utf-8") as handle:
-            json.dump({"openrouter": {
+        self.connector = self.workspace.path("wire-connector.json")
+        with open(self.connector, "w", encoding="utf-8") as handle:
+            json.dump({
+                "name": "wire",
                 "type": "openai_compat",
                 "base_url": "https://example.invalid/api/v1",
                 "api_key_secret": None,
                 "api_key_env": "ENSEMBLE_REVIEW_TEST_KEY",
-                "default_tier": "standard",
-                "tiers": {"standard": {"kimi": self.MODEL, "xai": self.BARE_MODEL}},
-                "effort": {self.MODEL: "high"},
+                "catalogue_url": "https://example.invalid/api/v1/models",
+                "billing": "free",
                 "provider_routing": {self.MODEL: self.ROUTING},
-            }}, handle)
+            }, handle)
 
-        self.registry = self.workspace.path("wire-models.json")
+        self.config = self.workspace.path("wire-config.json")
+        with open(self.config, "w", encoding="utf-8") as handle:
+            json.dump({
+                "default_connector": self.connector,
+                "default_tier": "standard",
+                "default_effort": "standard",
+                "family_order": ["kimi", "xai"],
+                "tier_order": ["standard"],
+            }, handle)
+
+        self.registry = self.workspace.path("wire-models")
         priced = {
             "input_price_per_token": 1e-06, "output_price_per_token": 2e-06,
             "context_limit": 1000000, "output_token_prior": 1000, "min_max_tokens": None,
+            "connector": "wire",
         }
-        with open(self.registry, "w", encoding="utf-8") as handle:
-            json.dump({"schema_version": "1", "models": {
+        self.workspace.write_models(
+            {
                 self.MODEL: dict(priced, effort_vocabulary=["max", "high", "low"]),
-                self.BARE_MODEL: dict(priced, effort_vocabulary=["high", "low"]),
-            }}, handle)
+                # The bare model has no recorded effort vocabulary at all, so there is no rung
+                # this skill could name for it and no reasoning parameter is sent.
+                self.BARE_MODEL: dict(priced, effort_vocabulary=None),
+            },
+            effort={self.MODEL: "high", self.BARE_MODEL: None},
+            directory=self.registry,
+            tiers={"kimi": self.MODEL, "xai": self.BARE_MODEL})
 
         self.sent = []
         saved = dispatch.urllib.request.urlopen
@@ -358,7 +427,7 @@ class WireShapeTest(DispatchTestCase):
         payload = self.sent[0]
         self.assertEqual(payload["model"], self.BARE_MODEL)
         self.assertNotIn("reasoning", payload,
-                         "a model absent from the effort map is dispatched with no effort parameter at all")
+                         "a model with no recorded effort vocabulary is dispatched with no effort parameter at all")
         self.assertNotIn("provider", payload,
                          "and with no routing object, so OpenRouter's own default routing stands")
 
@@ -811,7 +880,8 @@ class DriverContractTest(unittest.TestCase):
         self.assertIn("cost_source", text, "but their absence is worth a line on stderr")
         self.assertIn("upstream_unbilled_usd", text)
         self.assertIn("defaulting to None", text)
-        self.assertEqual(len(warnings), 4, "two on the result, two on the attempt")
+        self.assertIn("effort_tokens", text)
+        self.assertEqual(len(warnings), 5, "three on the result, two on the attempt")
 
     def test_check_driver_folds_in_the_result_contract_when_it_is_given_one(self):
         """The optional fields live in a result, so a module alone can never reveal them."""

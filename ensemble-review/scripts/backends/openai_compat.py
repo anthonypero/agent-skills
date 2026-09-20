@@ -18,7 +18,8 @@ retries: it owns the length retry and the repair re-ask, so it concatenates thes
 into the seat's `_meta.attempts` and fills in the `validation_errors` the driver cannot know.
 
 The completion cap is `backend_entry["max_tokens"]` and is always explicit. `backend_entry` may also
-carry `reasoning_effort` (a string for this one call, or None) and `prices`
+carry `reasoning_effort` (a string for this one call, or None), `reasoning_max_tokens` (a reasoning-token
+budget where the model's file binds an effort level to one rather than to a word, or None) and `prices`
 (`{"input": …, "output": …}` per token) so cost is computed when the provider reports none.
 
 Every result and every attempt carries a `cost_source` beside its `cost_usd` — `provider` for the
@@ -61,6 +62,7 @@ def dispatch_detailed(system_prompt, user_prompt, model, backend_entry, json_sch
 
     max_tokens = int(backend_entry.get("max_tokens") or DEFAULT_MAX_TOKENS)
     effort = backend_entry.get("reasoning_effort")
+    reasoning_budget = backend_entry.get("reasoning_max_tokens")
 
     payload = {
         "model": model,
@@ -73,10 +75,13 @@ def dispatch_detailed(system_prompt, user_prompt, model, backend_entry, json_sch
         "usage": {"include": True},
     }
     if effort:
-        # Vocabularies differ by vendor, so the caller resolves the string from the per-model effort
-        # map and the registry's vocabulary. A model absent from that map is dispatched with no
-        # effort parameter at all, which works everywhere at the cost of control.
+        # Vocabularies differ by vendor, so the caller resolves the word from the model's own file
+        # and the registry's vocabulary. A model whose file binds the level to a reasoning-token
+        # budget instead sends `max_tokens` here; a caller that resolved neither sends no reasoning
+        # parameter at all, which works everywhere at the cost of control.
         payload["reasoning"] = {"effort": effort}
+    elif reasoning_budget:
+        payload["reasoning"] = {"max_tokens": int(reasoning_budget)}
     routing = backend_entry.get("provider_routing_for_model")
     if routing:
         payload["provider"] = routing
@@ -149,6 +154,7 @@ def dispatch_detailed(system_prompt, user_prompt, model, backend_entry, json_sch
         "provider": data.get("provider") or backend_entry.get("provider_name") or "openrouter",
         "connector": backend_entry.get("type", "openai_compat"),
         "effort": effort,
+        "effort_tokens": reasoning_budget,
         "max_tokens": max_tokens,
         "finish_reason": finish,
         "notes": notes,

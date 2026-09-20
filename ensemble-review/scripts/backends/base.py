@@ -33,7 +33,7 @@ call or the finish reason, and the manifest promises all of them. Ship both; `di
 | `system_prompt` | The persona body plus its `context` references, already composed. **Byte-identical across families** — that is the invariant the comparison rests on, so a driver never edits it |
 | `user_prompt` | The artifact and references inlined, or the judgment call's own message |
 | `model` | The concrete model id, already resolved from the tier map. A driver never consults the tier map |
-| `backend_entry` | The connector's config entry, with four things the caller added: `api_key`, `max_tokens`, `reasoning_effort` (or `None`), and `prices` as `{input, output}` per token. `provider_routing_for_model` is present when the config carries routing for this model |
+| `backend_entry` | The connector file's own entry, with five things the caller added: `api_key`, `max_tokens`, `reasoning_effort` (a vendor rung for this one call, or `None`), `reasoning_max_tokens` (a reasoning-token budget where the model's file binds the level to one instead of a word, or `None`), and `prices` as `{input, output}` per token. `provider_routing_for_model` is present when the connector carries routing for this model |
 | `json_schema` | `{"type": "json_object"}` — the structured-output request. A provider that rejects it must fall back to plain completion rather than failing the seat |
 | `http_request_fn` | `(url, headers, body_bytes, timeout) -> (status, text)`. **Use it; do not open your own socket.** Framework §11's retry policy lives inside it — three tries at 1 s, 4 s and 16 s on a 429, a 5xx or a socket timeout — and a 401 or 403 is raised as `AuthFailure` so the caller can halt the run instead of paying three more times to prove the key is still wrong |
 
@@ -50,7 +50,8 @@ call or the finish reason, and the manifest promises all of them. Ship both; `di
 | `model` | The id actually served, which is not always the id asked for |
 | `provider` | The upstream host the request was routed to — the audit trail for where the bytes went |
 | `connector` | The driver type that made the call |
-| `effort` | The effort parameter actually sent, or `None` |
+| `effort` | The effort word actually sent, or `None` |
+| `effort_tokens` | **Optional, defaults to `None`.** The reasoning-token budget actually sent, where the level bound to one rather than to a word. At most one of this and `effort` is ever non-null |
 | `max_tokens` | The completion cap actually sent |
 | `finish_reason` | `stop`, `length`, … **`length` is not a reviewer error**: the caller retries once at double the cap with a fresh prompt before it ever reaches the repair path, so report it accurately or that retry never fires |
 | `attempts` | A one-entry list for the call this driver made: `{max_tokens_sent, finish_reason, usage, reasoning_tokens, cost_usd, elapsed_s, notes, response_id}`, plus `cost_source` and `upstream_unbilled_usd` on the same optional terms as above. The caller renumbers it, fills in the validation verdict and concatenates the seat's history — a driver makes one call and cannot know whether what it returned validated |
@@ -85,7 +86,7 @@ ATTEMPT_FIELDS = ("max_tokens_sent", "finish_reason", "usage", "cost_usd")
 # gets `None` for both, which is the honest answer: unknown source, no known divergence. It is also
 # warned about, because a caller that cannot tell a billed total from a reconstructed one is a
 # caller whose `cost_usd_total` means less than it appears to.
-OPTIONAL_RESULT_FIELDS = {"cost_source": None, "upstream_unbilled_usd": None}
+OPTIONAL_RESULT_FIELDS = {"cost_source": None, "upstream_unbilled_usd": None, "effort_tokens": None}
 OPTIONAL_ATTEMPT_FIELDS = {"cost_source": None, "upstream_unbilled_usd": None}
 
 

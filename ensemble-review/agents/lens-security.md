@@ -2,6 +2,7 @@
 name: lens-security
 description: Security and safety reviewer. Builds the threat model the artifact does not have — assets, actors, trust boundaries, what an attacker controls, and what the blast radius is when a control fails.
 model: frontier
+effort: standard
 output_type: json_report
 context:
   - finding-schema.md

@@ -12,6 +12,20 @@ from the same panel and the same config.
 5. the config's `default_tier`.
 6. the persona frontmatter's `model`, when it names a key in the tier map.
 
+**Effort resolution order**, parallel to tier's and first match wins:
+
+1. `--effort` on the command line.
+2. the seat's own `effort`.
+3. the panel's `effort`.
+4. the config's `default_effort`.
+5. the persona frontmatter's `effort`.
+
+Every one of those names an **abstract level** — `light`, `standard` or `deep` — and never a vendor
+word. The vendor's own rung, or a reasoning-token budget where the endpoint takes one, is bound from
+the model's own file by `bind_efforts`, because which word `deep` means is a fact about the model and
+the model's file is the only place that fact can be kept true as vocabularies move. The level, the
+level that chose it and the parameter actually sent are all recorded per seat.
+
 This inverts framework §8, which puts agent frontmatter above the config default: here the tier is a
 property of the run's stakes, not of the lens, and an operator forcing a whole panel cheap must win.
 The level that decided each seat is recorded as `tier_source`, so the manifest says why a seat ran
@@ -64,12 +78,21 @@ its manifest key half way through a run. The resolved family is in `family`, and
 `substitution`.
 """
 
+from . import registry as registry_lib
+
 CONSTRAINTS = ("non-claude", "distinct")
 
 DEFAULT_TIER = "frontier"
 
 # In `tier_source`, the level that decided the seat.
 TIER_SOURCES = ("--model", "--tier", "seat", "panel", "config", "persona", "default")
+
+# **Effort resolves on an order parallel to tier's, and for the same reason.** The depth a seat
+# thinks at is a property of the run's stakes rather than of the lens, so an operator forcing a
+# whole panel shallow must win over a persona's own preference — which is why the persona sits at
+# the bottom here exactly as it does for tier. The level is abstract (`light` / `standard` / `deep`)
+# at every one of these; the vendor's own rung is bound from the model file one step later.
+EFFORT_SOURCES = ("--effort", "seat", "panel", "config", "persona", "default")
 
 
 class SeatingError(Exception):
@@ -108,6 +131,31 @@ def resolve_tier(seat, panel, config_entry, cli_tier, pinned, frontmatter):
     return tier, ("--model" if pinned else source)
 
 
+def resolve_effort_level(seat, panel, config_entry, cli_effort, frontmatter):
+    """(level, source) for one seat, on the order in the module constant above.
+
+    Abstract at every level. Nothing here names a vendor rung, and nothing here consults the
+    registry: which word `deep` means on `moonshotai/kimi-k3` is a fact about that model and lives
+    in that model's file, which is also the only place it can be kept true as vocabularies move.
+
+    A value that is not an abstract level at all is returned as it stands, with the source that
+    supplied it, and refused by `bind_efforts` — which is the gate, runs after the run directory is
+    claimed like every other model gate, and can therefore name both the typo and where it was
+    typed.
+    """
+    levels = [
+        ("--effort", cli_effort),
+        ("seat", seat.get("effort")),
+        ("panel", panel.get("effort")),
+        ("config", config_entry.get("default_effort")),
+        ("persona", (frontmatter or {}).get("effort")),
+    ]
+    for name, value in levels:
+        if value:
+            return value, name
+    return registry_lib.DEFAULT_EFFORT_LEVEL, "default"
+
+
 def _frontmatter_tier(frontmatter, config_entry):
     """The persona's `model:` value, but only when it names a tier the config actually offers.
 
@@ -128,10 +176,10 @@ def _frontmatter_tier(frontmatter, config_entry):
 def family_for_model(model, config_entry=None, registry=None):
     """Which family a concrete model id belongs to. Returns `(family, source)`, or `(None, None)`.
 
-    Two sources, in order. The **registry** is asked first: `models.json` carries a `family` per
-    model, which is the only statement of the fact that does not depend on a tier map a project may
-    have edited. The **config's tier map** is the fallback, by reverse lookup over every tier, and
-    it answers for a workspace registry written before the field existed.
+    Two sources, in order. The **registry** is asked first: each model file carries a `family`, which
+    is the statement of the fact the tier map is itself derived from. The **derived tier map** is
+    the fallback, by reverse lookup over every tier, and it answers for a model file written before
+    the field existed.
 
     Unknown is a real answer and is not an error: a model that is in neither is a model this run can
     still dispatch, and mislabelling it would be worse than leaving the label the template gave it.
@@ -150,7 +198,7 @@ def family_for_model(model, config_entry=None, registry=None):
 
 
 def resolve(panel, config_entry, cli_tier=None, pinned=None, frontmatter_fn=None, connector=None,
-            pin_all=None, registry=None):
+            pin_all=None, registry=None, cli_effort=None):
     """Resolve every seat of a panel. Returns the seat records, in template order.
 
     `pinned` maps a seat id (`<lens>-<requested>`) to a concrete model id — `--model` on the command
@@ -160,7 +208,7 @@ def resolve(panel, config_entry, cli_tier=None, pinned=None, frontmatter_fn=None
     seat's family; a caller with none simply gets the config's answer.
     """
     pinned = dict(pinned or {})
-    connector = connector or config_entry.get("type", "openai_compat")
+    connector = connector or config_entry.get("connector") or config_entry.get("type", "openai_compat")
     template_seats = panel.get("seats") or []
     if not template_seats:
         raise SeatingError("panel {0!r} seats nobody".format(panel.get("name") or "ad-hoc"))
@@ -174,9 +222,11 @@ def resolve(panel, config_entry, cli_tier=None, pinned=None, frontmatter_fn=None
                 index + 1, panel.get("name") or "ad-hoc"))
         identity = reviewer_id(lens, requested, raw.get("suffix") or "")
         seat_pin = pinned.pop(identity, None) or pin_all
+        frontmatter = frontmatter_fn(lens) if frontmatter_fn else None
         tier, tier_source = resolve_tier(
-            raw, panel, config_entry, cli_tier, bool(seat_pin),
-            frontmatter_fn(lens) if frontmatter_fn else None)
+            raw, panel, config_entry, cli_tier, bool(seat_pin), frontmatter)
+        effort_level, effort_source = resolve_effort_level(
+            raw, panel, config_entry, cli_effort, frontmatter)
         seats.append({
             "reviewer_id": identity,
             "lens": lens,
@@ -191,7 +241,13 @@ def resolve(panel, config_entry, cli_tier=None, pinned=None, frontmatter_fn=None
             # to equal its family's cell was not pinned.
             "pinned": bool(seat_pin),
             "connector": connector,
+            # The abstract level and the level that chose it. The concrete parameter the provider is
+            # sent — a rung word, or a reasoning-token budget — is bound from the model's own file
+            # by `bind_efforts` once the model is known, and lands in `effort` / `effort_tokens`.
+            "effort_level": effort_level,
+            "effort_source": effort_source,
             "effort": None,
+            "effort_tokens": None,
             "substitution": None,
             "family_relabel": None,
         })
@@ -219,8 +275,13 @@ def resolve(panel, config_entry, cli_tier=None, pinned=None, frontmatter_fn=None
     for seat in seats:
         if not seat["model"]:
             seat["model"] = model_at(config_entry, seat["tier"], seat["family"])
-        seat["effort"] = (config_entry.get("effort") or {}).get(seat["model"])
     _relabel_pinned_families(seats, config_entry, registry)
+    if registry is not None:
+        # Best-effort here, so a seat record carries its parameter from the moment it is resolved.
+        # The **gate** is `effort_errors`, which the caller runs after the registry gate; a failure
+        # to bind at this point is not raised, because seating happens before the run directory is
+        # claimed and an effort refusal is specified to fire after it, with the other model gates.
+        bind_efforts(seats, registry)
     return seats
 
 
@@ -369,7 +430,8 @@ def _least_held(candidates, held):
 
 # --- re-seating a family the provider will not serve -------------------------------------------------
 
-def reseat(seat, seats, config_entry, kind="model_unavailable", reason=None, usable=None):
+def reseat(seat, seats, config_entry, kind="model_unavailable", reason=None, usable=None,
+           registry=None):
     """Move one seat onto the next available family, once. Returns the mutated seat, or None.
 
     The runtime twin of the missing-cell path: a 404 or 400 naming the model means that family is
@@ -404,7 +466,14 @@ def reseat(seat, seats, config_entry, kind="model_unavailable", reason=None, usa
     held[was] = max(held.get(was, 1) - 1, 0)
     seat["family"] = replacement
     seat["model"] = model_at(config_entry, seat["tier"], replacement)
-    seat["effort"] = (config_entry.get("effort") or {}).get(seat["model"])
+    # The abstract level survives the move; what it binds to does not, because the new model has its
+    # own ladder. Re-binding here is the whole value of the abstraction: a seat re-seated from Kimi
+    # onto Grok keeps running at `standard` rather than keeping a word Grok reads differently.
+    if registry is not None:
+        bind_efforts([seat], registry)
+    else:
+        seat["effort"] = None
+        seat["effort_tokens"] = None
     seat["substitution"] = {
         "kind": kind,
         "requested": was,
@@ -417,24 +486,90 @@ def reseat(seat, seats, config_entry, kind="model_unavailable", reason=None, usa
 
 # --- the effort gate ---------------------------------------------------------------------------------
 
-def effort_errors(seats, registry):
-    """Every seat whose config effort is outside its model's registry vocabulary, as messages.
+def bind_efforts(seats, registry):
+    """Bind every seat's abstract level onto its model's own rung or budget, in place.
 
-    A value the model does not accept is a **composition error**, not a warning: the run would either
-    take a 400 from the provider or, worse, be quietly served at a depth nobody chose, and a panel
-    whose seats ran at unintended depths is not the comparison this skill exists to make.
+    Returns the messages for the seats that could not be bound, and leaves those seats' `effort`
+    null. Three failures, all composition errors.
+
+    **A level that is not one of the three at all** is named against *the source it was typed in* —
+    the persona, the template seat, the panel, `config.json` — because only `--effort` is checked by
+    a parser and every other level reaches here as whatever the file said. `standrd` used to surface
+    as "this model has no 'standrd' rung", which points the reader at the model file, which is the
+    one place the mistake is not.
+
+    The other two are named by the model, because that is where their answer lives: **a level the
+    model's file does not map**, and **a mapped word outside the model's recorded vocabulary**. The
+    first is new with abstract effort and is the one the abstraction makes possible to get wrong: a
+    panel asking for `deep` against a model whose file stops at `standard` used to be unexpressible
+    and is now a question with an answer nobody has written.
     """
     errors = []
     for seat in seats:
-        effort = seat.get("effort")
-        if not effort:
+        seat["effort"] = None
+        seat["effort_tokens"] = None
+        level = seat.get("effort_level")
+        model = seat.get("model")
+        if not level:
             continue
-        entry = registry.get(seat["model"]) if registry else None
-        vocabulary = (entry or {}).get("effort_vocabulary")
-        if not isinstance(vocabulary, list) or not vocabulary:
-            continue
-        if effort not in vocabulary:
+        if level not in registry_lib.EFFORT_LEVELS:
+            # **A typo is named where it was typed.** Only `--effort` is checked by the parser;
+            # `standrd` in a persona's frontmatter, a template seat, a panel or a config used to
+            # travel all the way down and surface as "this model has no 'standrd' rung", which sends
+            # the reader to the model file — the one place the mistake is not. The level's own source
+            # is already recorded on the seat, so the refusal can say where to go.
             errors.append(
-                "seat {0} resolves to {1}, whose registry vocabulary is {2}; the config asks for "
-                "effort {3!r}".format(seat["reviewer_id"], seat["model"], "/".join(vocabulary), effort))
+                "seat {0}: effort level {1!r} came from {2} and is not an abstract level.\n"
+                "  Levels are {3}. Each model file binds those to its own rungs; a vendor's word "
+                "({4}, say) belongs in a model file's `effort` map and never in a persona, a "
+                "template, a panel or config.json.".format(
+                    seat.get("reviewer_id"), level, _effort_source_label(seat.get("effort_source"), seat),
+                    "/".join(registry_lib.EFFORT_LEVELS), "high"))
+            continue
+        if not model:
+            continue
+        entry = registry.get(model) if registry else None
+        if entry is None:
+            # Absent from the registry is the **registry** gate's refusal, with a better message and
+            # its own fix. Saying it twice, in two vocabularies, helps nobody.
+            continue
+        try:
+            kind, value = registry_lib.effort_binding(entry, level, model)
+        except registry_lib.EffortError as failure:
+            errors.append("seat {0}: {1}".format(seat["reviewer_id"], failure))
+            continue
+        if kind == "tokens":
+            seat["effort_tokens"] = value
+        elif kind == "word":
+            seat["effort"] = value
     return errors
+
+
+def _effort_source_label(source, seat=None):
+    """Where a seat's effort level was read from, as a phrase the refusal can put in a sentence.
+
+    The persona level names the file, because a run seats several lenses and "the persona" alone
+    leaves the reader four files to open. The others are one file each and need no such help.
+    """
+    lens = (seat or {}).get("lens")
+    if source == "persona" and lens:
+        return "the persona's frontmatter (agents/lens-{0}.md)".format(lens)
+    return {
+        "--effort": "the --effort flag",
+        "seat": "this seat in the panel template",
+        "panel": "the panel template's own `effort`",
+        "config": "config.json's `default_effort`",
+        "persona": "the persona's frontmatter",
+        "default": "the built-in default",
+    }.get(source, "an unrecorded source")
+
+
+def effort_errors(seats, registry):
+    """The effort gate: bind every seat, and report the ones that could not be.
+
+    A level the model does not map, or a rung it does not accept, is a **composition error**, not a
+    warning: the run would either take a 400 from the provider or, worse, be quietly served at a
+    depth nobody chose, and a panel whose seats ran at unintended depths is not the comparison this
+    skill exists to make.
+    """
+    return bind_efforts(seats, registry)

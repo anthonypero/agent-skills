@@ -518,12 +518,6 @@ class JudgePricingTest(unittest.TestCase):
             harness.FAST_MODEL: [{"body": harness.valid_report()}],
         })
 
-    def edit_config(self, mutate):
-        with open(self.workspace.config, "r", encoding="utf-8") as handle:
-            config = json.load(handle)
-        mutate(config["openrouter"])
-        with open(self.workspace.config, "w", encoding="utf-8") as handle:
-            json.dump(config, handle)
 
     def panel(self, extra=None, panel_path=None):
         argv = [
@@ -543,10 +537,8 @@ class JudgePricingTest(unittest.TestCase):
 
     def test_the_judge_follows_the_runs_tier_and_a_family_the_panel_seated(self):
         """`default_tier: frontier`, run at `standard`: the judge is standard, on a seated family."""
-        self.edit_config(lambda entry: entry.update({
-            "default_tier": "frontier",
-            "tiers": dict(entry["tiers"], frontier={"openai": "test/frontier-only"}),
-        }))
+        self.workspace.edit_config(lambda config: config.update({"default_tier": "frontier"}))
+        self.workspace.seat_model("test/frontier-only", "openai", ["frontier"])
         code, out, err = self.panel()
         self.assertEqual(code, 0, err)
         self.assertIn("synthesis call on {0}".format(harness.SLOW_MODEL), out,
@@ -562,7 +554,7 @@ class JudgePricingTest(unittest.TestCase):
         code, out, _err = self.panel()
         self.assertEqual(code, 0)
         charged = float(self.charged_line(out).split("$")[1].split()[0])
-        registry = registry_lib.load(self.workspace.registry)
+        registry = registry_lib.load_dir(self.workspace.registry)
         on_slow, _d = budget_lib.project_synthesis([], registry, 1, model=harness.SLOW_MODEL)
         on_fast, _d = budget_lib.project_synthesis([], registry, 1, model=harness.FAST_MODEL)
         self.assertGreater(on_slow, on_fast)
@@ -571,14 +563,7 @@ class JudgePricingTest(unittest.TestCase):
                       "the line states the seat that was chosen and the level that chose it")
 
     def test_a_template_that_names_a_judge_tier_is_priced_at_that_tier(self):
-        self.edit_config(lambda entry: entry.update({
-            "tiers": dict(entry["tiers"], frontier={"kimi": harness.THIRD_MODEL}),
-        }))
-        with open(self.workspace.registry, "r", encoding="utf-8") as handle:
-            models = json.load(handle)
-        models["models"].update({harness.THIRD_MODEL: harness.default_models(third=True)[harness.THIRD_MODEL]})
-        with open(self.workspace.registry, "w", encoding="utf-8") as handle:
-            json.dump(models, handle)
+        self.workspace.seat_model(harness.THIRD_MODEL, "kimi", ["frontier"])
 
         path = self.workspace.path("judge-panel.json")
         with open(self.workspace.panel, "r", encoding="utf-8") as handle:
@@ -609,7 +594,8 @@ class JudgePricingTest(unittest.TestCase):
         panel["synthesis"] = {"family": "ghost"}
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(panel, handle)
-        self.edit_config(lambda entry: entry["tiers"]["standard"].update({"ghost": "test/unpriced-judge"}))
+        self.workspace.seat_model("test/unpriced-judge", "ghost", ["standard"],
+                                  input_price_per_token=None, output_price_per_token=None)
 
         code, _out, err = self.panel(panel_path=path)
         self.assertEqual(code, 1, err)
@@ -634,7 +620,7 @@ class JudgePricingTest(unittest.TestCase):
         self.assertIn("(--synthesis-model)", self.charged_line(out))
 
     def test_an_unresolved_seat_is_still_labelled_a_guess(self):
-        registry = registry_lib.load(self.workspace.registry)
+        registry = registry_lib.load_dir(self.workspace.registry)
         seats = [{"reviewer_id": "consistency-kimi", "model": harness.SLOW_MODEL, "prompt_tokens": 100}]
         projection = budget_lib.project(seats, registry, 5.0, with_synthesis=True)
         self.assertIn("GUESS", budget_lib.describe_synthesis_seat(projection["synthesis"]))
@@ -712,12 +698,12 @@ class PersonaContextDedupeTest(unittest.TestCase):
 class RecordedSeatTest(JudgeStageTestCase):
     """The judge calls the model the budget gate priced, even when the config has moved since."""
 
-    def config_cell(self, family, model):
-        with open(self.workspace.config, "r", encoding="utf-8") as handle:
-            config = json.load(handle)
-        config["openrouter"]["tiers"]["standard"][family] = model
-        with open(self.workspace.config, "w", encoding="utf-8") as handle:
-            json.dump(config, handle)
+    def move_cell(self, family, model, tier="standard"):
+        """Point one tier cell at a different model, which is now an edit to two model files."""
+        for held, current in list(self.workspace.tiers.items()):
+            if held == family:
+                self.workspace.edit_model(current, tiers=[])
+        self.workspace.seat_model(model, family, [tier])
 
     def test_the_recorded_model_is_the_one_called_after_the_config_moves(self):
         """A config edited between the panel and the judgment must not redirect the paid call.
@@ -731,12 +717,7 @@ class RecordedSeatTest(JudgeStageTestCase):
         self.assertEqual(recorded["model"], harness.SLOW_MODEL)
 
         # Move the cell the judge's family resolves to, and price the newcomer so nothing else fails.
-        with open(self.workspace.registry, "r", encoding="utf-8") as handle:
-            models = json.load(handle)
-        models["models"].update(harness.default_models(third=True))
-        with open(self.workspace.registry, "w", encoding="utf-8") as handle:
-            json.dump(models, handle)
-        self.config_cell("kimi", harness.THIRD_MODEL)
+        self.move_cell("kimi", harness.THIRD_MODEL)
 
         code, _out, err = self.judge({
             harness.SLOW_MODEL: [{"body": patch()}],
@@ -782,6 +763,63 @@ class RecordedSeatTest(JudgeStageTestCase):
         code, _out, err = self.judge({harness.SLOW_MODEL: [{"body": patch()}]})
         self.assertEqual(code, 0, err)
         self.assertEqual([c["model"] for c in self.workspace.calls()], [harness.SLOW_MODEL])
+
+
+class RecordedJudgeEffortTest(JudgeStageTestCase):
+    """`synthesis.effort` survives a panel invoked by path, because Resolve records the answer.
+
+    Every test in this file invokes the panel by **absolute path**, which is the case the pin used
+    to be lost in: `reconcile.py` can only re-find a template by name, `paths.find("panel", ...)`
+    answers nothing for a file that lives outside a `panels/` directory, and the level was then
+    re-derived from no template at all. It is resolved once at Resolve now and read back here.
+    """
+
+    def pin_judge_effort(self, level="deep"):
+        """Put a `synthesis.effort` on the workspace's panel template, leaving its seats alone."""
+        with open(self.workspace.panel, "r", encoding="utf-8") as handle:
+            template = json.load(handle)
+        template["synthesis"] = {"effort": level}
+        with open(self.workspace.panel, "w", encoding="utf-8") as handle:
+            json.dump(template, handle)
+        return template
+
+    def test_the_template_pin_reaches_the_call_on_a_panel_invoked_by_path(self):
+        self.pin_judge_effort("deep")
+        self.run_panel()
+
+        manifest = self.manifest()
+        self.assertEqual(manifest["judge_seat"]["effort_level"], "deep")
+        self.assertEqual(manifest["judge_seat"]["effort_source"], "synthesis")
+        # The seats themselves ran at the config's level, so `deep` can only have come from the pin.
+        self.assertEqual({seat["effort_level"] for seat in manifest["seats"]}, {"standard"})
+
+        code, _out, err = self.judge({harness.SLOW_MODEL: [{"body": patch()}]})
+        self.assertEqual(code, 0, err)
+        record = self.manifest()["judge"]
+        self.assertEqual((record["effort_level"], record["effort_source"]), ("deep", "synthesis"))
+        # And the rung the model's own file binds `deep` to is what the driver was actually sent.
+        self.assertEqual([call["effort"] for call in self.workspace.calls()], ["max"])
+
+    def test_the_judge_stage_cannot_re_find_this_template_by_name(self):
+        """The guard on the test above: without the record there is nothing left to read the pin from."""
+        self.pin_judge_effort("deep")
+        self.run_panel()
+        paths = paths_lib.Paths(workspace=self.workspace.root, user=self.workspace.user_root())
+        self.assertEqual(self.manifest()["panel"], "test-panel")
+        self.assertIsNone(reconcile._panel_for(paths, self.manifest()))
+
+    def test_a_manifest_written_before_the_field_still_resolves_a_level(self):
+        """The fallback rung: an older run has no recorded level and re-derives one."""
+        self.run_panel()
+        manifest = self.manifest()
+        manifest["judge_seat"].pop("effort_level")
+        manifest["judge_seat"].pop("effort_source")
+        runs_lib.write_manifest(self.run_dir, manifest)
+
+        code, _out, err = self.judge({harness.SLOW_MODEL: [{"body": patch()}]})
+        self.assertEqual(code, 0, err)
+        record = self.manifest()["judge"]
+        self.assertEqual((record["effort_level"], record["effort_source"]), ("standard", "run"))
 
 
 class OnDiskPatchTest(JudgeStageTestCase):
@@ -1106,11 +1144,7 @@ class JudgePromptContextLimitTest(JudgeStageTestCase):
         which is a different mechanism with a different outcome. What is under test here is the
         judge stage's own check, so the window is tightened between the two stages.
         """
-        with open(self.workspace.registry, "r", encoding="utf-8") as handle:
-            registry = json.load(handle)
-        registry["models"][harness.SLOW_MODEL]["context_limit"] = limit
-        with open(self.workspace.registry, "w", encoding="utf-8") as handle:
-            json.dump(registry, handle)
+        self.workspace.edit_model(harness.SLOW_MODEL, context_limit=limit)
 
     def test_an_overflowing_judgment_prompt_writes_nothing_and_exits_three(self):
         self.run_panel()
@@ -1147,11 +1181,7 @@ class JudgePromptContextLimitTest(JudgeStageTestCase):
     def test_a_model_with_no_recorded_limit_never_refuses(self):
         """Unknown is not the same as zero: a registry that has not learned a window must not gate."""
         self.run_panel()
-        with open(self.workspace.registry, "r", encoding="utf-8") as handle:
-            registry = json.load(handle)
-        registry["models"][harness.SLOW_MODEL]["context_limit"] = None
-        with open(self.workspace.registry, "w", encoding="utf-8") as handle:
-            json.dump(registry, handle)
+        self.workspace.edit_model(harness.SLOW_MODEL, context_limit=None)
         code, _out, err = self.judge({harness.SLOW_MODEL: [{"body": patch()}]})
         self.assertEqual(code, 0, err)
         self.assertGreater(self.manifest()["judge"]["prompt_tokens"], 0,

@@ -36,6 +36,7 @@ import json
 import os
 import sys
 
+from . import registry as registry_lib
 from . import report as report_lib
 
 RECONCILERS = ("host", "synthesis", "harness-judge", "default")
@@ -160,6 +161,47 @@ DEFAULT_TIER = "frontier"
 # `"override"` is the caller passing `tier=` or `family=` outright, which only a test does today.
 TIER_SOURCES = ("synthesis", "--tier", "panel", "config", "persona", "default", "override")
 FAMILY_SOURCES = ("synthesis", "panel", "config", "override", "--synthesis-model")
+
+# What decided the fallback judge's abstract effort level. The harness judge has no entry here
+# because it has no such resolution: its effort is a line in its own installed agent file.
+# `synthesis` is the panel template's own `synthesis` block, the same name `TIER_SOURCES` gives it.
+EFFORT_SOURCES = ("synthesis", "run", "config", "persona", "default")
+
+
+def synthesis_effort(manifest, config_entry, frontmatter=None, panel=None):
+    """`(level, source)` for the fallback judgment call, resolved the way a seat's effort is.
+
+    The judge is a seat for this purpose and for the same reason it is seated like one: a run
+    dispatched shallow should not pay for a judgment nobody asked to be deep. The order is the
+    seat's with its top two rungs replaced, because `reconcile.py` has no `--effort` of its own and
+    a per-seat knob is not about the judge:
+
+    1. **the panel template's `synthesis.effort`**, which is where a template that already pins the
+       judgment's family and tier says how deep it should think. It is first for the same reason
+       `synthesis.tier` beats the run's tier: a template naming it is naming it *about the judge*,
+       and every level under this one is about the panel;
+    2. **the run's own level**, read back from the manifest — the level its seats ran at when they
+       agreed on one. A panel whose seats ran at different levels gives no answer here and falls
+       through, rather than picking one seat's level to arbitrate the others by;
+    3. the config's `default_effort`;
+    4. the `synthesis` persona's frontmatter;
+    5. `standard`.
+
+    **The harness judge is untouched by all of it.** Its model and its effort are pinned in its
+    installed agent file, `manifest.judge_seat` is null on such a run, and nothing here is reached.
+    """
+    levels = {seat.get("effort_level") for seat in (manifest or {}).get("seats") or []
+              if seat.get("effort_level")}
+    run_level = levels.pop() if len(levels) == 1 else None
+    block = (panel or {}).get("synthesis")
+    pinned = block.get("effort") if isinstance(block, dict) else None
+    for name, value in (("synthesis", pinned),
+                        ("run", run_level),
+                        ("config", (config_entry or {}).get("default_effort")),
+                        ("persona", (frontmatter or {}).get("effort"))):
+        if value:
+            return value, name
+    return registry_lib.DEFAULT_EFFORT_LEVEL, "default"
 
 
 def synthesis_seat(config_entry, panel=None, cli_tier=None, seated_families=None,
@@ -480,7 +522,14 @@ def harness_judge_record(status="ok", staging_path=None, judgment_path=None, err
         "provider": "harness",
         "leg": "harness",
         "input_delivery": "materialized-paths",
+        # The harness judge's effort is a line in its own installed agent file — there is no
+        # per-spawn effort parameter — so the run neither chose a level nor sent one.
+        "effort_level": None,
+        "effort_source": "harness-judge-agent-file",
         "effort": None,
+        "effort_tokens": None,
+        # Nothing was billed, so no spend gate stood in front of this and nothing answered one.
+        "spend_approval_source": None,
         "max_tokens": None,
         "status": status,
         "errors": list(errors or []) or None,
@@ -503,7 +552,8 @@ def harness_judge_record(status="ok", staging_path=None, judgment_path=None, err
 
 def judge_record(reviewer_id, family, tier, model, connector, provider, effort, cap, attempts,
                  elapsed_s, status, errors=None, tier_source=None, family_source=None,
-                 elisions=None, prompt_tokens=None):
+                 elisions=None, prompt_tokens=None, effort_level=None, effort_source=None,
+                 effort_tokens=None, spend_approval_source=None):
     """The seat-shaped record of the judgment call, for `manifest.judge`.
 
     **It is not in `manifest.seats`, and that is load-bearing.** `seats` is the `unanimous`
@@ -535,7 +585,16 @@ def judge_record(reviewer_id, family, tier, model, connector, provider, effort, 
         "provider": provider,
         "leg": "openrouter",
         "input_delivery": "inlined",
+        "effort_level": effort_level,
+        "effort_source": effort_source,
         "effort": effort,
+        "effort_tokens": effort_tokens,
+        # Which yes let this paid call happen on a gated endpoint: `--approve-spend` on the
+        # reconcile invocation, or `manifest` — the run's own recorded `spend_approval.granted`.
+        # Null when the endpoint needed no approval. The seats' yes is in `manifest.spend_approval`
+        # and this is the judgment call's, because they can be two different answers: a panel
+        # approved interactively and a reconcile run later from a script are not the same consent.
+        "spend_approval_source": spend_approval_source,
         "max_tokens": cap,
         "status": status,
         "errors": list(errors or []) or None,

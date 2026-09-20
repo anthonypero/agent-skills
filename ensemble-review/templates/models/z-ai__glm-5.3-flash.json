@@ -1,0 +1,31 @@
+{
+  "id": "z-ai/glm-5.3-flash",
+  "connector": "openrouter",
+  "family": "glm",
+  "tiers": [
+    "standard",
+    "fast"
+  ],
+  "effort": {
+    "light": "low",
+    "standard": "high",
+    "deep": "max"
+  },
+  "effort_source": "migration 2026-09-19: deep = the model's top rung, light its bottom, standard the middle of three or one below top from four rungs up",
+  "input_price_per_token": 9e-08,
+  "output_price_per_token": 3e-07,
+  "context_limit": 1310720,
+  "effort_vocabulary": [
+    "max",
+    "high",
+    "low"
+  ],
+  "price_source": "openrouter catalogue",
+  "source": "https://openrouter.ai/api/v1/models",
+  "refreshed_at": "2026-09-18",
+  "output_token_prior": 14268,
+  "prior_source": "measured — run 2 (2026-09-18, standard panel), buildability-glm accepted attempt",
+  "min_max_tokens": null,
+  "measured_output_price": 5e-07,
+  "measured_output_price_source": "run 2 (2026-09-18) buildability-glm accepted attempt: 0.007134 / 14268 completion tokens; attempt 1 priced at 4.7e-07, so the two attempts were routed to hosts at different prices"
+}

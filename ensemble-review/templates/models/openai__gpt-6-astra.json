@@ -1,0 +1,32 @@
+{
+  "id": "openai/gpt-6-astra",
+  "connector": "openrouter",
+  "family": "openai",
+  "tiers": [
+    "frontier"
+  ],
+  "effort": {
+    "light": "low",
+    "standard": "xhigh",
+    "deep": "max"
+  },
+  "effort_source": "migration 2026-09-19: deep = the model's top rung, light its bottom, standard the middle of three or one below top from four rungs up",
+  "input_price_per_token": 1e-05,
+  "output_price_per_token": 5e-05,
+  "context_limit": 1050000,
+  "effort_vocabulary": [
+    "max",
+    "xhigh",
+    "high",
+    "medium",
+    "low"
+  ],
+  "price_source": "openrouter catalogue",
+  "source": "https://openrouter.ai/api/v1/models",
+  "refreshed_at": "2026-09-18",
+  "output_token_prior": 7135,
+  "prior_source": "measured — run 1 (2026-09-18, frontier panel), buildability-openai accepted attempt",
+  "min_max_tokens": null,
+  "measured_output_price": 5e-05,
+  "measured_output_price_source": "run 1 (2026-09-18) buildability-openai: 0.35675 / 7135 completion tokens"
+}

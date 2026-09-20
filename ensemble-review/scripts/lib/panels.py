@@ -12,6 +12,10 @@ fix. There is no leniency prefix and no `x-` escape hatch: operator metadata goe
 reads one back for its `synthesis` block; a second copy of the key list in either of them is a
 second contract that drifts. Everything a template may say is one of the tuples below.
 
+`effort` is the panel-level and seat-level twin of `tier`, and carries an **abstract** level —
+`light`, `standard` or `deep` — never a vendor rung. A template that named a vendor word would bind
+the panel to one family's ladder, which is the thing the abstraction exists to stop.
+
 Two keys are read by nothing today and are recognized anyway — `optional_seats` and a seat's `note`.
 They are documentation of a decision a future edit promotes (`spec-review`'s fifth seat is the live
 example), and rejecting them would make the shipped catalog fail its own loader.
@@ -26,6 +30,7 @@ PANEL_KEYS = (
     "requires_references",
     "min_families",
     "tier",
+    "effort",
     "reconciler",
     "auto_apply",
     "verify_web",
@@ -39,10 +44,13 @@ PANEL_KEYS = (
 # One seat, in `seats` or in `optional_seats`. `suffix` is what lets one template seat the same lens
 # twice without minting two seats with one `reviewer_id`; `note` is read by nothing and says why an
 # optional seat is not seated.
-SEAT_KEYS = ("lens", "family", "tier", "suffix", "note")
+SEAT_KEYS = ("lens", "family", "tier", "effort", "suffix", "note")
 
 # The judgment call's own seat, when a template fixes it rather than letting it follow the run.
-SYNTHESIS_KEYS = ("family", "tier")
+# `effort` is here for the same reason `tier` is: a template that pins where the judgment sits should
+# be able to pin how deep it thinks, and without it the only way to run a deep judgment over a light
+# panel was to move the whole run's `default_effort`.
+SYNTHESIS_KEYS = ("family", "tier", "effort")
 
 # Where each vocabulary applies, for the message. The order is the order they are checked in.
 _SCOPES = (

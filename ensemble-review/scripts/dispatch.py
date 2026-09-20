@@ -13,10 +13,15 @@ Writes `<run-dir>/<lens>-<family>.json` (the validated report plus a `_meta` blo
 Standard library only. The HTTP call itself lives in `backends/`, loaded by the provider's `type`,
 so another access path is another file there rather than a change here.
 
-The persona, the finding schema, the config, the registry and the driver all resolve through
-`lib/paths.py`'s two-root cascade — `<workspace>/.agents/ensemble-review/` first, then the read-only
-package — so `--workspace` is the only thing `run_panel.py` has to pass for the child to read exactly
-the files the parent resolved. `--config` and `--models` stay available as operator paths.
+The persona, the finding schema, the config, the connector file, the model files and the driver all
+resolve through `lib/paths.py`'s three-root cascade — `<workspace>/.agents/ensemble-review/` first,
+then `~/.config/ensemble-review/`, then the read-only package — so `--workspace` is the only thing
+`run_panel.py` has to pass for the child to read exactly the files the parent resolved. `--config`
+and `--models` stay available as operator paths; `--models` names the *directory* of model files.
+
+`--effort` carries the **abstract level** the parent resolved for this seat — `light`, `standard` or
+`deep` — and this script binds it onto the model's own rung from that model's file. Nothing on this
+command line names a vendor word.
 
 **Three retry paths, in this order, and they are not the same thing.**
 
@@ -59,6 +64,7 @@ sys.path.insert(0, SCRIPTS_DIR)
 
 from backends import AuthFailure, load_driver  # noqa: E402
 from backends import base as backends_base  # noqa: E402
+from lib import connectors as connectors_lib  # noqa: E402
 from lib import paths as paths_lib  # noqa: E402
 from lib import registry as registry_lib  # noqa: E402
 from lib import report as report_lib  # noqa: E402
@@ -153,10 +159,42 @@ def resolve_api_key(config_entry):
 
 def load_config(paths, override=None):
     """The merged config, through the workspace-first cascade. `--config` is an operator path."""
-    config, path = paths.config(override)
-    if PROVIDER not in config:
-        sys.exit("config {0} has no `{1}` provider entry".format(path, PROVIDER))
-    return config, path
+    return paths.config(override)
+
+
+def resolve_connector(paths, config, config_path):
+    """The connector file this config names, loaded whole. Raises `CompositionError` on any failure.
+
+    `default_connector` in the config is a **name**, resolved through the cascade like a panel: a
+    project or a machine drops `connectors/<name>.json` into its own root and the run uses that
+    endpoint without the packaged file being touched. A second endpoint is a second file.
+    """
+    name = config.get("default_connector") or connectors_lib.DEFAULT_CONNECTOR
+    try:
+        return connectors_lib.load(paths, name)
+    except connectors_lib.ConnectorError as failure:
+        raise CompositionError(
+            "{0}\n  config {1} names `default_connector: {2!r}`. Connectors available: {3}".format(
+                failure, config_path, name, ", ".join(connectors_lib.available(paths)) or "none"))
+
+
+def resolve_entry(paths, config_override=None, models_override=None):
+    """`(config_entry, config_path, connector, registry)` — the three files a call resolves through.
+
+    The `config_entry` is the same shape every consumer has always taken: the driver `type`, the
+    base URL, the key source, the endpoint's extras, `default_tier`, and a `tiers` map. What changed
+    underneath is where each half comes from — run-wide defaults from `config.json`, endpoint facts
+    from the connector file, and the tiers map **derived** from the model files rather than written
+    anywhere. Assembling it in one place is what let the rest of the pipeline keep its interfaces.
+    """
+    config, config_path = load_config(paths, config_override)
+    connector, _connector_path = resolve_connector(paths, config, config_path)
+    try:
+        registry = registry_lib.load(paths, models_override)
+        entry = connectors_lib.compose(config, connector, registry)
+    except (paths_lib.PathError, registry_lib.RegistryError) as failure:
+        raise CompositionError(str(failure))
+    return entry, config_path, connector, registry
 
 
 def resolve_model(config_entry, tier, family, override):
@@ -172,33 +210,45 @@ def resolve_model(config_entry, tier, family, override):
 
 
 class EffortRefused(Exception):
-    """The config asks for an effort this model does not accept. A composition error, exit 1."""
+    """An abstract level this model does not map, or a rung it does not accept. Exit 1 either way."""
 
 
-def resolve_effort(config_entry, model, entry):
-    """The effort string for this model, checked against the registry's vocabulary.
+def resolve_effort(model, entry, level):
+    """`(word, token budget)` for one abstract level on one model. Either may be None, never both.
 
-    The effort map is keyed by concrete model id because the vocabularies differ by vendor. A model
-    absent from the map is dispatched with **no effort parameter at all** — v0's behaviour, which
-    works everywhere at the cost of control.
+    The level arrives abstract — `light`, `standard` or `deep` — and this is where it becomes the
+    thing the provider is actually sent, read from that model's own `effort` map. Vocabularies
+    differ by vendor, so the binding is per model and lives in the model's file; nothing outside
+    that file names a vendor rung.
 
-    An effort the registry says this model does **not** accept is a composition error rather than a
-    warning. Dropping it silently would dispatch the seat at whatever depth the provider defaults to,
-    and a panel whose seats ran at unintended depths is not the comparison this skill exists to make.
-    A vocabulary the registry simply has not learned yet is not the same as an unsupported value, and
-    is allowed through: unknown is not refused.
+    Three failures, all composition errors rather than warnings: a level that is not one of the
+    three abstract ones at all, a level this model's file does not map, and a mapped word outside
+    the model's recorded vocabulary. The first is named against the level and its command line
+    rather than against the model, because that is where it was typed. Dropping an unbound level
+    silently would dispatch the seat at whatever depth the provider defaults to, and a panel whose
+    seats ran at unintended depths is not the comparison this skill exists to make. A vocabulary the registry
+    simply has not learned yet is not the same as an unsupported value, and is allowed through:
+    unknown is not refused.
     """
-    effort = (config_entry.get("effort") or {}).get(model)
-    if not effort:
-        return None
-    supported = registry_lib.effort_is_supported(entry, effort)
-    if supported is False:
+    if not level:
+        return None, None
+    if level not in registry_lib.EFFORT_LEVELS:
+        # **The level is checked before the model is.** A typo reaching here came from `--effort` on
+        # this call or from `config.json`'s `default_effort`, and reporting it as "this model has no
+        # `standrd` rung" sends the reader to the model file, which is the one place the mistake is
+        # not.
         raise EffortRefused(
-            "the config asks for effort {0!r} on {1}, whose registry vocabulary is {2}.\n"
-            "  Fix the `effort` entry in the config, or refresh the vocabulary with\n"
-            "  python3 scripts/refresh_models.py".format(
-                effort, model, "/".join((entry or {}).get("effort_vocabulary") or [])))
-    return effort
+            "{0!r} is not an abstract effort level: they are {1}.\n"
+            "  It reached this call from --effort or from config.json's `default_effort`. A vendor's "
+            "own rung is bound in {2}'s model file, under `effort`, and is never named on a command "
+            "line or in config.json.".format(level, "/".join(registry_lib.EFFORT_LEVELS), model))
+    try:
+        kind, value = registry_lib.effort_binding(entry, level, model)
+    except registry_lib.EffortError as failure:
+        raise EffortRefused(str(failure))
+    if kind == "none":
+        return None, None
+    return (None, value) if kind == "tokens" else (value, None)
 
 
 def model_is_unavailable(exc, model):
@@ -449,7 +499,8 @@ def dispatch_error_attempt(number, cap, exc, elapsed, notes=None):
     }
 
 
-def build_meta(attempts, tier, model, key_source, elapsed, effort, connector, provider, max_tokens):
+def build_meta(attempts, tier, model, key_source, elapsed, effort, connector, provider, max_tokens,
+               effort_level=None, effort_tokens=None, connector_name=None):
     """The `_meta` block, built the same way whether the seat landed a report or failed.
 
     `cost_usd` is the sum across **every** attempt, the failed ones included: run 1's manifest said
@@ -472,6 +523,12 @@ def build_meta(attempts, tier, model, key_source, elapsed, effort, connector, pr
         "connector": connector,
         "provider": provider,
         "effort": effort,
+        # What the seat was asked for, beside what was sent. A panel is only comparable for latency
+        # and cost when every seat ran at the same depth, and `effort` alone cannot say whether two
+        # different words were two different intentions or one intention on two ladders.
+        "effort_level": effort_level,
+        "effort_tokens": effort_tokens,
+        "connector_name": connector_name,
         "max_tokens": max_tokens,
         "key_source": key_source,
         "elapsed_s": round(elapsed, 1),
@@ -512,7 +569,8 @@ class Call(object):
     """
 
     def __init__(self, label, model, tier, entry, driver, http_request_fn, cap, effort,
-                 key_source, connector, provider, registry_entry):
+                 key_source, connector, provider, registry_entry, effort_level=None,
+                 effort_tokens=None, connector_entry=None):
         self.label = label
         self.model = model
         self.tier = tier
@@ -521,31 +579,36 @@ class Call(object):
         self.http_request_fn = http_request_fn
         self.cap = cap
         self.effort = effort
+        # The abstract level this call was asked for, beside the concrete parameter it became. The
+        # manifest carries both: a reader comparing two seats needs to know they were both asked for
+        # `standard`, and a reader reproducing one needs the word that actually went on the wire.
+        self.effort_level = effort_level
+        self.effort_tokens = effort_tokens
         self.key_source = key_source
         self.connector = connector
+        self.connector_entry = connector_entry or {}
         self.provider = provider
         self.registry_entry = registry_entry
 
 
 def prepare_call(paths, family, tier=None, model=None, max_tokens=None, config_override=None,
-                 models_override=None, label="seat", warn=None):
+                 models_override=None, label="seat", warn=None, effort_level=None):
     """Resolve one model call: model, registry entry, cap, effort, key, driver, transport.
 
     The gates are the run's, in the run's order: the registry must price the model (a composition
-    error otherwise, never a silent zero in the projection), the config's effort must be inside that
-    model's vocabulary, and the key must resolve through the vault-then-environment chain. Raises
-    `CompositionError` for the first two; `resolve_api_key` exits on the third, naming both paths.
+    error otherwise, never a silent zero in the projection), the abstract effort level must bind onto
+    a rung this model accepts, and the key must resolve through the vault-then-environment chain.
+    Raises `CompositionError` for the first two; `resolve_api_key` exits on the third, naming both
+    paths.
     """
     warn = warn or sys.stderr.write
-    config, _config_path = load_config(paths, config_override)
-    entry = dict(config[PROVIDER])
+    entry, _config_path, connector, registry = resolve_entry(paths, config_override, models_override)
     tier = tier or entry.get("default_tier") or "frontier"
     model, tier = resolve_model(entry, tier, family, model)
 
     try:
-        registry = registry_lib.load(paths.registry(models_override))
         registry_entry = registry.require(model)
-    except (paths_lib.PathError, registry_lib.RegistryError, registry_lib.MissingModel) as failure:
+    except registry_lib.MissingModel as failure:
         raise CompositionError("{0}: {1}".format(label, failure))
 
     requested_cap = registry_lib.DEFAULT_MAX_TOKENS if max_tokens is None else max_tokens
@@ -555,14 +618,16 @@ def prepare_call(paths, family, tier=None, model=None, max_tokens=None, config_o
             label, model, requested_cap, cap))
 
     input_price, output_price = registry_lib.prices(registry_entry)
+    level = effort_level or entry.get("default_effort") or registry_lib.DEFAULT_EFFORT_LEVEL
     try:
-        effort = resolve_effort(entry, model, registry_entry)
+        effort, effort_tokens = resolve_effort(model, registry_entry, level)
     except EffortRefused as failure:
         raise CompositionError("{0}: composition error: {1}".format(label, failure))
 
     api_key, key_source = resolve_api_key(entry)
     entry["api_key"] = api_key
     entry["reasoning_effort"] = effort
+    entry["reasoning_max_tokens"] = effort_tokens
     entry["prices"] = {"input": input_price, "output": output_price}
     routing = (entry.get("provider_routing") or {}).get(model)
     if routing:
@@ -577,8 +642,9 @@ def prepare_call(paths, family, tier=None, model=None, max_tokens=None, config_o
     return Call(
         label=label, model=model, tier=tier, entry=entry, driver=driver,
         http_request_fn=make_http_request_fn(driver), cap=cap, effort=effort,
+        effort_level=level, effort_tokens=effort_tokens,
         key_source=key_source, connector=entry.get("type", "openai_compat"), provider=PROVIDER,
-        registry_entry=registry_entry)
+        registry_entry=registry_entry, connector_entry=connector)
 
 
 class CallResult(object):
@@ -716,11 +782,13 @@ def parse_args(argv):
     parser.add_argument("--workspace", default=None,
                         help="The project holding the artifact. Files resolve from <workspace>/.agents/ensemble-review/ first, then the skill package (default: the working directory)")
     parser.add_argument("--config", default=None, help="Config JSON, taken as given (default: the workspace-first cascade, deep-merged)")
-    parser.add_argument("--models", default=None, help="Model registry, taken as given (default: the workspace-first cascade)")
+    parser.add_argument("--models", default=None, help="Directory of model files, taken as given (default: the workspace-first cascade, deep-merged per model)")
     parser.add_argument("--reviewer-id", default=None,
                         help="Reviewer id for this seat; defaults to <lens>-<family>. run_panel.py passes the id it minted from the seat's *requested* family, which is stable across runs and across a re-seat")
     parser.add_argument("--model", default=None, help="Concrete model id, overriding the tier map")
-    parser.add_argument("--tier", default=None, help="Tier in the config tier map (default: the config's default_tier)")
+    parser.add_argument("--tier", default=None, help="Tier in the derived tier map (default: the config's default_tier)")
+    parser.add_argument("--effort", default=None, dest="effort", metavar="LEVEL",
+                        help="Abstract effort level for this call: {0} (default: the config's default_effort). Bound onto this model's own rung by its model file".format("/".join(registry_lib.EFFORT_LEVELS)))
     parser.add_argument("--max-tokens", type=int, default=registry_lib.DEFAULT_MAX_TOKENS,
                         help="Completion cap for the call; a model's registry floor raises it (default: {0})".format(registry_lib.DEFAULT_MAX_TOKENS))
     parser.add_argument("--suffix", default="", help="Appended to the reviewer id when a panel seats one pair twice (e.g. -2)")
@@ -751,7 +819,8 @@ def main(argv=None):
     try:
         call = prepare_call(paths, args.family, tier=args.tier, model=args.model,
                             max_tokens=args.max_tokens, config_override=args.config,
-                            models_override=args.models, label=reviewer_id)
+                            models_override=args.models, label=reviewer_id,
+                            effort_level=args.effort)
     except (paths_lib.PathError, CompositionError) as failure:
         sys.stderr.write("{0}\n".format(failure))
         return EXIT_COMPOSITION
@@ -790,7 +859,9 @@ def main(argv=None):
         # the exception class, the cap sent, the wall time and the transport's retries.
         elapsed = time.time() - started
         meta = build_meta(attempts, call.tier, call.model, call.key_source, elapsed, call.effort,
-                          call.connector, call.provider, call.cap)
+                          call.connector, call.provider, call.cap,
+                          effort_level=call.effort_level, effort_tokens=call.effort_tokens,
+                          connector_name=call.connector_entry.get("name"))
         failed_path = os.path.join(args.out, reviewer_id + ".failed.json")
         report_lib.write_json(failed_path, {
             "reviewer_id": reviewer_id,
@@ -816,7 +887,9 @@ def main(argv=None):
     model, tier, effort, key_source = call.model, call.tier, call.effort, call.key_source
     parsed, errors, attempts, raw = outcome.parsed, outcome.errors, outcome.attempts, outcome.raw
     meta = build_meta(attempts, tier, model, key_source, elapsed, effort,
-                      outcome.connector, outcome.provider, outcome.cap)
+                      outcome.connector, outcome.provider, outcome.cap,
+                      effort_level=call.effort_level, effort_tokens=call.effort_tokens,
+                      connector_name=call.connector_entry.get("name"))
 
     if errors or parsed is None:
         sys.stderr.write("{0}: report still invalid after the repair re-ask:\n".format(reviewer_id))

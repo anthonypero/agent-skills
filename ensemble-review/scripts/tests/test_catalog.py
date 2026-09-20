@@ -48,6 +48,7 @@ SKILL_DIR = os.path.dirname(SCRIPTS_DIR)
 sys.path.insert(0, TESTS_DIR)
 sys.path.insert(0, SCRIPTS_DIR)
 
+import harness  # noqa: E402
 import run_panel  # noqa: E402
 from lib import judge as judge_lib  # noqa: E402
 from lib import paths as paths_lib  # noqa: E402
@@ -126,8 +127,12 @@ def read_panel(name):
 
 
 def shipped_config():
-    with open(os.path.join(SKILL_DIR, "templates", "config.json"), "r", encoding="utf-8") as handle:
-        return json.load(handle)["openrouter"]
+    """The resolved connector view: run-wide defaults, the connector file, the derived tier map.
+
+    There is no single file to read any more — the tier map is derived from the model files — so
+    this asks the same assembler every script asks, with no outer root in the cascade.
+    """
+    return harness.shipped()["entry"]
 
 
 # --- personas ----------------------------------------------------------------------------------------
@@ -504,7 +509,7 @@ class PanelTemplateShapeTest(unittest.TestCase):
 
 
 class RegistryFamilyTest(unittest.TestCase):
-    """`models.json` says which family each model belongs to, and it must agree with the config.
+    """Each model file says which family that model belongs to, and it must agree with the derived map.
 
     The field is what relabels a `--model`-pinned seat, and the family is what every agreement
     count in a reconciliation is computed over — so a registry that disagreed with the tier map
@@ -512,9 +517,9 @@ class RegistryFamilyTest(unittest.TestCase):
     """
 
     def setUp(self):
-        with open(os.path.join(SKILL_DIR, "templates", "models.json"), "r", encoding="utf-8") as handle:
-            self.registry = json.load(handle)["models"]
-        self.config = shipped_config()
+        shipped = harness.shipped()
+        self.registry = shipped["registry"].models
+        self.config = shipped["entry"]
 
     def test_every_shipped_model_names_its_family(self):
         for model, entry in sorted(self.registry.items()):

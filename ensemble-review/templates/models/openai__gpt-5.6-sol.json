@@ -1,0 +1,33 @@
+{
+  "id": "openai/gpt-5.6-sol",
+  "connector": "openrouter",
+  "family": "openai",
+  "tiers": [
+    "standard"
+  ],
+  "effort": {
+    "light": "none",
+    "standard": "xhigh",
+    "deep": "max"
+  },
+  "effort_source": "migration 2026-09-19: deep = the model's top rung, light its bottom, standard the middle of three or one below top from four rungs up",
+  "input_price_per_token": 2e-06,
+  "output_price_per_token": 1e-05,
+  "context_limit": 1050000,
+  "effort_vocabulary": [
+    "max",
+    "xhigh",
+    "high",
+    "medium",
+    "low",
+    "none"
+  ],
+  "price_source": "openrouter catalogue",
+  "source": "https://openrouter.ai/api/v1/models",
+  "refreshed_at": "2026-09-18",
+  "output_token_prior": 7340,
+  "prior_source": "measured — run 2 (2026-09-18, standard panel), fidelity-openai accepted attempt",
+  "min_max_tokens": null,
+  "measured_output_price": 1e-05,
+  "measured_output_price_source": "run 2 (2026-09-18) fidelity-openai: 0.0734 / 7340 completion tokens"
+}

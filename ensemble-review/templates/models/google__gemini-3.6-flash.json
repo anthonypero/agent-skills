@@ -1,0 +1,31 @@
+{
+  "id": "google/gemini-3.6-flash",
+  "connector": "openrouter",
+  "family": "google",
+  "tiers": [
+    "fast"
+  ],
+  "effort": {
+    "light": "minimal",
+    "standard": "medium",
+    "deep": "high"
+  },
+  "effort_source": "migration 2026-09-19: deep = the model's top rung, light its bottom, standard the middle of three or one below top from four rungs up",
+  "input_price_per_token": 7.5e-07,
+  "output_price_per_token": 3.75e-06,
+  "context_limit": 1048576,
+  "effort_vocabulary": [
+    "high",
+    "medium",
+    "low",
+    "minimal"
+  ],
+  "price_source": "openrouter catalogue",
+  "source": "https://openrouter.ai/api/v1/models",
+  "refreshed_at": "2026-09-18",
+  "output_token_prior": 16000,
+  "prior_source": "default — no measured run seats this model",
+  "min_max_tokens": null,
+  "measured_output_price": null,
+  "measured_output_price_source": "no frozen run dispatched this model"
+}

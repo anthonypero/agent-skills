@@ -148,9 +148,11 @@ class PanelRunTestCase(unittest.TestCase):
         self.workspace = harness.Workspace()
         self.workspace.apply_env()
         self.addCleanup(self.workspace.close)
-        with open(self.workspace.config, "r", encoding="utf-8") as handle:
-            self.workspace.override("config.json", json.load(handle))
-        self.workspace.override("models.json", {"schema_version": "1", "models": harness.default_models()})
+        # The panels come from the workspace root through the cascade — that is what these tests
+        # are about — while the config and the registry come in as operator paths. Putting the test
+        # registry in the workspace root instead would put `test/slow-model` in the `kimi` cell at
+        # `standard`, which the packaged `moonshotai/kimi-k3` already holds, and a derived tier map
+        # refuses two models in one cell. The cascade itself is `test_paths`'s subject.
         self.workspace.override("panels/spec-review.json", {
             "name": "spec-review",
             "description": "The reference-hungry template, shadowed for this test.",
@@ -183,6 +185,8 @@ class PanelRunTestCase(unittest.TestCase):
             "--artifact", self.workspace.artifact,
             "--out", out or self.workspace.path("reviews", "2026-09-18-1"),
             "--workspace", self.workspace.root,
+            "--config", self.workspace.config,
+            "--models", self.workspace.registry,
             "--tier", "standard",
             "--autonomous",
             # The Judge stage is pinned off: these tests are about dispatch, and an autonomous run
