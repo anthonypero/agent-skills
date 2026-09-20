@@ -1,0 +1,11 @@
+{
+  "name": "zai-coding",
+  "description": "The owner's z.ai GLM coding-plan subscription, over its OpenAI-compatible endpoint. The path is what makes it the plan: /api/coding/paas/v4 bills the coding subscription, and z.ai's general endpoint at https://api.z.ai/api/paas/v4 is NOT this one — it refuses the same token with \"Insufficient balance or no resource package\" because it bills a prepaid resource package instead. Pointing this file at the general URL would be a metered endpoint wearing a `subscription` posture, which is the one mislabelling the spend gate cannot survive. Model ids here are the plan's own (`glm-5.3`), not OpenRouter's (`z-ai/glm-5.3`), which is why this endpoint's models get their own files.",
+  "type": "openai_compat",
+  "base_url": "https://api.z.ai/api/coding/paas/v4",
+  "api_key_secret": "global/ZAI_CODING_API_KEY",
+  "api_key_env": "ZAI_CODING_API_KEY",
+  "catalogue_url": null,
+  "billing": "subscription",
+  "requires_approval": false
+}

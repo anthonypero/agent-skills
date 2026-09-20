@@ -1,0 +1,23 @@
+{
+  "id": "glm-5.3",
+  "connector": "zai-coding",
+  "family": "glm",
+  "tiers": [
+    "frontier"
+  ],
+  "effort": null,
+  "effort_source": "measured 2026-09-20 against this endpoint: `reasoning.effort` is accepted without error but does not order the reasoning-token count. One call each on an identical 241-token critique prompt at max_tokens 4000 returned low 769, high 1150, max 712 reasoning tokens, and no reasoning object at all 403 — `max` came in below `low`, so the words are not a ladder this skill can bind an abstract level onto. Thinking is on by default and is left on: with no reasoning parameter sent the model still reasoned, 403 tokens of it. The plan endpoint exposes a thinking on/off switch (`thinking: {\"type\": \"disabled\"}`) and no effort rung, so there is nothing to map and no reasoning parameter is sent.",
+  "input_price_per_token": 0,
+  "output_price_per_token": 0,
+  "context_limit": null,
+  "context_limit_source": "unknown, and unknown disables the overflow check for this model. The plan's /models listing carries no context length, and nothing has measured this endpoint's window from inside this package. The OpenRouter file's 1310720 is a figure for `z-ai/glm-5.3` as OpenRouter's hosts serve it and was deliberately not adopted here: a coding plan may cap context differently and nobody has checked. As with `claude-opus-5`, a null limit means `_overflows` treats this model as \"never refuses\", so a very large artifact fails at the call rather than at the pre-flight. Fill it in once somebody measures it.",
+  "effort_vocabulary": null,
+  "price_source": "subscription — the coding plan bills nothing per call, so the price is zero rather than unknown",
+  "source": null,
+  "refreshed_at": null,
+  "output_token_prior": 16000,
+  "prior_source": "default — no measured panel run seats this model, and the projection prices it at zero either way",
+  "min_max_tokens": null,
+  "measured_output_price": null,
+  "measured_output_price_source": "the coding plan is not billed per token"
+}

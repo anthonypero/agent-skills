@@ -1,0 +1,305 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://anthonypero.dev/panel-review/reconciliation.schema.json",
+  "title": "panel-review reconciliation",
+  "description": "The consensus document. `reconcile.py` is its only writer, in every mode; `reconciliation.md` is rendered from it and `apply_fixes.py` reads it and nothing else. Fields prefixed with an underscore are working notes the writer may add and no consumer may rely on. Version 2 adds the required `anchor_drops` array; a version 1 document does not validate against this schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "artifact",
+    "panel",
+    "reconciler",
+    "judgment",
+    "generated_at",
+    "seats_expected",
+    "seats_reporting",
+    "missing_seats",
+    "anchor_drops",
+    "families_reporting",
+    "clusters",
+    "disagreements",
+    "verdict",
+    "method_caveat",
+    "counts"
+  ],
+  "properties": {
+    "schema_version": { "const": "2" },
+    "run_id": { "type": "string", "minLength": 1, "description": "Matches the manifest" },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "revision"],
+      "properties": {
+        "path": { "type": ["string", "null"], "description": "Repo-relative path, copied from the manifest" },
+        "revision": { "type": ["string", "null"], "description": "SHA-256 of the materialized bytes every seat read. Null for a run made before revisions were recorded" }
+      }
+    },
+    "panel": { "type": "string", "description": "Template name or \"ad-hoc\"" },
+    "reconciler": { "type": "string", "enum": ["host", "synthesis", "harness-judge"], "description": "The author of the judgment patch, not the writer of this file" },
+    "judgment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "author", "generated_at"],
+      "properties": {
+        "path": { "type": "string" },
+        "author": { "type": "string", "enum": ["host", "synthesis", "harness-judge"] },
+        "generated_at": { "type": ["string", "null"] }
+      }
+    },
+    "generated_at": { "type": "string", "description": "ISO 8601 with offset" },
+    "seats_expected": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Every reviewer_id the manifest resolved, reporting or not — the `unanimous` denominator"
+    },
+    "seats_reporting": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "The reviewer_ids whose reports were validated and clustered — the denominator for `same-family` and `corroborated-same-family`"
+    },
+    "missing_seats": {
+      "type": "array",
+      "description": "Never silently dropped: a four-seat panel that reconciled three reports says so here",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["reviewer_id", "stage", "reason"],
+        "properties": {
+          "reviewer_id": { "type": "string" },
+          "lens": { "type": ["string", "null"] },
+          "family": { "type": ["string", "null"] },
+          "stage": { "type": "string", "enum": ["resolve", "dispatch", "validation", "timeout", "skipped"], "description": "`resolve` is a seat retired before anything was dispatched — a citing lens on a reference-free draft run — and is distinct from `dispatch`, which asserts that a call was made" },
+          "reason": { "type": "string", "description": "The seat's own `failure_reason` where the manifest recorded one, else why no report could be read" },
+          "failure_reason": { "type": ["string", "null"], "description": "The manifest's `failure_reason` for this seat, verbatim, or null where it recorded none" },
+          "error": { "type": ["string", "null"], "description": "The manifest's `error` for this seat: the prose behind the reason, so the judgment supplier can see why a lens is absent rather than only that it is" }
+        }
+      }
+    },
+    "anchor_drops": {
+      "type": "array",
+      "description": "Members dropped from their cluster because a `quote` or a `literal_edit.old_text` does not occur in the pinned artifact. Present and possibly empty; the check is mandatory, so empty means every anchor was verified",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["reviewer_id", "finding_id", "cluster", "reason"],
+        "properties": {
+          "reviewer_id": { "type": "string" },
+          "finding_id": { "type": "string" },
+          "cluster": { "type": "string", "description": "The provisional id the member was dropped from. A drop never renumbers provisional ids" },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "families_reporting": { "type": "array", "items": { "type": "string" } },
+    "clusters": {
+      "type": "array",
+      "description": "Below. The cluster contract is inline rather than in `definitions`, so a consumer validating this file gets it too",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "provisional_id",
+          "claim",
+          "location",
+          "quote",
+          "members",
+          "n_reviewers",
+          "n_families",
+          "families",
+          "tier",
+          "match_key",
+          "judgment",
+          "split_reason",
+          "singleton_label",
+          "singleton_reason",
+          "severity",
+          "severity_spread",
+          "arbitration_reason",
+          "disposition",
+          "disposition_reason",
+          "ruling",
+          "contradicted_by",
+          "canonical_edit",
+          "edit_conflict",
+          "tags"
+        ],
+        "properties": {
+          "id": { "type": "string", "description": "BK-n, SF-n or NH-n, minted after severity arbitration in presentation order" },
+          "provisional_id": { "type": "string", "description": "The P-n the mechanical pass assigned; a `+`-joined list when the patch merged several, and `P-n.k` for a product of a split" },
+          "claim": { "type": "string", "description": "The canonical one-sentence statement of the defect" },
+          "location": { "type": "string" },
+          "quote": { "type": ["string", "null"], "description": "The anchoring quote, when the members share one" },
+          "members": {
+            "type": "array",
+            "minItems": 1,
+            "description": "One entry per contributing reviewer. This is the audit path back to the report",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["reviewer_id", "finding_id", "severity", "confidence", "cited", "collapsed_finding_ids"],
+              "properties": {
+                "reviewer_id": { "type": "string" },
+                "finding_id": { "type": "string" },
+                "severity": { "type": "string", "enum": ["blocker", "should-fix", "nice-to-have"] },
+                "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+                "cited": { "type": "boolean" },
+                "collapsed_finding_ids": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "The same reviewer's other findings in this cluster, collapsed into this member so a reviewer votes once. Empty for almost every member; never dropped, because the audit path has to reach them too"
+                }
+              }
+            }
+          },
+          "n_reviewers": { "type": "integer" },
+          "n_families": { "type": "integer" },
+          "families": { "type": "array", "items": { "type": "string" } },
+          "tier": { "type": "string", "enum": ["unanimous", "consensus", "same-family", "corroborated-same-family", "singleton"] },
+          "match_key": {
+            "type": "string",
+            "enum": ["location", "quote", "claim", "none"],
+            "description": "The key that joined the members. `none` is a cluster of one, where nothing was joined"
+          },
+          "judgment": { "type": "boolean", "description": "True when match_key is `claim`: the join came from the patch and rests on a semantic call" },
+          "split_reason": { "type": ["string", "null"] },
+          "singleton_label": { "type": ["string", "null"], "enum": ["blind-spot-catch", "family-specific-false-positive", null] },
+          "singleton_reason": { "type": ["string", "null"] },
+          "severity": { "type": "string", "enum": ["blocker", "should-fix", "nice-to-have"] },
+          "severity_spread": {
+            "type": "array",
+            "description": "Every member's severity, even when they agree",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["reviewer_id", "severity"],
+              "properties": {
+                "reviewer_id": { "type": "string" },
+                "severity": { "type": "string", "enum": ["blocker", "should-fix", "nice-to-have"] }
+              }
+            }
+          },
+          "arbitration_reason": { "type": "string", "description": "Why that severity survived; the fixed string \"members agree\" when they did and the patch carried no entry" },
+          "disposition": { "type": "string", "enum": ["fix-now", "flag-for-human", "defer"] },
+          "disposition_reason": { "type": "string" },
+          "ruling": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": ["text", "owner_to_confirm"],
+            "properties": {
+              "text": { "type": "string" },
+              "owner_to_confirm": { "type": "boolean" }
+            }
+          },
+          "contradicted_by": {
+            "type": "array",
+            "description": "Non-empty forces flag-for-human",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["reviewer_id", "finding_id"],
+              "properties": {
+                "reviewer_id": { "type": "string" },
+                "finding_id": { "type": "string" }
+              }
+            }
+          },
+          "canonical_edit": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "required": ["old_text", "new_text", "source", "accepted_by", "reason"],
+            "properties": {
+              "old_text": { "type": "string" },
+              "new_text": { "type": "string" },
+              "source": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["reviewer_id", "finding_id"],
+                "properties": {
+                  "reviewer_id": { "type": "string" },
+                  "finding_id": { "type": "string" }
+                }
+              },
+              "accepted_by": { "type": "string" },
+              "reason": { "type": "string" }
+            }
+          },
+          "edit_conflict": { "type": "boolean" },
+          "tags": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "disagreements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contradictions", "severity_spreads", "altitude_splits"],
+      "description": "Present and possibly empty; never omitted",
+      "properties": {
+        "contradictions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["cluster", "contradicted_by"],
+            "properties": {
+              "cluster": { "type": "string" },
+              "flagged_by": { "type": "array", "items": { "type": "string" } },
+              "contradicted_by": { "type": "array", "items": { "type": "object" } },
+              "ruling": { "type": "string" }
+            }
+          }
+        },
+        "severity_spreads": {
+          "type": "array",
+          "description": "Spreads of two or more steps only",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["cluster", "steps", "high_side", "low_side"],
+            "properties": {
+              "cluster": { "type": "string" },
+              "steps": { "type": "integer" },
+              "high_side": { "type": "array", "items": { "type": "string" } },
+              "low_side": { "type": "array", "items": { "type": "string" } },
+              "spread": { "type": "array", "items": { "type": "object" } },
+              "ruling": { "type": "string" }
+            }
+          }
+        },
+        "altitude_splits": {
+          "type": "array",
+          "description": "One lens rating a document's seams high-severity while others rate them by consequence is not a conflict and is not reported as one",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["reviewer_id", "clusters", "note"],
+            "properties": {
+              "reviewer_id": { "type": "string" },
+              "clusters": { "type": "array", "items": { "type": "string" } },
+              "note": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["ship", "fix-then-ship", "rework"],
+      "description": "Run-level, computed from arbitrated severity and disposition together. Never supplied by the judgment patch"
+    },
+    "method_caveat": { "type": "string", "description": "From the patch: how many families actually ran, what was not supplied to the seats, any salvage or deviation from the runbook" },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clusters", "by_severity", "by_tier", "by_disposition"],
+      "properties": {
+        "clusters": { "type": "integer" },
+        "by_severity": { "type": "object" },
+        "by_tier": { "type": "object" },
+        "by_disposition": { "type": "object" }
+      }
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "id": "deepseek/deepseek-v4-pro-0813",
+  "connector": "openrouter",
+  "family": "deepseek",
+  "tiers": [
+    "frontier",
+    "standard"
+  ],
+  "effort": {
+    "light": "low",
+    "standard": "high",
+    "deep": "max"
+  },
+  "effort_source": "migration 2026-09-19: deep = the model's top rung, light its bottom, standard the middle of three or one below top from four rungs up",
+  "input_price_per_token": 5.4252e-07,
+  "output_price_per_token": 1.62756e-06,
+  "context_limit": 1048576,
+  "effort_vocabulary": [
+    "max",
+    "high",
+    "low"
+  ],
+  "price_source": "openrouter catalogue",
+  "source": "https://openrouter.ai/api/v1/models",
+  "refreshed_at": "2026-09-20",
+  "output_token_prior": 16000,
+  "prior_source": "default — no measured run seats this model",
+  "min_max_tokens": null,
+  "measured_output_price": null,
+  "measured_output_price_source": "no frozen run dispatched this model"
+}
