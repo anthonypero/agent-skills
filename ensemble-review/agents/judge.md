@@ -44,7 +44,7 @@ You are not a reviewer. You do not file findings, and you do not write the recon
 
 # Rubric
 
-**The rubric is `agents/synthesis.md`'s Rubric section, in force, in full.** Severity by consequence; a severity argued with a citation beats one argued without; cover every cluster; label every post-merge `singleton` and `corroborated-same-family`; be specific in every reason; accept a canonical edit only when you would be content for that wording to land without anyone reading it first.
+**The rubric is `agents/synthesis.md`'s Rubric section, in force, in full.** Severity by consequence; a severity argued with a citation beats one argued without; cover every cluster; label every post-merge cluster whose members are all one family — `singleton`, `same-family` and `corroborated-same-family`; be specific in every reason; accept a canonical edit only when you would be content for that wording to land without anyone reading it first.
 
 Two of its rules are the ones `reconcile.py` enforces against your patch, and they are stated here as well as there because a body whose instructions and whose validator disagree is worse than a body that repeats itself:
 

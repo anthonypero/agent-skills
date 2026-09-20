@@ -64,11 +64,20 @@ class AbstractLevelTest(unittest.TestCase):
 
     def test_three_because_the_narrowest_shipped_ladder_has_three_rungs(self):
         """A five-level abstraction would bind two levels to one rung on every three-rung model,
-        and the manifest would then record two intentions for one parameter."""
+        and the manifest would then record two intentions for one parameter.
+
+        Over the models that **have** a ladder. A harness model has none — effort is a line in an
+        installed agent file and there is no per-spawn parameter — so it is a model with no rungs
+        rather than a model with one, and counting it as the narrowest ladder would make this
+        assertion argue for zero abstract levels.
+        """
         shipped = harness.shipped()["registry"]
-        widths = sorted(len(entry.get("effort_vocabulary") or []) for entry in shipped.models.values())
+        laddered = {model: entry for model, entry in shipped.models.items()
+                    if entry.get("effort_vocabulary")}
+        self.assertTrue(laddered)
+        widths = sorted(len(entry["effort_vocabulary"]) for entry in laddered.values())
         self.assertEqual(widths[0], len(registry_lib.EFFORT_LEVELS))
-        for model, entry in shipped.models.items():
+        for model, entry in laddered.items():
             bound = {registry_lib.effort_binding(entry, level, model)[1]
                      for level in registry_lib.EFFORT_LEVELS}
             self.assertEqual(len(bound), len(registry_lib.EFFORT_LEVELS),

@@ -150,9 +150,12 @@ class PinningTest(SmokeTestCase):
         self.assertIn("budget", banner)
         self.assertIn("--approve-spend", banner)
 
+        # The option's own entry in the options list, not the usage line above it and not the
+        # cross-reference to this flag inside `--draft`'s help paragraph below it. Sliced on the
+        # metavar form argparse prints once, for exactly that reason.
         help_text = _help_text()
-        start = help_text.rindex("--smoke-test")        # the options list, past the usage line
-        smoke = help_text[start:help_text.index("--max-tokens", start)]
+        start = help_text.index("--smoke-test MODEL", help_text.index("options:"))
+        smoke = help_text[start:help_text.index("--draft", start)]
         self.assertIn("budget", smoke)
         self.assertIn("spend gate", smoke)
 
@@ -199,6 +202,11 @@ class RenderedCaveatTest(SmokeTestCase):
             "generated_at": "2026-09-19T09:00:00-04:00",
             "dispositions": [{"cluster": "P-1", "disposition": "flag-for-human",
                               "disposition_reason": "Both seats file it as a design fork."}],
+            # A smoke test pins every seat to one model, so both seats are one family and the
+            # cluster tiers `same-family` — which owes a label exactly as a singleton does. The
+            # fixture supplies one; a patch that did not would be a patch error, which is the point.
+            "singleton_labels": [{"cluster": "P-1", "label": "blind-spot-catch",
+                                  "reason": "Two lenses on one model is one mind agreeing with itself."}],
             "method_caveat": "One model behind every seat.",
         }
         with open(os.path.join(self.run_dir, "judgment.json"), "w", encoding="utf-8") as handle:

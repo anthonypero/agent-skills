@@ -162,23 +162,32 @@ def load_config(paths, override=None):
     return paths.config(override)
 
 
-def resolve_connector(paths, config, config_path):
+def resolve_connector(paths, config, config_path, override=None):
     """The connector file this config names, loaded whole. Raises `CompositionError` on any failure.
 
     `default_connector` in the config is a **name**, resolved through the cascade like a panel: a
     project or a machine drops `connectors/<name>.json` into its own root and the run uses that
     endpoint without the packaged file being touched. A second endpoint is a second file.
+
+    `override` names a connector for this invocation instead, and is how `--draft` reaches the
+    harness leg: the mode is a statement about which endpoint the run may use, so it selects the
+    endpoint rather than asking the config to be edited. It resolves by the same rules — a name
+    through the cascade, a `.json` path as given — so an owner's own copy of the harness connector
+    wins exactly as it would for any other.
     """
-    name = config.get("default_connector") or connectors_lib.DEFAULT_CONNECTOR
+    name = override or config.get("default_connector") or connectors_lib.DEFAULT_CONNECTOR
     try:
         return connectors_lib.load(paths, name)
     except connectors_lib.ConnectorError as failure:
         raise CompositionError(
-            "{0}\n  config {1} names `default_connector: {2!r}`. Connectors available: {3}".format(
-                failure, config_path, name, ", ".join(connectors_lib.available(paths)) or "none"))
+            "{0}\n  {1}. Connectors available: {2}".format(
+                failure,
+                "this invocation selected the connector {0!r}".format(name) if override
+                else "config {0} names `default_connector: {1!r}`".format(config_path, name),
+                ", ".join(connectors_lib.available(paths)) or "none"))
 
 
-def resolve_entry(paths, config_override=None, models_override=None):
+def resolve_entry(paths, config_override=None, models_override=None, connector_override=None):
     """`(config_entry, config_path, connector, registry)` — the three files a call resolves through.
 
     The `config_entry` is the same shape every consumer has always taken: the driver `type`, the
@@ -186,9 +195,14 @@ def resolve_entry(paths, config_override=None, models_override=None):
     underneath is where each half comes from — run-wide defaults from `config.json`, endpoint facts
     from the connector file, and the tiers map **derived** from the model files rather than written
     anywhere. Assembling it in one place is what let the rest of the pipeline keep its interfaces.
+
+    `connector_override` selects a connector for this invocation instead of the config's default —
+    `--draft` naming the harness leg — and the derived tiers map is then built over **that**
+    endpoint's model files, which is what makes a draft run seat the models the harness serves and
+    nothing else.
     """
     config, config_path = load_config(paths, config_override)
-    connector, _connector_path = resolve_connector(paths, config, config_path)
+    connector, _connector_path = resolve_connector(paths, config, config_path, connector_override)
     try:
         registry = registry_lib.load(paths, models_override)
         entry = connectors_lib.compose(config, connector, registry)

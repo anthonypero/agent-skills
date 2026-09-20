@@ -115,7 +115,7 @@ def validate_reconciliation_document(document, paths):
 TIER_NOTE = {
     "unanimous": "every expected seat, across families",
     "consensus": "cross-family corroboration",
-    "majority": "several lenses, one family",
+    "same-family": "several lenses, one family, uncorroborated",
     "corroborated-same-family": "two or more seats, one family",
     "singleton": "one seat",
 }
@@ -130,8 +130,14 @@ def render_markdown(document, reports=None):
     for cluster in clusters:
         by_severity.setdefault(cluster["severity"], []).append(cluster)
 
+    # Three groups, not two. A should-fix whose members are all one family is not corroborated and
+    # is not a single seat either, and it used to render under "Single-seat should-fixes" — which on
+    # a draft pass, where every seat is one family, is where every multi-lens agreement landed. Each
+    # group gets a heading that says what it is.
     corroborated = [c for c in by_severity["should-fix"] if c["n_families"] >= 2]
-    single_seat = [c for c in by_severity["should-fix"] if c["n_families"] < 2]
+    same_family = [c for c in by_severity["should-fix"]
+                   if c["n_families"] < 2 and c["n_reviewers"] >= 2]
+    single_seat = [c for c in by_severity["should-fix"] if c["n_reviewers"] < 2]
 
     lines.append("# Reconciliation — {0}, run {1}".format(document["artifact"].get("path") or "artifact", document["run_id"]))
     lines.append("")
@@ -152,7 +158,16 @@ def render_markdown(document, reports=None):
         lines.append("**Missing seats.** Agreement counts below are read against them:")
         lines.append("")
         for seat in document["missing_seats"]:
-            lines.append("- `{0}` ({1}) — {2}: {3}".format(seat["reviewer_id"], seat.get("family") or "?", seat["stage"], seat["reason"]))
+            line = "- `{0}` ({1}) — {2}: {3}".format(
+                seat["reviewer_id"], seat.get("family") or "?", seat["stage"], seat["reason"])
+            # Where the reason is the run's own `failure_reason` it is a terse code — `no-references`,
+            # `context-overflow`, `stale-lease` — and the prose that explains it is in `error`.
+            # Appended only in that case: a validation reason is already a sentence, and the `error`
+            # beside it is a tail of stderr that belongs in the manifest and not in the product.
+            detail = (seat.get("error") or "").strip().replace("\n", " ")
+            if seat.get("failure_reason") and detail:
+                line += " — {0}".format(detail[:300] + ("…" if len(detail) > 300 else ""))
+            lines.append(line)
         lines.append("")
 
     if document.get("anchor_drops"):
@@ -195,6 +210,12 @@ def render_markdown(document, reports=None):
     lines.append("## Corroborated should-fixes (cross-family)")
     lines.append("")
     lines.extend(_render_cluster_table(corroborated, families=True))
+
+    lines.append("## Same-family should-fixes — one family, uncorroborated")
+    lines.append("")
+    lines.append("Two or more seats agreed and every one of them is the same family, so this is one mind agreeing with itself under several lens prompts and not corroboration. Every one carries a label — blind-spot catch or family-specific false positive — and the reason for it, exactly as a single-seat cluster does. An unlabelled same-family cluster is not an allowed output.")
+    lines.append("")
+    lines.extend(_render_labelled_table(same_family))
 
     lines.append("## Single-seat should-fixes")
     lines.append("")

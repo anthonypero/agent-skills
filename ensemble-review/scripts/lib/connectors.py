@@ -126,14 +126,22 @@ def requires_approval(connector):
     return True if value is None else bool(value)
 
 
-def spend_gate(connector, seats=(), granted=False, source=None):
+def spend_gate(connector, seats=(), granted=False, source=None, judgment=False):
     """The manifest's `spend_approval` block, and the reason text when the gate refuses.
 
     Recorded on every run, not only a gated one, because "this endpoint bills nothing" is as much
     part of the audit trail as "a person approved $2.75 of calls".
+
+    **The gate is required only when this run will actually call the endpoint.** `seats` is the
+    **dispatched** seats — not the composed ones — and `judgment` says whether the judgment call
+    itself lands here. A gate keyed on the connector alone asked for `--approve-spend` over a
+    projection of $0.00 on a run with nothing to dispatch: `--skip-claude` on an all-`claude` panel,
+    or a draft pass, leaves the metered endpoint resolved and untouched. Approving spend that
+    nobody is going to make teaches an operator to answer the question without reading it, which is
+    the one thing a spend gate cannot afford.
     """
     connector = connector or {}
-    required = requires_approval(connector)
+    required = requires_approval(connector) and (bool(seats) or bool(judgment))
     block = {
         "connector": connector.get("name"),
         "billing": connector.get("billing"),
@@ -142,9 +150,11 @@ def spend_gate(connector, seats=(), granted=False, source=None):
         "source": source if required else None,
         "seats": sorted({seat.get("reviewer_id") for seat in seats if seat.get("reviewer_id")}),
     }
-    if connector.get("billing") == METERED and not required:
+    if connector.get("billing") == METERED and not requires_approval(connector):
         # The one case a reader must not have to diff two directories to see: a metered endpoint
-        # somebody has switched the gate off for, and which root did it.
+        # somebody has switched the gate off for, and which root did it. Keyed on the connector's
+        # own posture rather than on `required`, which is also false on a run that dispatched
+        # nothing — a run with no seats to gate is not a machine that trusts this endpoint.
         block["gate_disabled_by"] = connector.get("root")
         block["gate_disabled_path"] = connector.get("path")
     return block

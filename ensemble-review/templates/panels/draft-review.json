@@ -1,0 +1,29 @@
+{
+  "name": "draft-review",
+  "description": "The draft pass, and it is not a gate. It carries `draft_only: true`, so run_panel.py refuses it with exit 1 unless the run passes --draft: without the flag these same four seats would resolve onto the metered endpoint and bill for a pass whose whole definition is that it costs nothing. Run it with --draft: four lenses — the measured `spec-review` set — every one of them on a harness Claude subagent on the subscription, so the whole panel costs nothing beyond the owner's plan. One family by construction, which is why `min_families` is 1 and why the reconciliation opens by saying the run carries no corroboration claim: its findings are worth reading one by one and its agreement counts are one mind agreeing with itself under four lens prompts. Use it while a document is still being drafted and iterate on it as often as you like; promote the document on a multi-family panel, never on this. `requires_references: false`, so it also serves a seed document that has no source of truth to be judged against: on a draft run with no references the `fidelity` seat is retired rather than refused, because that lens cites on every finding, and the other three lenses judge the artifact on its own argument.",
+  "requires_references": false,
+  "draft_only": true,
+  "min_families": 1,
+  "tier": "standard",
+  "reconciler": "default",
+  "auto_apply": false,
+  "verify_web": false,
+  "seats": [
+    {
+      "lens": "fidelity",
+      "family": "claude"
+    },
+    {
+      "lens": "buildability",
+      "family": "claude"
+    },
+    {
+      "lens": "consistency",
+      "family": "claude"
+    },
+    {
+      "lens": "adversarial",
+      "family": "claude"
+    }
+  ]
+}

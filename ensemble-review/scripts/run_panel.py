@@ -115,6 +115,7 @@ sys.path.insert(0, SCRIPTS_DIR)
 import dispatch  # noqa: E402
 from lib import budget as budget_lib  # noqa: E402
 from lib import connectors as connectors_lib  # noqa: E402
+from lib import drafts as drafts_lib  # noqa: E402
 from lib import judge as judge_lib  # noqa: E402
 from lib import panels as panels_lib  # noqa: E402
 from lib import paths as paths_lib  # noqa: E402
@@ -328,6 +329,111 @@ def _registry_for_labels(paths, args):
         return None
 
 
+def _is_harness_seat(seat, args, harness_leg):
+    """Whether this seat is run by the orchestrating session rather than by a `dispatch.py` child.
+
+    One state, two doors. `--skip-claude` puts a `claude` seat on the leg and leaves the rest on the
+    endpoint; a `harness` connector puts **every** seat on it, which is what `--draft` selects. The
+    second is decided by the connector's driver `type` rather than by its name, because a project
+    may call its own copy of the harness connector anything it likes and still mean the harness.
+    """
+    if harness_leg:
+        return True
+    return bool(args.skip_claude) and seat.get("family") == "claude"
+
+
+def _draft_refusal(paths, args, panel, draft_entry, connector):
+    """Why this `--draft` run cannot cost nothing, as a message, or None when it can.
+
+    A draft pass is **defined** by its price — harness subagents on the owner's plan, no metered
+    call at all — so a seat a metered endpoint would serve is a composition error and not a gate:
+    there is no answer an operator could give that would turn it into a draft seat. It is decided
+    here, before the run directory is claimed, so the refusal leaves nothing behind.
+
+    Three ways it can go wrong, and all three are named rather than lumped together:
+
+    1. the connector the mode selected is not the harness leg at all — an outer root holding a
+       `connectors/harness.json` that points somewhere else, which is a file somebody wrote and a
+       run must not quietly reinterpret;
+    2. a named family the harness leg has no cell for at that seat's tier, which the ordinary
+       endpoint would have served and billed. This is the `--draft --panel spec-review` case, and
+       the message has to say so in those terms rather than as "no model at this tier";
+    3. a `--model` pin naming a model whose own file binds it to a metered connector.
+
+    The second check runs against the template's seats rather than resolved ones, because seating
+    against a map with no cell for `openai` would re-seat or refuse first, with a message about the
+    tier map that points the reader at the wrong file entirely.
+    """
+    if not drafts_lib.is_harness_connector(connector):
+        return (
+            "composition error: --draft selects the {0!r} connector, and the file that answers to "
+            "that name is not the harness leg.\n"
+            "  file: {1}\n"
+            "  its driver `type` is {2!r}; the harness leg's is {3!r}.\n"
+            "  A draft pass spawns its seats as harness subagents and calls no endpoint. A "
+            "connector named `harness` that points at one is a file somebody wrote, so this run "
+            "refuses rather than reinterpreting it.\n".format(
+                drafts_lib.HARNESS_CONNECTOR, connector.get("path"), connector.get("type"),
+                drafts_lib.HARNESS_DRIVER))
+    if connector.get("billing") == connectors_lib.METERED:
+        return (
+            "composition error: the {0!r} connector at {1} declares `billing: metered`.\n"
+            "  A draft pass costs nothing beyond the plan by definition, so the harness leg cannot "
+            "be a metered endpoint. Fix that connector file's `billing`, or drop --draft.\n".format(
+                connector.get("name"), connector.get("path")))
+
+    # The ordinary endpoint, resolved for the **diagnosis alone** — it is what would have billed
+    # the seats this mode cannot seat, and naming it is the whole value of the refusal.
+    try:
+        metered_entry, _path, metered_connector, _registry = dispatch.resolve_entry(
+            paths, args.config, args.models)
+    except (paths_lib.PathError, dispatch.CompositionError, registry_lib.RegistryError):
+        metered_entry, metered_connector = None, None
+    metered = (metered_connector or {}).get("billing") == connectors_lib.METERED
+
+    blocked = []
+    read_frontmatter = persona_frontmatter(paths)
+    for raw in panel.get("seats") or []:
+        lens, family = raw.get("lens"), raw.get("family")
+        if not lens or not family or family in seating_lib.CONSTRAINTS:
+            continue
+        try:
+            frontmatter = read_frontmatter(lens)
+        except paths_lib.PathError:
+            frontmatter = None
+        tier, _source = seating_lib.resolve_tier(raw, panel, draft_entry, args.tier, False, frontmatter)
+        if seating_lib.model_at(draft_entry, tier, family):
+            continue
+        model = seating_lib.model_at(metered_entry, tier, family) if metered_entry else None
+        if model and metered:
+            blocked.append({
+                "kind": "cell",
+                "reviewer_id": seating_lib.reviewer_id(lens, family, raw.get("suffix") or ""),
+                "family": family, "tier": tier, "model": model,
+                "connector": metered_connector.get("name"),
+                "billing": metered_connector.get("billing"),
+            })
+
+    registry = _registry_for_labels(paths, args)
+    try:
+        pins = parse_model_pins(args.models_pinned)
+    except seating_lib.SeatingError:
+        pins = {}                      # a malformed pin is refused a few lines later, with its own message
+    for seat_id, model in sorted(pins.items()):
+        name = ((registry.get(model) if registry else None) or {}).get("connector")
+        if not name:
+            continue
+        try:
+            pinned_connector, _pinned_path = connectors_lib.load(paths, name)
+        except connectors_lib.ConnectorError:
+            continue
+        if pinned_connector.get("billing") == connectors_lib.METERED:
+            blocked.append({"kind": "pin", "reviewer_id": seat_id, "model": model,
+                            "connector": name, "billing": pinned_connector.get("billing")})
+
+    return drafts_lib.metered_refusal(blocked) if blocked else None
+
+
 def parse_model_pins(values):
     """`--model <seat-id>=<model-id>`, repeatable, into `{seat id: model id}`."""
     pinned = {}
@@ -474,6 +580,8 @@ def parse_args(argv):
                         help="Pin one seat to a concrete model id, e.g. --model fidelity-openai=openai/gpt-6-astra. Repeatable; beats every tier source. The seat's family label is relabelled from the model")
     parser.add_argument("--smoke-test", default=None, metavar="MODEL", dest="smoke_test",
                         help="Prove the pipeline, not the artifact: pin EVERY seat to this one model, set the family target to 1, mark the manifest `smoke_test` and say in the reconciliation that the run is not evidence. Still priced and still gated — by the budget and by the connector's spend gate, since it also spends")
+    parser.add_argument("--draft", action="store_true",
+                        help="A draft pass at $0 beyond the plan: compose against the `harness` connector, so every seat is a harness subagent the session spawns rather than a metered call. Drops the family target to 1, marks the manifest `draft`, and opens the reconciliation by saying the run carries no corroboration claim. Refuses a panel a metered endpoint would serve. Mutually exclusive with --smoke-test")
     parser.add_argument("--max-tokens", type=int, default=registry_lib.DEFAULT_MAX_TOKENS,
                         help="Completion cap sent on every call; a model's registry floor raises it for that seat (default: {0})".format(registry_lib.DEFAULT_MAX_TOKENS))
     parser.add_argument("--budget-usd", type=float, default=DEFAULT_BUDGET_USD,
@@ -499,7 +607,22 @@ def parse_args(argv):
 
 
 def main(argv=None):
-    args = parse_args(argv if argv is not None else sys.argv[1:])
+    argv = list(argv if argv is not None else sys.argv[1:])
+    args = parse_args(argv)
+
+    # **The two cheap modes are not one mode.** A smoke test pins every seat to one metered model to
+    # prove the pipeline and says nothing about the artifact; a draft pass is a real review by four
+    # lenses on the subscription that cannot claim corroboration. Asking for both would have to
+    # resolve to one of them — the pin against the harness leg, "not evidence" against
+    # "uncorroborated" — and whichever won, the manifest would carry a flag the run did not honour.
+    if args.draft and args.smoke_test:
+        sys.stderr.write(
+            "composition error: --draft and --smoke-test are different runs and cannot be one run.\n"
+            "  --smoke-test pins every seat to one metered model to prove the pipeline end to end "
+            "for cents; its reconciliation says the run is not evidence about the artifact at all.\n"
+            "  --draft seats every lens on a harness subagent on the plan; its reconciliation says "
+            "the findings are real and uncorroborated. Pick the one you meant.\n")
+        return EXIT_COMPOSITION
 
     if args.auto_apply == "on" and not args.authored:
         sys.stderr.write(
@@ -542,6 +665,28 @@ def main(argv=None):
                 panel_name, panel.get("description") or "", panel.get("routes_to") or "/code-review"))
         return EXIT_COMPOSITION
 
+    # **A `draft_only` template refuses without `--draft`, at template load.** The flag is what
+    # selects the harness endpoint, so without it every seat of such a template resolves against the
+    # *metered* map and the run bills for a pass whose whole definition is that it costs nothing —
+    # four Claude seats and a projection of real money, one `--approve-spend` from being charged.
+    # The template declares what it is and this is what makes the declaration true. Refused here,
+    # before anything is claimed or priced, and refused under `--skip-claude` too: that flag leaves
+    # `claude` seats to the session on an otherwise metered run and selects no endpoint at all, so
+    # it changes nothing about which map these seats resolve against.
+    if panel.get("draft_only") and not args.draft:
+        sys.stderr.write(
+            "composition error: panel `{0}` is a draft-pass template and this run is not a draft "
+            "pass.\n"
+            "  It exists for the $0 draft pass: every seat is a harness subagent on the owner's "
+            "plan. Without --draft the run composes against the metered endpoint instead, so these "
+            "seats would be priced, gated and billed like any other panel's.\n"
+            "  Run it as a draft pass:\n"
+            "    python3 scripts/run_panel.py --draft --panel {0} --artifact {1} --out {2}\n"
+            "  --skip-claude is not the same thing: it leaves explicitly seated `claude` seats to "
+            "the session on an otherwise metered run and selects no endpoint, so it does not make "
+            "this a draft pass either.\n".format(panel_name, args.artifact, args.out))
+        return EXIT_COMPOSITION
+
     if args.smoke_test:
         print("=" * 72)
         print("SMOKE TEST — every seat is pinned to {0}.".format(args.smoke_test))
@@ -564,8 +709,19 @@ def main(argv=None):
     # can raise refuses the way the deferred-stub refusal above does: nothing created, nothing to
     # clean up. Only `_adopt_recorded_substitutions` needs the claim, and it waits for it below.
     try:
+        # **A draft run composes against the harness connector, not the config's default.** The
+        # mode is a statement about which endpoint the run may use — none that bills — so it
+        # selects the endpoint, and the tiers map it seats from is built over that endpoint's own
+        # model files. Everything downstream is unchanged: the seats resolve normally, and they
+        # resolve onto a connector whose driver is never called.
         config_entry, config_path, connector, _registry = dispatch.resolve_entry(
-            paths, args.config, args.models)
+            paths, args.config, args.models,
+            connector_override=drafts_lib.HARNESS_CONNECTOR if args.draft else None)
+        if args.draft:
+            refusal = _draft_refusal(paths, args, panel, config_entry, connector)
+            if refusal:
+                sys.stderr.write(refusal)
+                return EXIT_COMPOSITION
         seats = seating_lib.resolve(
             panel, config_entry,
             cli_tier=args.tier,
@@ -586,11 +742,65 @@ def main(argv=None):
         sys.stderr.write("composition error: {0}\n".format(failure))
         return EXIT_COMPOSITION
 
+    # Who will supply the judgment patch, decided here and recorded in the manifest, so the panel
+    # and `reconcile.py` cannot disagree about it later. `default` means host when a human is
+    # attached and, when nobody is, the harness judge where one is installed and `synthesis` where
+    # none is — the same test the budget gate turns on, which is why both read it from
+    # `lib/judge.py` rather than each asking stdin its own question.
+    #
+    # **Resolved before the claim**, because the two refusals below are decidable from the panel,
+    # the flags and the machine alone — the same class as the deferred stub and the starved seat —
+    # and a refusal that can leave nothing behind should leave nothing behind: a stray run directory
+    # silently moves the retry's sequence number.
+    autonomous = judge_lib.is_autonomous(args.autonomous)
+    try:
+        reconciler = judge_lib.resolve_reconciler(
+            args.reconciler, panel.get("reconciler"), autonomous,
+            harness=judge_lib.harness_present())
+    except judge_lib.JudgeError as failure:
+        sys.stderr.write("composition error: {0}\n".format(failure))
+        return EXIT_COMPOSITION
+    # **A draft run cannot be judged by `synthesis`.** That judgment is a paid call on the metered
+    # endpoint and it is the dearest single call most runs make — on a pass whose whole definition
+    # is "$0 beyond the plan" it would be the only thing that spent anything, and it would spend
+    # more than the panel it was judging usually does. The harness judge costs nothing and is the
+    # default wherever `install.sh` has put it; a host reconciles in-session for nothing at all.
+    if args.draft and reconciler == judge_lib.SYNTHESIS_AUTHOR:
+        sys.stderr.write(
+            "composition error: this draft run resolves its judgment to the `synthesis` persona, "
+            "which is a paid call on a metered endpoint.\n"
+            "  A draft pass costs nothing beyond the plan, and the judgment is the dearest single "
+            "call most runs make — it cannot be the one thing a $0 pass pays for.\n"
+            "  Install the harness judge, which judges on the subscription:\n"
+            "    ./install.sh\n"
+            "  or reconcile the run yourself with --reconciler host.\n")
+        return EXIT_COMPOSITION
+
+    # **The "$0" banner prints here and not earlier**, because every refusal that can stop a draft
+    # run has now passed. A banner promising a run that costs nothing, printed above a composition
+    # error that says the run cannot happen, is a claim about a run nobody made.
+    if args.draft:
+        for line in drafts_lib.banner():
+            print(line)
+
     # Composition error, not a warning: `fidelity` and `source-credibility` require a `citation` on
     # every finding, so a seat carrying either with nothing to cite would have every finding it
     # returned rejected by the validator. Refused here, before the first paid call, naming the seats.
     starved = reference_required_seats(seats) if not args.refs else []
-    if starved:
+    # **A draft run retires such a seat rather than refusing the run.** The rule's own reason is
+    # that the seat would be asked for a citation it has nothing to take one from and every finding
+    # it returned would be thrown out — on a metered run that is money spent for nothing and
+    # refusing is right. A draft pass spends nothing and is the mode meant for a seed document with
+    # no source of truth, so the other lenses run and the citing seat is recorded as a seat that did
+    # not report, with the reason, exactly as a context-overflowing seat is. `draft-review` ships
+    # `requires_references: false` on the strength of this.
+    if starved and args.draft:
+        print("retiring {0} seat(s) for this draft pass: no source-of-truth references were "
+              "supplied and {1} cites on every finding".format(
+                  len(starved), " and ".join(sorted({seat["lens"] for seat in starved}))))
+        for seat in starved:
+            print("  {0} — retired; supply --ref to seat it".format(seat["reviewer_id"]))
+    elif starved:
         sys.stderr.write(
             "composition error: {0} seat(s) require source-of-truth references and none were supplied.\n".format(
                 len(starved)))
@@ -623,8 +833,16 @@ def main(argv=None):
         if seat.get("substitution"):
             print("re-seated {0}: {1}".format(seat["reviewer_id"], seat["substitution"]["reason"]))
 
-    dispatched = [s for s in seats if not (args.skip_claude and s["family"] == "claude")]
-    harness = [s for s in seats if args.skip_claude and s["family"] == "claude"]
+    # **Which leg each seat sits on.** Two ways onto the harness leg and they are one state: a
+    # `claude` seat the operator left to the session with `--skip-claude`, and — new with `--draft`
+    # — any seat whose connector's driver `type` is `harness`, which is every seat of a draft run.
+    # A seat retired for want of references sits on neither: it is recorded and not run.
+    retired = {seat["reviewer_id"] for seat in starved} if args.draft else set()
+    harness_leg = drafts_lib.is_harness_connector(connector)
+    dispatched = [s for s in seats
+                  if s["reviewer_id"] not in retired and not _is_harness_seat(s, args, harness_leg)]
+    harness = [s for s in seats
+               if s["reviewer_id"] not in retired and _is_harness_seat(s, args, harness_leg)]
     tier_default = args.tier or panel.get("tier")
 
     # The first of the two family counts. `min_families` is a target: a panel that cannot meet it
@@ -668,22 +886,6 @@ def main(argv=None):
         record["materialized_abs"] = os.path.join(run_dir, record["materialized"])
     inputs = {"artifact": artifact_record, "references": reference_records}
 
-    # Who will supply the judgment patch, decided here and recorded in the manifest, so the panel
-    # and `reconcile.py` cannot disagree about it later. `default` means host when a human is
-    # attached and `synthesis` when nobody is — the same test the budget gate turns on, which is
-    # why both read it from `lib/judge.py` rather than each asking stdin its own question.
-    autonomous = judge_lib.is_autonomous(args.autonomous)
-    # Whether the harness judge is installed. It decides an unresolved `default` and nothing else,
-    # and the **answer** — the resolved `reconciler` — is what the manifest records, so
-    # `reconcile.py` reads a decision rather than a premise. It asks the same question of the same
-    # machine when it has to resolve a `default` of its own.
-    try:
-        reconciler = judge_lib.resolve_reconciler(
-            args.reconciler, panel.get("reconciler"), autonomous,
-            harness=judge_lib.harness_present())
-    except judge_lib.JudgeError as failure:
-        sys.stderr.write("composition error: {0}\n".format(failure))
-        return EXIT_COMPOSITION
     with_synthesis = reconciler == judge_lib.SYNTHESIS_AUTHOR
 
     # **The judge's seat is resolved here, not guessed at in the projection.** It is resolved by
@@ -731,7 +933,15 @@ def main(argv=None):
     # The judge is checked alongside the seats, because it is a paid call this run will make and an
     # unpriced one is the same hole: a seat left out of the projection is a budget gate that does
     # not gate. It is appended only when it is not already a seated model, so it is named once.
-    seat_models = [s["model"] for s in dispatched]
+    #
+    # **A draft run prices its harness seats too, at zero.** They make no call, so the gate is not
+    # protecting money here; what it is protecting is the claim. A run that says it costs nothing
+    # has to have looked at every seat's price to say so, and a harness model file whose price is
+    # *missing* rather than zero is a model nobody has classified — exactly the entry the gate
+    # exists to refuse. The shipped `claude-opus-5` carries an explicit 0, so it passes and the
+    # projection prints a table of $0.0000 rows that says what the mode promises.
+    priced = (dispatched + harness) if args.draft else list(dispatched)
+    seat_models = [s["model"] for s in priced]
     to_price = list(seat_models)
     if synthesis_model and synthesis_model not in seat_models:
         to_price.append(synthesis_model)
@@ -739,7 +949,7 @@ def main(argv=None):
     if uncovered:
         sys.stderr.write("composition error: the model registry cannot price {0} model(s) this run will call.\n".format(len(uncovered)))
         for model, reason in uncovered:
-            seat = next((s for s in dispatched if s["model"] == model), None)
+            seat = next((s for s in priced if s["model"] == model), None)
             sys.stderr.write("  {0} resolves to {1}, which {2} at {3}\n".format(
                 seat["reviewer_id"] if seat else "the judgment call", model, reason, registry.path))
         sys.stderr.write("Every resolved seat must be priced before dispatch: a seat left out of the "
@@ -763,10 +973,18 @@ def main(argv=None):
     manifest = _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
                                dispatched, harness, inputs, fingerprint, tier_default, registry,
                                min_families, seated_families, inference, reconciler, autonomous,
-                               judge_seat, connector=connector)
+                               judge_seat, connector=connector, harness_leg=harness_leg)
     if resuming:
         manifest = _merge_resume(manifest, runs_lib.read_manifest(run_dir))
     runs_lib.write_manifest(run_dir, manifest)
+
+    # A seat retired for want of references is recorded as a seat that did not report, with the
+    # reason, the moment the manifest exists to record it on — the same shape the context-overflow
+    # drop takes a few lines below, and for the same reason: `reconcile_core` reads the manifest to
+    # say which composed seats are absent from every cluster, and a seat that was never going to run
+    # must not be left `pending` and mistaken for one the host has yet to spawn.
+    for seat in (starved if args.draft else []):
+        runs_lib.update_seat(run_dir, seat["reviewer_id"], _retired_for_references(seat))
 
     # --- Project ---------------------------------------------------------------------------------
     document_chars = artifact_record["bytes"] + sum(r["bytes"] for r in reference_records)
@@ -774,7 +992,7 @@ def main(argv=None):
         "reviewer_id": seat["reviewer_id"],
         "model": seat["model"],
         "prompt_tokens": budget_lib.approx_tokens(budget_lib.prompt_chars(persona_chars(seat["lens"], paths), document_chars)),
-    } for seat in dispatched]
+    } for seat in priced]
     projection = budget_lib.project(projection_seats, registry, args.budget_usd,
                                     with_synthesis=with_synthesis, synthesis_model=synthesis_model,
                                     synthesis_seat=judge_seat)
@@ -813,7 +1031,12 @@ def main(argv=None):
     # projection more than you meant to spend". A run can be comfortably under budget and still be
     # the first time anybody said yes to billing an account, which is the case --approve-budget
     # never covered: it approves an overrun, not the spending.
-    spend_code = _spend_gate(args, run_dir, connector, dispatched, projection, autonomous)
+    # **The gate is asked over the seats this run will actually dispatch, not over the composed
+    # panel.** `priced` is what the projection covers, and on a draft run it is every seat; what
+    # decides whether anybody has to approve spending is the set of calls that will be made —
+    # `dispatched`, after the overflow drop, plus the judgment call when this run makes one.
+    spend_code = _spend_gate(args, run_dir, connector, dispatched, projection, autonomous,
+                             judgment=with_synthesis)
     if spend_code is not None:
         return spend_code
 
@@ -863,8 +1086,68 @@ def main(argv=None):
         results = list(by_id.values())
     elapsed = time.time() - started
 
-    code = _wrap_up(args, run_dir, results, harness, dispatched, elapsed, halt, held)
+    code = _wrap_up(args, run_dir, results, harness, dispatched, elapsed, halt, held, resuming)
+    if args.draft:
+        stop = _draft_spawn_stage(argv, args, paths, run_dir, harness, inputs, code)
+        if stop is not None:
+            return stop
     return _judge(args, run_dir, reconciler, code, synthesis_model)
+
+
+def _draft_spawn_stage(argv, args, paths, run_dir, harness, inputs, code):
+    """Print the spawn block for every draft seat still owed a report, and stop. Or None to carry on.
+
+    **This is the seat-leg twin of the harness judge stage, deliberately.** A script cannot spawn a
+    harness agent; what it can do is compute everything the spawn needs and hand it over. So the run
+    prints one exact block per seat, creates each seat's staging directory so the subagent has
+    somewhere to write, and stops — and the session resumes this same command afterwards to reach
+    the judge stage. One pattern for both legs rather than two.
+
+    **The reports on disk decide who is still owed**, not the manifest's statuses, which is the same
+    authority resume uses everywhere else. So the second pass through this asks only for the seats
+    whose reports did not land or did not validate, and the pass after the last one asks for nobody
+    and falls through to the judge.
+
+    **The stop carries `_wrap_up`'s code, and on a first pass that is 0** — the same code the harness
+    judge stage's stop returns. Both mean "stopped for the orchestrating session to act", and a
+    caller that cannot tell them apart from the exit code alone is reading them correctly. A resume
+    that reaches this block again is the different case: the session was asked once already, so a
+    report still absent there is under-seated and `_wrap_up` says 3.
+    """
+    owed = [seat for seat in harness
+            if not runs_lib.report_is_valid(run_dir, seat["reviewer_id"], _validate)[0]]
+    if not owed:
+        return None
+
+    finding_schema = paths.require("reference", FINDING_SCHEMA)["path"]
+    spawns = []
+    for seat in owed:
+        staging = runs_lib.make_staging_dir(run_dir, seat["reviewer_id"])
+        persona = paths.require("persona", "lens-" + seat["lens"])
+        frontmatter, _body = report_lib.parse_agent_file(persona["path"])
+        try:
+            context = dispatch.persona_context_paths(paths, frontmatter, warn=lambda _m: None)
+        except paths_lib.PathError:
+            context = [finding_schema]
+        spawns.append({
+            "reviewer_id": seat["reviewer_id"],
+            "lens": seat["lens"],
+            "model": seat["model"],
+            "persona_path": persona["path"],
+            "context_paths": list(context),
+            "artifact": inputs["artifact"]["materialized_abs"],
+            "artifact_label": inputs["artifact"]["path"],
+            "artifact_revision": inputs["artifact"]["revision"],
+            "references": [(r["materialized_abs"], r["path"]) for r in inputs["references"]],
+            "staging_path": drafts_lib.staged_report(staging, seat["reviewer_id"]),
+        })
+
+    print("")
+    for line in drafts_lib.spawn_instruction(
+            run_dir, spawns, drafts_lib.resume_command([os.path.abspath(__file__)] + argv),
+            render_script=os.path.join(SCRIPTS_DIR, "render_harness_report.py")):
+        print(line)
+    return code
 
 
 def _judge(args, run_dir, reconciler, code, synthesis_model=None):
@@ -1053,6 +1336,26 @@ def _reseat_unavailable(results, seats, config_entry, registry, run_dir, args):
     return moved
 
 
+def _retired_for_references(seat):
+    """Mark a citing seat a reference-free draft run will not spawn. Recorded, never silent.
+
+    `failed` rather than a status of its own, because every reader of a manifest already knows what
+    `failed` means and `reconcile_core._missing_seats_caveat` already names such a seat in the
+    reconciliation. What is new is the reason, which says the seat was never dispatched rather than
+    that it was dispatched and did not come back.
+    """
+    def mutate(record):
+        record["status"] = "failed"
+        record["report"] = None
+        record["failure_reason"] = "no-references"
+        record["error"] = (
+            "the `{0}` lens cites on every finding and this run supplied no source-of-truth "
+            "references, so every finding it returned would fail validation. On a draft pass the "
+            "seat is retired rather than the run refused; supply --ref to seat it.".format(
+                seat.get("lens")))
+    return mutate
+
+
 def _unavailable(result, model):
     def mutate(record):
         record["status"] = "failed"
@@ -1083,11 +1386,13 @@ def _min_families_target(args, panel):
 
     `--smoke-test` sets it to 1 below everything else it cannot override: a run with one model
     behind every seat has one family by construction, and holding it to a target of 2 would print
-    a shortfall warning about a shortfall the operator asked for.
+    a shortfall warning about a shortfall the operator asked for. `--draft` is the same case for the
+    same reason — the harness leg serves one family — and it is the owner's standing rule that a
+    single-family pass is first-class rather than a degraded one.
     """
     if args.min_families is not None:
         return args.min_families
-    if args.smoke_test:
+    if args.smoke_test or args.draft:
         return 1
     target = panel.get("min_families")
     return DEFAULT_MIN_FAMILIES if target is None else target
@@ -1129,7 +1434,8 @@ def _run_tier(tier_default, seats):
 
 def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats, dispatched, harness,
                     inputs, fingerprint, tier_default, registry, min_families, seated_families,
-                    inference, reconciler, autonomous, judge_seat=None, connector=None):
+                    inference, reconciler, autonomous, judge_seat=None, connector=None,
+                    harness_leg=False):
     """The manifest as it stands at Resolve: every seat pending, every input pinned."""
     artifact = inputs["artifact"]
     references = inputs["references"]
@@ -1147,8 +1453,13 @@ def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
             "family": seat["family"],
             "tier": seat["tier"],
             "tier_source": seat["tier_source"],
-            "model": None if harness_seat else seat["model"],
-            "connector": None if harness_seat else seat["connector"],
+            # **A harness seat records a model only when the run resolved one for it.** On a draft
+            # run it did: the seat sits on the harness connector and its model file is what the
+            # spawn block names, so the id belongs in the record. Under `--skip-claude` the seat
+            # resolved against the *metered* map and the subagent will not run that model at all,
+            # so recording it would be a false audit line — null stays the honest answer there.
+            "model": seat["model"] if (harness_seat and harness_leg) or not harness_seat else None,
+            "connector": seat["connector"] if (harness_seat and harness_leg) or not harness_seat else None,
             "provider": None,
             "leg": "harness" if harness_seat else "openrouter",
             "input_delivery": "materialized-paths" if harness_seat else "inlined",
@@ -1236,6 +1547,10 @@ def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
         # a top-level field rather than a note on the seats because it governs the whole document.
         "smoke_test": bool(args.smoke_test),
         "smoke_test_model": args.smoke_test,
+        # A pass that ran on the subscription and claims no corroboration. Top level rather than a
+        # note on the seats, for the same reason `smoke_test` is: it governs how the whole
+        # reconciliation should be read, and `reconcile_core.method_caveat` opens with it.
+        "draft": bool(args.draft),
         "budget_usd": args.budget_usd,
         # Filled at Project, a few lines after this manifest is written, and left null on a run that
         # never reached the pre-flight. Carries the per-seat table, the totals, the budget and the
@@ -1270,7 +1585,7 @@ def _build_manifest(args, panel, panel_path, config_path, paths, run_dir, seats,
     }
 
 
-def _spend_gate(args, run_dir, connector, seats, projection, autonomous):
+def _spend_gate(args, run_dir, connector, seats, projection, autonomous, judgment=False):
     """The connector's own gate: may this run bill an account at all? None means yes, carry on.
 
     A `metered` connector carries `requires_approval: true` by default, and a metered call without
@@ -1281,19 +1596,38 @@ def _spend_gate(args, run_dir, connector, seats, projection, autonomous):
     flag: a run that has approved a $9 overrun has said nothing about whether paying is allowed, and
     a run that has approved paying has said nothing about how much.
 
+    **It is asked only when this run will make a call on that endpoint.** `seats` is the dispatched
+    set and `judgment` says whether the judgment call itself lands here; a run that dispatches
+    nothing — every seat on the harness leg under `--draft`, or an all-`claude` panel under
+    `--skip-claude` — has nothing to approve, and asking anyway over a $0.00 projection trains an
+    operator to say yes without reading.
+
     Whatever the answer, it is recorded in the manifest as `spend_approval`, so the audit trail
     shows that a person said yes rather than that a default did.
     """
-    block = connectors_lib.spend_gate(connector, seats)
+    block = connectors_lib.spend_gate(connector, seats, judgment=judgment)
     if not block["required"]:
-        _record_spend_approval(run_dir, dict(block, granted=None, source=None))
+        block = dict(block, granted=None, source=None)
+        if args.draft:
+            # The one thing a reader of a draft run's manifest should not have to work out from the
+            # connector file: the gate did not fire because there was nothing to gate.
+            block["reason"] = "no metered connector seated"
+        elif connectors_lib.requires_approval(connector):
+            # The other way `required` comes back false: the endpoint does gate, and this run has
+            # nothing on it. Said in the manifest rather than left for a reader to infer from an
+            # empty `seats` array beside a metered connector block.
+            block["reason"] = "no seat dispatched to this connector and no judgment call on it"
+        _record_spend_approval(run_dir, block)
         return None
 
     if args.approve_spend:
         _record_spend_approval(run_dir, dict(block, granted=True, source="--approve-spend"))
         return None
 
-    message = connectors_lib.refusal(connector, seats, projection.get("projection_usd"))
+    # The judgment call is a call on this endpoint like any other and belongs in the list the
+    # refusal names, or a run whose only paid call is the judgment refuses without naming anything.
+    named = list(seats) + ([{"reviewer_id": "the judgment call"}] if judgment else [])
+    message = connectors_lib.refusal(connector, named, projection.get("projection_usd"))
     if autonomous:
         _record_spend_approval(run_dir, dict(block, granted=False, source="autonomous-refusal"))
         _record_projection(run_dir, projection, "refused-spend-not-approved")
@@ -1473,7 +1807,7 @@ def _stale_lease(lease, why):
     return mutate
 
 
-def _wrap_up(args, run_dir, results, harness, dispatched, elapsed, halt, held):
+def _wrap_up(args, run_dir, results, harness, dispatched, elapsed, halt, held, resuming=False):
     """Fold every seat's outcome into the manifest, print the digests, choose the exit code."""
     failures = []
     held = list(held)
@@ -1509,6 +1843,17 @@ def _wrap_up(args, run_dir, results, harness, dispatched, elapsed, halt, held):
         if result["returncode"] != 0:
             failures.append(reviewer_id)
 
+    # **A harness seat whose report has been moved in has reported, and the manifest has to say so.**
+    # Nothing else folds one: the operator's `mv` is the last step of that leg and it writes no
+    # record, so a seat that had answered went on reading `pending` for the life of the run. That is
+    # the same lie resume exists to prevent one direction up — a manifest asserting something the
+    # directory contradicts — and it is what makes a draft pass resumable seat by seat.
+    for seat in harness:
+        landed_path = os.path.join(run_dir, seat["reviewer_id"] + ".json")
+        if runs_lib.report_is_valid(run_dir, seat["reviewer_id"], _validate)[0]:
+            runs_lib.update_seat(run_dir, seat["reviewer_id"],
+                                 lambda record, path=landed_path: seat_record_from_report(record, path))
+
     manifest = runs_lib.read_manifest(run_dir)
     total_cost = 0.0
     cost_known = False
@@ -1520,8 +1865,11 @@ def _wrap_up(args, run_dir, results, harness, dispatched, elapsed, halt, held):
     manifest["cost_usd_total"] = round(total_cost, 6) if cost_known else None
     manifest["failures"] = sorted({s["reviewer_id"] for s in manifest["seats"] if s.get("status") == "failed"})
 
-    # Harness seats are expected to sit `pending` until the host spawns them, so they are not what
-    # "under-seated" means here; only the OpenRouter leg's own seats are counted against exit 3.
+    # Harness seats are expected to sit `pending` until the host spawns them, so on a mixed
+    # `--skip-claude` run they are not what "under-seated" means; only the OpenRouter leg's own
+    # seats are counted against exit 3 there. A **resumed draft** run is the exception and is handled
+    # at the bottom of this function, where the harness leg is the whole panel and the session has
+    # already been asked for it once.
     #
     # **The count comes from the reports on disk, not from the manifest's status.** A manifest that
     # says `ok` for a seat whose report is gone would otherwise let the run print "2 of 2" and exit 0
@@ -1529,18 +1877,26 @@ def _wrap_up(args, run_dir, results, harness, dispatched, elapsed, halt, held):
     openrouter_seats = [s for s in manifest["seats"] if s.get("leg") != "harness"]
     reporting = [s for s in openrouter_seats
                  if runs_lib.report_is_valid(run_dir, s["reviewer_id"], _validate)[0]]
+    # Harness seats whose report has already been rendered and moved in. They are not in `reporting`
+    # — the exit code counts the leg this process is responsible for — but they **have** reported,
+    # which is what the family count below is about. A draft run has no other kind of seat, so
+    # leaving them out made every draft pass read as "0 families reporting" forever.
+    harness_reporting = [s for s in manifest["seats"] if s.get("leg") == "harness"
+                         and runs_lib.report_is_valid(run_dir, s["reviewer_id"], _validate)[0]]
 
     # The second family count, over the seats that actually reported — the one the agreement tiers
-    # are worth anything against. A harness seat has not been rendered yet at this point and is not
-    # counted; `reconcile.py` recomputes `families_reporting` from the reports it finds.
-    families_reporting = sorted({s.get("family") for s in reporting if s.get("family")})
+    # are worth anything against. A harness seat that has not been rendered yet is not counted;
+    # `reconcile.py` recomputes `families_reporting` from the reports it finds either way.
+    families_reporting = sorted({s.get("family") for s in reporting + harness_reporting
+                                 if s.get("family")})
     min_families = _record_min_families(manifest, families_reporting)
     runs_lib.write_manifest(run_dir, manifest)
 
     print("Panel `{0}` on {1}".format(manifest["panel"], manifest["artifact"]))
     print("Run directory: {0}".format(run_dir))
     print("Seats reporting: {0} of {1} · harness pending: {2} · failed: {3} · held: {4} · {5:.0f}s{6}".format(
-        len(reporting), len(openrouter_seats), len(harness), len(manifest["failures"]), len(held), elapsed,
+        len(reporting) + len(harness_reporting), len(openrouter_seats) + len(harness),
+        max(len(harness) - len(harness_reporting), 0), len(manifest["failures"]), len(held), elapsed,
         " · ${0:.4f}".format(total_cost) if cost_known else ""))
     if min_families["reporting"] < min_families["target"]:
         print("Families reporting: {0} of a target {1} ({2}) — {3}".format(
@@ -1568,9 +1924,13 @@ def _wrap_up(args, run_dir, results, harness, dispatched, elapsed, halt, held):
         else:
             record = records_by_id.get(seat["reviewer_id"]) or {}
             print("{0} — {1}".format(seat["reviewer_id"], record.get("failure_reason") or record.get("status") or "not dispatched"))
+    landed = {s["reviewer_id"] for s in harness_reporting}
     for seat in harness:
         print("-" * 72)
-        print("{0} — pending on the harness leg; spawn the subagent, then render it".format(seat["reviewer_id"]))
+        if seat["reviewer_id"] in landed:
+            print("{0} — reported on the harness leg; validated report on disk".format(seat["reviewer_id"]))
+        else:
+            print("{0} — pending on the harness leg; spawn the subagent, then render it".format(seat["reviewer_id"]))
     print("-" * 72)
     print("Manifest: {0}".format(runs_lib.manifest_path(run_dir)))
 
@@ -1581,6 +1941,20 @@ def _wrap_up(args, run_dir, results, harness, dispatched, elapsed, halt, held):
         sys.stderr.write("zero seats reported: no reconciliation can be written over zero reports.\n")
         return EXIT_TERMINAL
     if len(reporting) < len(openrouter_seats):
+        return EXIT_UNDER_SEATED
+    # **On a draft run the harness leg counts — but only on a resume pass.** The distinction is the
+    # one `_harness_judge_stage` already draws: a first pass that has printed the spawn block and
+    # holds no report has not failed, it has *stopped for the orchestrating session to act*, exactly
+    # as the harness judge stage stops for the session to spawn the judge. That stage returns the
+    # panel's own code — 0 on a clean run — and the spawn-block stop has to read the same, or two
+    # halts that mean the identical thing report differently to whoever scripted them.
+    #
+    # A **resume** pass is where a missing or invalid harness report is a real failure: the session
+    # was asked for those reports, says it has supplied them, and the directory disagrees. Exiting 0
+    # there would let a run with nothing in it read as a finished panel, which is what the harness
+    # leg's share of the exit code exists to prevent. So it is counted then, and only then, for the
+    # same reason a failed OpenRouter seat is counted always.
+    if args.draft and resuming and len(harness_reporting) < len(harness):
         return EXIT_UNDER_SEATED
     return EXIT_OK
 

@@ -57,7 +57,7 @@
     "seats_reporting": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "The reviewer_ids whose reports were validated and clustered — the denominator for `majority` and `corroborated-same-family`"
+      "description": "The reviewer_ids whose reports were validated and clustered — the denominator for `same-family` and `corroborated-same-family`"
     },
     "missing_seats": {
       "type": "array",
@@ -70,8 +70,10 @@
           "reviewer_id": { "type": "string" },
           "lens": { "type": ["string", "null"] },
           "family": { "type": ["string", "null"] },
-          "stage": { "type": "string", "enum": ["dispatch", "validation", "timeout", "skipped"] },
-          "reason": { "type": "string" }
+          "stage": { "type": "string", "enum": ["resolve", "dispatch", "validation", "timeout", "skipped"], "description": "`resolve` is a seat retired before anything was dispatched — a citing lens on a reference-free draft run — and is distinct from `dispatch`, which asserts that a call was made" },
+          "reason": { "type": "string", "description": "The seat's own `failure_reason` where the manifest recorded one, else why no report could be read" },
+          "failure_reason": { "type": ["string", "null"], "description": "The manifest's `failure_reason` for this seat, verbatim, or null where it recorded none" },
+          "error": { "type": ["string", "null"], "description": "The manifest's `error` for this seat: the prose behind the reason, so the judgment supplier can see why a lens is absent rather than only that it is" }
         }
       }
     },
@@ -155,7 +157,7 @@
           "n_reviewers": { "type": "integer" },
           "n_families": { "type": "integer" },
           "families": { "type": "array", "items": { "type": "string" } },
-          "tier": { "type": "string", "enum": ["unanimous", "consensus", "majority", "corroborated-same-family", "singleton"] },
+          "tier": { "type": "string", "enum": ["unanimous", "consensus", "same-family", "corroborated-same-family", "singleton"] },
           "match_key": {
             "type": "string",
             "enum": ["location", "quote", "claim", "none"],

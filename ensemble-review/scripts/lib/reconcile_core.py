@@ -22,6 +22,7 @@ import os
 import re
 import unicodedata
 
+from . import drafts as drafts_lib
 from . import judge as judge_lib
 from . import report as report_lib
 
@@ -34,11 +35,21 @@ UNATTENDED_AUTHORS = judge_lib.UNATTENDED_AUTHORS
 
 SEVERITY_ORDER = {"blocker": 0, "should-fix": 1, "nice-to-have": 2}
 SEVERITY_RANK = {"blocker": 2, "should-fix": 1, "nice-to-have": 0}
-TIERS = ("unanimous", "consensus", "majority", "corroborated-same-family", "singleton")
+TIERS = ("unanimous", "consensus", "same-family", "corroborated-same-family", "singleton")
 MATCH_KEYS = ("location", "quote", "claim", "none")
 DISPOSITIONS = ("fix-now", "flag-for-human", "defer")
 SINGLETON_LABELS = ("blind-spot-catch", "family-specific-false-positive")
-LABELLED_TIERS = ("singleton", "corroborated-same-family")
+
+# Every tier whose members are one family, which is every tier that owes a label. **`same-family`
+# used to be called `majority`**, and the name was the whole problem: the tier is unreachable with
+# two families in it — `consensus` catches those one row above — so `majority` only ever meant
+# "more than half the reporting seats, all of them one mind", and it was the one same-family tier
+# that skipped the labelling duty. On a draft pass, where every seat is one family by construction,
+# that was not an edge: three of four lenses agreeing rendered as an **unlabelled** cluster under a
+# heading reading "Single-seat should-fixes", under a preamble saying an unlabelled single-seat
+# cluster is not an allowed output. One family agreeing with itself is one mind whether it is two
+# seats or four, so the tier is named for what it is and labelled like its neighbour.
+LABELLED_TIERS = ("singleton", "corroborated-same-family", "same-family")
 
 QUOTE_OVERLAP_MIN = 60
 
@@ -61,6 +72,12 @@ MISSING_STAGE = {
     "timeout": "timeout",
     "skipped": "skipped",
 }
+
+# `failure_reason`s that put a seat at **Resolve** whatever its status says. A seat retired before
+# dispatch is recorded `failed` — the status every reader already understands — and the status
+# table would then file it under `dispatch`, which asserts a call that was never made. The reason
+# is the more specific fact, so it wins.
+RESOLVE_FAILURES = ("no-references",)
 
 
 # --- normalization and the two mechanical keys ---------------------------------------------------
@@ -144,17 +161,49 @@ def load_manifest(run_dir):
 
 
 def missing_stage(seat):
-    """Map a manifest seat status onto the four stages the product's `missing_seats` enum allows.
+    """Map a manifest seat status onto the stages the product's `missing_seats` enum allows.
 
     Explicit both ways: a status this table does not name is a manifest the script does not
     understand, and guessing `dispatch` would report a seat as never dispatched on no evidence.
+
+    **The seat's own `failure_reason` outranks its status where the two disagree about the stage.**
+    A seat retired at Resolve is recorded `failed`, because every reader of a manifest already
+    knows what `failed` means — but it was never dispatched, and reporting it under `dispatch`
+    would tell the judgment supplier a call was made and came back empty.
     """
+    if seat.get("failure_reason") in RESOLVE_FAILURES:
+        return "resolve"
     status = seat.get("status")
     if status in MISSING_STAGE:
         return MISSING_STAGE[status]
     raise ReconcileError(
         "manifest seat {0!r} has status {1!r}, which is not one of {2}; `missing_seats[].stage` "
         "cannot be derived from it".format(seat.get("reviewer_id"), status, sorted(MISSING_STAGE)))
+
+
+def _missing_record(seat, stage, fallback_reason):
+    """One `missing_seats[]` entry, carrying why the run itself says the seat is absent.
+
+    **The manifest already knows more than "no report file".** A seat retired at Resolve, one
+    dropped for a context overflow, one whose lease went stale — each carries a `failure_reason` and
+    an `error` the run recorded at the moment it happened, and the judgment supplier reading this
+    array is the one mind that has to decide what a missing lens does to the agreement counts. It
+    was getting "no report file at fidelity-claude.json", which is the one thing it could already
+    see for itself.
+
+    So `reason` is the seat's own `failure_reason` where it has one, with the prose in `error`
+    beside it, and the path-shaped fallback only where the manifest says nothing.
+    """
+    failure_reason = seat.get("failure_reason") or None
+    return {
+        "reviewer_id": seat.get("reviewer_id"),
+        "lens": seat.get("lens"),
+        "family": seat.get("family"),
+        "stage": stage,
+        "reason": failure_reason or fallback_reason,
+        "failure_reason": failure_reason,
+        "error": seat.get("error") or None,
+    }
 
 
 def load_reports(run_dir, manifest):
@@ -177,25 +226,14 @@ def load_reports(run_dir, manifest):
         reviewer_id = seat["reviewer_id"]
         path = os.path.join(run_dir, reviewer_id + ".json")
         if not os.path.isfile(path):
-            missing.append({
-                "reviewer_id": reviewer_id,
-                "lens": seat.get("lens"),
-                "family": seat.get("family"),
-                "stage": missing_stage(seat),
-                "reason": "no report file at {0}.json".format(reviewer_id),
-            })
+            missing.append(_missing_record(
+                seat, missing_stage(seat), "no report file at {0}.json".format(reviewer_id)))
             continue
         with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
         errors = report_lib.validate_report(data, lens=data.get("lens"))
         if errors:
-            missing.append({
-                "reviewer_id": reviewer_id,
-                "lens": seat.get("lens"),
-                "family": seat.get("family"),
-                "stage": "validation",
-                "reason": "; ".join(errors[:5]),
-            })
+            missing.append(_missing_record(seat, "validation", "; ".join(errors[:5])))
             continue
         reports[reviewer_id] = data
 
@@ -329,6 +367,12 @@ def cluster_reviewers(cluster):
 
 
 def compute_tier(cluster, seats_expected, seats_reporting):
+    """The tier table, ordered and exhaustive, first match wins.
+
+    Rows 3 and 4 are both one family and both owe a label; they differ only on which side of half
+    the reporting seats the agreement falls. Row 3 cannot be reached with two families in it — row
+    2 has already caught those — which is why it is named `same-family` rather than `majority`.
+    """
     reviewers = set(cluster_reviewers(cluster))
     families = cluster_families(cluster)
     n_reviewers = len(reviewers)
@@ -339,7 +383,7 @@ def compute_tier(cluster, seats_expected, seats_reporting):
     if n_families >= 2:
         return "consensus"
     if n_reviewers >= 2 and n_reviewers > reporting / 2.0:
-        return "majority"
+        return "same-family"
     if n_reviewers >= 2:
         return "corroborated-same-family"
     return "singleton"
@@ -897,9 +941,12 @@ def method_caveat(supplied, manifest):
       name suggested. That substitution is recorded the same way a seat's is.
 
     And one **prologue**, which is the only thing that goes in front of the supplied text: a smoke
-    test's warning that the run is not evidence. Appending it would put it below every appendix
-    above, where a reader who stopped at the supplied caveat would never reach it, and what it
-    says is that the supplied caveat describes a run that proves nothing about the artifact.
+    test's warning that the run is not evidence, or a draft pass's that it carries no corroboration
+    claim. Appending either would put it below every appendix above, where a reader who stopped at
+    the supplied caveat would never reach it, and what both say is how the supplied caveat itself
+    should be read. **They are written in different words on purpose**: "not evidence about the
+    artifact" and "one family's findings, uncorroborated" are different warnings, and a reader who
+    took them for one would either discard a draft's real findings or cite its agreement counts.
 
     Nothing else about the supplied text is changed.
     """
@@ -920,6 +967,13 @@ def method_caveat(supplied, manifest):
             "here can carry cross-family corroboration at any tier: what the seats agree on is one "
             "mind agreeing with itself under different lens prompts. It was run to prove the "
             "pipeline end to end for cents. Do not cite its findings, its counts or its verdict.")
+    elif manifest.get("draft"):
+        # **Deliberately not the smoke test's words.** A smoke test says nothing about the artifact
+        # at all; a draft pass says something real about it and cannot corroborate any of it. A
+        # reader who conflated the two would either throw away findings worth acting on or cite
+        # agreement counts that are one mind agreeing with itself. `lib/drafts.py` owns the
+        # sentence, so the flag, the banner and this paragraph cannot drift apart.
+        prologue = drafts_lib.PROLOGUE
 
     lines = []
     for seat in manifest.get("seats") or []:
@@ -1337,8 +1391,10 @@ def judgment_request(context):
         "note": (
             "Write judgment.json in this directory against schemas/judgment-patch.schema.json, then re-run reconcile.py "
             "with --judgment. Provisional tiers are computed before your claim joins and splits and are recomputed after "
-            "them; label every cluster that is a singleton or corroborated-same-family AFTER the merge. Any member listed "
-            "in `anchor_drops` quoted text that is not in the pinned artifact and is already out of the clusters below."
+            "them; label every cluster whose members are all one family AFTER the merge — every `singleton`, every "
+            "`same-family` and every `corroborated-same-family` — because one family agreeing with itself is one mind "
+            "whether it is one seat or four. Any member listed in `anchor_drops` quoted text that is not in the pinned "
+            "artifact and is already out of the clusters below."
         ),
         "clusters": entries,
     }

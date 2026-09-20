@@ -99,6 +99,15 @@ SYNTHESIS_CONTEXT = ["reconciliation.md", "finding-schema.md"]
 LIVE_PANELS = ("spec-review", "research-report", "design-decision")
 DEFERRED_PANELS = ("code-review",)
 
+# **The draft panel is live and is deliberately outside two of the rules below.** It seats four
+# `claude` seats on one family, which is the whole point of it: `--draft` composes against the
+# harness connector, so every seat is a subagent on the owner's plan and there is no second family
+# to be had at any price. The no-Claude rule and the distinct-families rule are rules about the
+# panels that **gate** a document, and this one is written down as not being one — its own
+# description says so and its reconciliation opens by saying so. It is named here rather than
+# quietly excluded, and `DraftPanelTest` below asserts the exception rather than only permitting it.
+DRAFT_PANELS = ("draft-review",)
+
 TIERS = ("frontier", "standard", "fast")
 
 
@@ -384,9 +393,9 @@ class PanelTemplateShapeTest(unittest.TestCase):
         "verify_web": bool,
     }
 
-    def test_the_directory_holds_exactly_the_four_templates_the_spec_ships(self):
+    def test_the_directory_holds_exactly_the_templates_the_spec_ships(self):
         self.assertEqual(sorted(panel_files()),
-                         sorted(name + ".json" for name in LIVE_PANELS + DEFERRED_PANELS))
+                         sorted(name + ".json" for name in LIVE_PANELS + DRAFT_PANELS + DEFERRED_PANELS))
 
     def test_every_template_names_itself_and_says_what_it_is_for(self):
         for name in panel_files():
@@ -421,9 +430,17 @@ class PanelTemplateShapeTest(unittest.TestCase):
                                   "a template naming a lens nobody wrote fails at Resolve, after the run directory is claimed")
                     self.assertTrue(seat.get("family"))
 
-    def test_no_shipped_template_seats_a_claude_family(self):
-        """The owner's 2026-09-18 decision of record, and the templates are where it is visible."""
+    def test_no_gating_template_seats_a_claude_family(self):
+        """The owner's 2026-09-18 decision of record, and the templates are where it is visible.
+
+        It is a rule about the panels a document is **promoted** on, and the 2026-09-19 ruling that
+        added the draft pass said so in as many words: Opus is allowed on subscription early-draft
+        reviewer seats, and the once-per-stage gate still seats no Claude family. So every template
+        but the draft one is held to it, and the draft one is held to the opposite assertion below.
+        """
         for name in panel_files():
+            if name[:-5] in DRAFT_PANELS:
+                continue
             panel = read_panel(name)
             families = [seat.get("family") for seat in (panel.get("seats") or []) + (panel.get("optional_seats") or [])]
             with self.subTest(panel=name):
@@ -506,6 +523,62 @@ class PanelTemplateShapeTest(unittest.TestCase):
                     with self.subTest(panel=name, seat=seat.get("lens"), tier=tier):
                         self.assertTrue(entry["tiers"][tier].get(seat["family"]),
                                         "no cell for `{0}` at {1}".format(seat["family"], tier))
+
+
+class DraftPanelTest(unittest.TestCase):
+    """The draft template, as data. It is the one live panel two of the rules above exempt, so what
+    it is instead has to be asserted rather than merely allowed.
+
+    Every clause here is a decision somebody made and could quietly undo: that the draft panel
+    carries the measured lens set rather than a cheaper one, that every seat is `claude` because
+    the harness leg has one family and nothing else, that its family target is 1 because a
+    single-family pass is first-class, and that it declares itself reference-free although it seats
+    a citing lens — which is only honest because a reference-free draft run **retires** that seat
+    instead of refusing, and `test_draft_mode.py` is where that is proved end to end.
+    """
+
+    LIVE_FIELDS = PanelTemplateShapeTest.LIVE_FIELDS
+
+    def setUp(self):
+        self.name = DRAFT_PANELS[0]
+        self.panel = read_panel(self.name + ".json")
+
+    def test_it_is_a_live_template_and_carries_the_full_field_set(self):
+        self.assertNotIn("deferred", self.panel)
+        for field, kind in self.LIVE_FIELDS.items():
+            self.assertIsInstance(self.panel.get(field), kind, "missing or mistyped `{0}`".format(field))
+        self.assertIn(self.panel["tier"], TIERS)
+        self.assertIn(self.panel["reconciler"], ("host", "synthesis", "default"))
+
+    def test_it_seats_the_same_four_lenses_as_the_measured_panel(self):
+        """The draft pass is a cheap *run*, not a cheap *review*: same lenses, different leg."""
+        self.assertEqual([seat["lens"] for seat in self.panel["seats"]],
+                         [seat["lens"] for seat in read_panel("spec-review.json")["seats"]])
+
+    def test_every_seat_is_claude_and_the_family_target_is_one(self):
+        self.assertEqual({seat["family"] for seat in self.panel["seats"]}, {"claude"})
+        self.assertEqual(self.panel["min_families"], 1,
+                         "the harness leg serves one family; a target of 2 would warn about a "
+                         "shortfall the mode is defined by")
+
+    def test_it_is_the_only_shipped_template_that_seats_claude(self):
+        others = [name for name in panel_files() if name[:-5] not in DRAFT_PANELS]
+        for name in others:
+            families = [seat.get("family")
+                        for seat in (read_panel(name).get("seats") or [])
+                        + (read_panel(name).get("optional_seats") or [])]
+            with self.subTest(panel=name):
+                self.assertNotIn("claude", families)
+
+    def test_it_declares_itself_reference_free_although_it_seats_a_citing_lens(self):
+        citing = set(run_panel.REFERENCE_REQUIRED_LENSES)
+        self.assertTrue({seat["lens"] for seat in self.panel["seats"]} & citing)
+        self.assertIs(self.panel["requires_references"], False,
+                      "the draft pass is the mode for a seed document with no source of truth")
+
+    def test_its_description_says_it_is_not_a_gate(self):
+        self.assertIn("--draft", self.panel["description"])
+        self.assertIn("not a gate", self.panel["description"])
 
 
 class RegistryFamilyTest(unittest.TestCase):

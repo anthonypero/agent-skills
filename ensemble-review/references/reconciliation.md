@@ -27,7 +27,7 @@ Two things in that sequence are load-bearing.
 
 **Splits run before joins.** A mechanically joined pair the patch pulls apart usually exists precisely so one half can be joined to something else; running the joins first would leave that half unreachable.
 
-**Tiers are recomputed after the merge.** A tier computed before the joins is a tier computed against the wrong member set: two provisional singletons the patch merges are a `consensus` cluster afterwards, and a mechanically joined pair the patch splits is two singletons. Two patch errors fall straight out of that recompute, and both re-ask the supplier — a post-merge `singleton` or `corroborated-same-family` cluster with **no label**, and a **label that lands on a cluster that is no longer one of those two tiers**. Both mean the supplier judged a different member set than the one that survived.
+**Tiers are recomputed after the merge.** A tier computed before the joins is a tier computed against the wrong member set: two provisional singletons the patch merges are a `consensus` cluster afterwards, and a mechanically joined pair the patch splits is two singletons. Two patch errors fall straight out of that recompute, and both re-ask the supplier — a post-merge cluster whose members are all one family (`singleton`, `same-family` or `corroborated-same-family`) with **no label**, and a **label that lands on a cluster that is no longer one of those three tiers**. Both mean the supplier judged a different member set than the one that survived.
 
 ## Step 1 — collect and validate
 
@@ -65,11 +65,13 @@ Ordered and exhaustive; first match wins. `R` is the number of **reporting** sea
 | --- | --- | --- | --- |
 | 1 | `unanimous` | Every **expected** seat is a member, and `n_families >= 2` | The whole commissioned panel agrees, across families |
 | 2 | `consensus` | `n_families >= 2` | Cross-family corroboration — the strongest evidence this skill produces |
-| 3 | `majority` | `n_reviewers >= 2`, `n_reviewers > R/2`, one family | Several lenses, one mind |
-| 4 | `corroborated-same-family` | `n_reviewers >= 2`, `n_reviewers <= R/2`, one family | Two of four seats from one family |
+| 3 | `same-family` | `n_reviewers >= 2`, `n_reviewers > R/2`, one family | Several lenses, one mind — labelled below |
+| 4 | `corroborated-same-family` | `n_reviewers >= 2`, `n_reviewers <= R/2`, one family | Two of four seats from one family — labelled below |
 | 5 | `singleton` | `n_reviewers = 1` | One seat, labelled below |
 
-**The denominator differs by tier on purpose.** `unanimous` counts **expected** seats, so a panel with any missing seat cannot mint it. `majority` and `corroborated-same-family` count **reporting** seats, because a retired seat cannot vote either way. The `n_reviewers >= 2` floor on both same-family tiers is what keeps `singleton` reachable at all: without it a one-seat panel would tier its clusters `majority` and skip the labelling duty.
+**The denominator differs by tier on purpose.** `unanimous` counts **expected** seats, so a panel with any missing seat cannot mint it. `same-family` and `corroborated-same-family` count **reporting** seats, because a retired seat cannot vote either way. The `n_reviewers >= 2` floor on both of them is what keeps `singleton` reachable at all: without it a one-seat panel would tier its clusters `same-family` and skip the labelling duty.
+
+**Tiers 3, 4 and 5 all owe a label**, because all three are one family and one family agreeing with itself is one mind whatever the count. Tier 3 was called `majority` and was the one that did not: it is unreachable with two families in it — tier 2 catches those — so the name promised corroboration the tier cannot carry, and on a single-family panel every multi-lens agreement rendered unlabelled under a "Single-seat" heading. They render under their own heading, **Same-family should-fixes — one family, uncorroborated**, and never under the single-seat one.
 
 Two cross-family agreements outrank three same-family agreements, and both counts are in the document so a reader can check the ruling.
 
@@ -97,7 +99,7 @@ A cluster the patch merged is addressable by any of the ids that went into it.
 
 ### `singleton_labels`
 
-`{cluster, label, reason}`. `label` is `blind-spot-catch` or `family-specific-false-positive`; `reason` is required and must be non-empty. Required for every **post-merge** `singleton` or `corroborated-same-family` cluster, and forbidden on any other. An unlabelled singleton is not an allowed output — one family agreeing with itself is one mind, and so is one seat.
+`{cluster, label, reason}`. `label` is `blind-spot-catch` or `family-specific-false-positive`; `reason` is required and must be non-empty. Required for every **post-merge** cluster whose members are all one family — `singleton`, `same-family` and `corroborated-same-family` — and forbidden on any other. An unlabelled singleton is not an allowed output — one family agreeing with itself is one mind, and so is one seat.
 
 ### `severities`
 
@@ -161,7 +163,7 @@ Nothing is written when any of these fails. The failing entries are named; inter
 - At most one entry per cluster in each array — two entries for one cluster would silently last-wins, and the loser is a judgment somebody wrote down that the product never carried.
 - Every `singleton_labels` entry carries a label from the enum and a non-empty reason; every disposition and severity is in its enum.
 - `method_caveat` is non-empty.
-- After the merge: every post-merge `singleton` and `corroborated-same-family` cluster is labelled, no label lands on a cluster that is not one of those, every cluster has a disposition, every cluster whose members disagree on severity has an arbitration, no finding lands in two final clusters, and no reference names a cluster the patch itself split.
+- After the merge: every post-merge `singleton`, `same-family` and `corroborated-same-family` cluster is labelled, no label lands on a cluster that is not one of those, every cluster has a disposition, every cluster whose members disagree on severity has an arbitration, no finding lands in two final clusters, and no reference names a cluster the patch itself split.
 
 ## Running it
 

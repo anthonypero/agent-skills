@@ -49,6 +49,10 @@ SLOW_MODEL = "test/slow-model"
 FAST_MODEL = "test/fast-model"
 THIRD_MODEL = "test/third-model"
 
+# The model a `--draft` test seats: served by the `harness` connector, priced at zero because a
+# spawn bills nothing, and carrying no effort ladder because the leg has no per-spawn knob.
+HARNESS_MODEL = "test/harness-opus"
+
 # Where a workspace override lives, relative to the project holding the artifact.
 WORKSPACE_SUBDIR = os.path.join(".agents", "ensemble-review")
 
@@ -216,6 +220,48 @@ class Workspace(object):
             "tier_order": list(config["tier_order"]) + [t for t in tiers if t not in config["tier_order"]],
         }))
         return self.model_path(model)
+
+    def harness_leg(self, model=HARNESS_MODEL, family="claude", tiers=("standard",),
+                    billing="subscription", connector_type="harness"):
+        """Add a `harness` connector and one model file on it, for a `--draft` run.
+
+        `--draft` selects the connector **by name** through the cascade, so the file goes into the
+        workspace override root like any other; the model file goes into this workspace's `models/`
+        directory, which is an operator path, so the packaged `claude-opus-5` never reaches a test's
+        tier map. The model carries no prices to guess at and no effort ladder — the harness leg has
+        no per-spawn effort parameter — which is the shape the shipped file has for the same reason.
+        """
+        self.override("connectors/harness.json", {
+            "name": "harness",
+            "type": connector_type,
+            "base_url": None,
+            "api_key_secret": None,
+            "api_key_env": None,
+            "catalogue_url": None,
+            "billing": billing,
+            "requires_approval": False,
+        })
+        _write_json(self.model_path(model), {
+            "id": model,
+            "connector": "harness",
+            "family": family,
+            "tiers": list(tiers),
+            "effort": None,
+            "effort_source": "not settable on the harness leg",
+            "input_price_per_token": 0,
+            "output_price_per_token": 0,
+            "context_limit": None,
+            "effort_vocabulary": None,
+            "output_token_prior": 16000,
+            "prior_source": "test fixture",
+            "min_max_tokens": None,
+        })
+        self.edit_config(lambda config: config.update({
+            "family_order": (list(config["family_order"]) + [family]
+                             if family not in config["family_order"] else config["family_order"]),
+            "tier_order": list(config["tier_order"]) + [t for t in tiers if t not in config["tier_order"]],
+        }))
+        return model
 
     def edit_config(self, mutate):
         """Apply `mutate` to this workspace's `config.json` in place."""

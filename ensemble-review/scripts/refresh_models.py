@@ -140,9 +140,33 @@ def seed_entry(model, now, connector=None, url=CATALOGUE_URL):
     }
 
 
-def refresh(models, catalogue, add=(), now=None, connector=None, url=CATALOGUE_URL):
-    """Apply the catalogue to `{model id: entry}` in place. Returns (changes, unknown, added)."""
+def foreign_models(models, connector):
+    """Model ids this connector's catalogue has no business refreshing, in sorted order.
+
+    A model file names the connector that serves it. A refresh runs against **one** endpoint's
+    catalogue, so a model bound to a different endpoint is not "missing from the catalogue" — it was
+    never that catalogue's to answer for, and reporting it as unknown would teach the operator to
+    ignore the line that means something. The harness leg is the live case: `claude-opus-5` is
+    served by a spawn, has no catalogue entry anywhere, and its zero price is a fact about the
+    subscription rather than a price the catalogue could refresh.
+
+    A model file naming no connector at all is still refreshed, so a registry written before the
+    field existed behaves exactly as it did.
+    """
+    if not connector:
+        return []
+    return sorted(model for model, entry in models.items()
+                  if (entry or {}).get("connector") and entry["connector"] != connector)
+
+
+def refresh(models, catalogue, add=(), now=None, connector=None, url=CATALOGUE_URL, skip=()):
+    """Apply the catalogue to `{model id: entry}` in place. Returns (changes, unknown, added).
+
+    `skip` names the models this catalogue does not answer for — see `foreign_models`. They are left
+    exactly as they stand and are not reported as unknown.
+    """
     now = now or datetime.date.today().isoformat()
+    skip = set(skip or ())
 
     added = []
     for model in add:
@@ -156,6 +180,8 @@ def refresh(models, catalogue, add=(), now=None, connector=None, url=CATALOGUE_U
     changes = []
     unknown = []
     for model in sorted(models):
+        if model in skip:
+            continue
         entry = models[model]
         record = catalogue.get(model)
         if record is None:
@@ -292,14 +318,19 @@ def main(argv=None):
         return 1
 
     models = dict(registry.models)
+    connector_name = (connector or {}).get("name")
+    foreign = foreign_models(models, connector_name)
     try:
         changes, unknown, added = refresh(
-            models, catalogue, args.add, connector=(connector or {}).get("name"), url=url)
+            models, catalogue, args.add, connector=connector_name, url=url, skip=foreign)
     except RuntimeError as failure:
         sys.stderr.write("{0}\n".format(failure))
         return 1
 
     print("catalogue: {0} model(s) from {1}".format(len(catalogue), url))
+    for model in foreign:
+        print("  other connector: {0} is served by {1!r}, not by this catalogue — untouched".format(
+            model, models[model].get("connector")))
     for model in added:
         print("  added    {0}  (facts from the catalogue; family, tiers and effort left null for you)".format(model))
     for change in changes:

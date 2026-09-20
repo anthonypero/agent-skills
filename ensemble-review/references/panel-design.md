@@ -21,6 +21,8 @@ One reviewer has one shape of blind spot. A panel earns its cost when that blind
 - **It is not finished enough to fault.** Reviewers rate by consequence, and a draft with three sections missing produces three seats' worth of "this section is missing". Outline-stage documents get a reader, not a panel.
 - **There are no source-of-truth documents and the question is fidelity.** A `fidelity` or `source-credibility` seat with nothing to cite is refused before the first paid call. If the question is "does this match the PRD", supply the PRD.
 
+**The $0 draft pass changes two of those answers.** `run_panel.py --draft` runs the whole panel on harness subagents on the owner's plan, so "not finished enough to fault" and "nobody will be held to it" stop being reasons not to run one: a draft pass costs nothing but the minutes, and it is the mode for a document still being written. What it cannot do is **corroborate** — one mind behind four lens prompts is one mind — so it never promotes a document. The once-per-stage promotion gate is still a multi-family panel and still seats no Claude family. Read a draft pass's findings one by one; never cite its agreement counts.
+
 **Scale the panel to the stakes.** Two seats, single-family, multi-lens is a quick check. Four seats across four families is the standard audit and is what every shipped live template composes. The ceiling — the full cross-product of families and lenses — is still available to an operator composing ad hoc, and was narrowed to four seats by default for budget reasons rather than because more stops helping.
 
 ## What a seat is
@@ -57,19 +59,20 @@ The catalog is nine lenses, and the boundary between overlapping pairs is the de
 
 Three rules follow from it.
 
-**Distinct families, not distinct models.** Two models from one vendor share training data, tokenizer and house style, and their blind spots correlate. A panel of four models from one family is `majority` at best on the tier table, and the table says so on purpose.
+**Distinct families, not distinct models.** Two models from one vendor share training data, tokenizer and house style, and their blind spots correlate. A panel of four models from one family is `same-family` at best on the tier table, and the table says so on purpose — that tier owes a label like a singleton does, because one family agreeing with itself is one mind.
 
 **`min_families` is a target, not a precondition.** Default 2. A run that cannot meet it proceeds, lens-diverse only, and the reconciliation's method caveat says so. One reporting family reads as **"lens-diverse only"**: several lenses, one mind, and no cluster in that run can carry cross-family corroboration at any tier.
 
 **No re-seat lands on `claude` unless the seat asked for it by name.** Claude is first in the config's declaration order, so without the rule every missing cell and every unreachable model would re-seat onto the one family the default panel is designed not to have.
 
-## The four shipped templates
+## The shipped templates
 
 | Template | Seats | Needs references | Use it for |
 | --- | --- | --- | --- |
 | `spec-review` | fidelity, buildability, consistency, adversarial — openai, glm, kimi, xai | yes | The measured panel. A spec, plan or technical-requirements document judged against its sources |
 | `research-report` | fidelity, source-credibility, completeness, adversarial — openai, kimi, glm, xai | yes | A report whose claims rest on cited sources. `verify_web` is off in v1, so the citing lenses judge the sources you supply rather than the live web |
 | `design-decision` | adversarial, alternatives, second-order — xai, openai, glm | no | The artifact is the argument. This is also where a run with no references lands |
+| `draft-review` | fidelity, buildability, consistency, adversarial — all four on `claude` | no | The **draft pass**, with `--draft`. Every seat a harness subagent on the subscription; $0, one family, no corroboration claim, never a gate. With no references the `fidelity` seat is retired rather than the run refused |
 | `code-review` | none | — | Ships **deferred**: a named stub routing to `/code-review` |
 
 A template is a starting point, not a wall: compose seats ad hoc, or drop an edited copy under `<workspace>/.agents/ensemble-review/panels/` and it replaces the shipped one whole.
@@ -110,6 +113,8 @@ Runs 4 and 5 reviewed identical bytes — both manifests record `artifact_revisi
 | `design-decision` | `fast` | 3 | $0.47 | $0.51 | $0.04 |
 
 `research-report` projects identically to `spec-review`: four seats on the same four families.
+
+**`draft-review` projects at $0.00 at every tier.** Its four seats resolve to `claude-opus-5` on the `harness` connector, which is `billing: subscription` and priced at zero per token — a spawn bills nothing — and its judgment is the harness judge's, which bills nothing either. The zero is an explicit price in the model file rather than a missing one, so the registry gate still looks at every seat before the run says it costs nothing. It runs only under `--draft`; without that flag the same template seats four Claude seats on the metered endpoint, which is the one way to spend real money on the draft panel.
 
 **The judgment call follows the run.** Its tier is the run's, not a fixed one — so `--tier fast` makes the judge cheap along with the reviewers, and the autonomous column falls with the tier as an operator reading it would expect. On every shipped panel the judge lands on `openai`, a family each of them already seats, so the judgment call runs on a model the run has already priced rather than in a corner of the tier map nothing else touches. `--synthesis-model` pins it outright, and a template may fix the judgment's own depth with a `synthesis: {"tier": …}` block when the judgment deserves more thought than the review did — that block is the one thing that outranks `--tier`.
 

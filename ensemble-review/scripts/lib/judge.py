@@ -420,7 +420,8 @@ def build_repair_prompt(original_user_prompt, raw_output, errors):
         "Re-emit the WHOLE patch as one corrected JSON object. Keep every judgment you already made "
         "and its reasoning; fix only what is named above. Remember that a cluster whose findings are "
         "all `judgment-call` is always `flag-for-human` from this author, that every post-merge "
-        "`singleton` and `corroborated-same-family` cluster needs a label and a reason, that every "
+        "cluster whose members are all one family — `singleton`, `same-family` and "
+        "`corroborated-same-family` — needs a label and a reason, that every "
         "cluster needs a disposition, and that you may not emit `rulings`. "
         "Return ONLY the JSON object — no prose, no code fence.",
     ])

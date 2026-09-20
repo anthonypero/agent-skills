@@ -336,15 +336,20 @@ class ShippedConfigTest(unittest.TestCase):
         self.assertEqual(self.registry.covers(named), [],
                          "every model the shipped config names must be in the shipped registry, priced")
 
-    def test_every_shipped_model_binds_all_three_abstract_levels_inside_its_own_vocabulary(self):
+    def test_every_shipped_model_with_a_ladder_binds_all_three_levels_inside_its_own_vocabulary(self):
         """The effort gate, run over the whole shipped registry rather than over one panel.
 
-        Every model file has to answer `light`, `standard` and `deep` with a word its own recorded
-        vocabulary contains, or the first run that asks for that level on that model is a
-        composition error nobody saw coming.
+        Every model file that records an effort ladder has to answer `light`, `standard` and `deep`
+        with a word its own vocabulary contains, or the first run that asks for that level on that
+        model is a composition error nobody saw coming.
+
+        A model with **no** recorded vocabulary is the separate case the next test covers: there is
+        no ladder to index, so there is nothing to bind and nothing to send.
         """
         for model in sorted(self.registry.models):
             entry = self.registry.get(model)
+            if not entry.get("effort_vocabulary"):
+                continue
             for level in registry_lib.EFFORT_LEVELS:
                 kind, value = registry_lib.effort_binding(entry, level, model)
                 self.assertEqual(kind, "word", "{0} binds {1} to something other than a rung".format(model, level))
@@ -352,10 +357,38 @@ class ShippedConfigTest(unittest.TestCase):
                                  "effort {0!r} on {1} is outside {2}".format(
                                      value, model, entry.get("effort_vocabulary")))
 
-    def test_every_model_file_names_the_connector_that_serves_it(self):
+    def test_a_model_with_no_ladder_is_sent_no_reasoning_parameter_and_says_why(self):
+        """The harness models. Effort is set in an installed agent file and there is no per-spawn
+        parameter, so the file records neither a vocabulary nor a map — and the binding has to come
+        back `none` rather than raising, or a draft run would fail its own effort gate."""
+        laddered = [m for m in self.registry.models if self.registry.get(m).get("effort_vocabulary")]
+        bare = [m for m in self.registry.models if not self.registry.get(m).get("effort_vocabulary")]
+        self.assertTrue(laddered, "the shipped registry has models with ladders")
+        for model in sorted(bare):
+            entry = self.registry.get(model)
+            self.assertIsNone(entry.get("effort"), "{0} maps levels it has no rungs for".format(model))
+            self.assertTrue(entry.get("effort_source"), "{0} does not say why it has no map".format(model))
+            for level in registry_lib.EFFORT_LEVELS:
+                self.assertEqual(registry_lib.effort_binding(entry, level, model), ("none", None))
+
+    def test_every_model_file_names_a_connector_that_this_package_ships(self):
+        """A model nothing serves is a model no run can seat. The connector need not be the run's —
+        the harness leg's models name `harness` and are seated only by `--draft` — but it has to be
+        a file, or a tier cell resolves to a model with nowhere to go."""
+        from lib import connectors as connectors_lib
+        available = set(connectors_lib.available(self.paths))
         for model in sorted(self.registry.models):
-            self.assertEqual(self.registry.get(model).get("connector"), self.connector["name"],
-                             "{0} names no connector, so no endpoint claims it".format(model))
+            name = self.registry.get(model).get("connector")
+            self.assertTrue(name, "{0} names no connector, so no endpoint claims it".format(model))
+            self.assertIn(name, available,
+                          "{0} names connector {1!r} and no root holds that file".format(model, name))
+
+    def test_the_run_connector_serves_every_model_its_own_tier_map_seats(self):
+        """The derived map is filtered by connector, so this is the statement that the filter works:
+        nothing the default endpoint's map seats is served by a different endpoint."""
+        for cells in self.entry["tiers"].values():
+            for model in cells.values():
+                self.assertEqual(self.registry.get(model).get("connector"), self.connector["name"])
 
     def test_the_derived_tier_map_is_the_map_the_spec_prints(self):
         """The migration's acceptance condition: the tiers x families map is no longer written

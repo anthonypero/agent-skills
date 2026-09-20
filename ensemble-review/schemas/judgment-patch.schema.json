@@ -57,7 +57,7 @@
     },
     "singleton_labels": {
       "type": "array",
-      "description": "Required for every POST-MERGE singleton or corroborated-same-family cluster, and forbidden on any other. Both conditions are checked after the tiers are recomputed, and either one re-asks the judgment supplier",
+      "description": "Required for every POST-MERGE cluster whose members are all one family — singleton, same-family and corroborated-same-family — and forbidden on any other. Both conditions are checked after the tiers are recomputed, and either one re-asks the judgment supplier",
       "items": {
         "type": "object",
         "additionalProperties": false,

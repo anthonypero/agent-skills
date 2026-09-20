@@ -23,7 +23,12 @@ example), and rejecting them would make the shipped catalog fail its own loader.
 
 # The template itself. `deferred` and `routes_to` belong to a named stub that seats nobody —
 # `code-review` — and are recognized on every template rather than only on that one, because the
-# loader runs before anything has decided whether this template is a stub.
+# loader runs before anything has decided whether this template is a stub. `draft_only` is the same
+# shape of key one step further on: a template whose seats only make sense on the harness leg says
+# so in its own file, and `run_panel.py` refuses to run it without `--draft`. It is a declaration
+# and not a mode — the flag still selects the endpoint — but without it `draft-review` run plainly
+# seated four Claude seats on the metered endpoint and billed for them, which is the one way the
+# draft panel could cost money.
 PANEL_KEYS = (
     "name",
     "description",
@@ -39,6 +44,7 @@ PANEL_KEYS = (
     "synthesis",
     "deferred",
     "routes_to",
+    "draft_only",
 )
 
 # One seat, in `seats` or in `optional_seats`. `suffix` is what lets one template seat the same lens

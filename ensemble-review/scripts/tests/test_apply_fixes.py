@@ -263,7 +263,7 @@ class FiveConditionsTest(GateTestCase):
 
     def test_condition_four_a_same_family_tier_with_two_families_recorded(self):
         """Both wordings are checked, so a tier table that moved cannot slip past the enum half."""
-        self._refused("same-family tier", [cluster(tier="majority")])
+        self._refused("same-family tier", [cluster(tier="same-family")])
 
     def test_condition_four_a_tier_neither_wording_knows(self):
         text = self._refused("the gate and the tier table disagree", [cluster(tier="plurality")])

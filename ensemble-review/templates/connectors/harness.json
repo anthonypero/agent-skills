@@ -1,0 +1,11 @@
+{
+  "name": "harness",
+  "description": "The orchestrating session's own agent harness, seated as an endpoint. There is no URL and no key: a seat bound here is spawned as a harness subagent by the session that ran the panel, writes its report to a seat-private staging path, and costs nothing beyond the plan the owner already pays for. This is the connector `run_panel.py --draft` composes against.",
+  "type": "harness",
+  "base_url": null,
+  "api_key_secret": null,
+  "api_key_env": null,
+  "catalogue_url": null,
+  "billing": "subscription",
+  "requires_approval": false
+}

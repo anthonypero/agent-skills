@@ -325,6 +325,27 @@ class ReplayTest(unittest.TestCase):
             self.assertTrue((cluster.get("singleton_reason") or "").strip(),
                             "{0} carries a label with no reason".format(cluster["id"]))
 
+    def test_no_cluster_here_is_a_same_family_agreement(self):
+        """**This is why the `same-family` tier changed nothing on this corpus, and it is asserted
+        rather than assumed.**
+
+        `same-family` and `corroborated-same-family` both mean "two or more seats, all of them one
+        family", and both now owe a label. No cluster of this frozen run is one — every multi-seat
+        cluster here crosses families — so the fixture's patch needs no new label and the replay's
+        dispositions are unchanged. A future frozen run that does carry one would silently need a
+        `singleton_labels` entry it does not have, and would fail somewhere far less legible than
+        here; this is the line that names it.
+        """
+        for cluster in self.clusters:
+            if cluster["n_reviewers"] >= 2:
+                self.assertGreaterEqual(
+                    cluster["n_families"], 2,
+                    "{0} is a same-family agreement of {1} seats; this corpus had none, so its "
+                    "judgment fixture owes it a label it does not carry".format(
+                        cluster["id"], cluster["n_reviewers"]))
+            self.assertNotIn(cluster["tier"], ("same-family", "corroborated-same-family"),
+                             cluster["id"])
+
     def test_every_labellable_cluster_is_labelled(self):
         for cluster in self.clusters:
             if cluster["tier"] in core.LABELLED_TIERS:

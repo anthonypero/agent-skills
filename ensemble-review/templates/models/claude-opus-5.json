@@ -1,0 +1,25 @@
+{
+  "id": "claude-opus-5",
+  "connector": "harness",
+  "family": "claude",
+  "tiers": [
+    "frontier",
+    "standard",
+    "fast"
+  ],
+  "effort": null,
+  "effort_source": "not settable: the harness leg has no per-spawn effort parameter, so this model binds no abstract level and is sent no reasoning parameter",
+  "input_price_per_token": 0,
+  "output_price_per_token": 0,
+  "context_limit": null,
+  "context_limit_source": "unknown, and unknown disables the overflow check for this model: nothing has measured the harness Opus window from inside this package and a number invented here would be a fact nobody established. `_overflows` treats a null limit as \"never refuses\", so a very large artifact on a draft pass is NOT caught by the pre-flight overflow check — it will fail at the spawn instead, where the turn is already spent. Fill this in once somebody knows it.",
+  "effort_vocabulary": null,
+  "price_source": "subscription — a spawn on this connector bills nothing per call, so the price is zero rather than unknown",
+  "source": null,
+  "refreshed_at": null,
+  "output_token_prior": 16000,
+  "prior_source": "default — no measured run seats this model, and the projection prices it at zero either way",
+  "min_max_tokens": null,
+  "measured_output_price": null,
+  "measured_output_price_source": "the harness leg is not billed per token"
+}

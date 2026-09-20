@@ -65,7 +65,7 @@ EXIT_ABORTED = 3
 # if the tier table ever gains a cross-family tier, the two disagree and the gate says so rather
 # than quietly applying under a tier nobody weighed.
 CROSS_FAMILY_TIERS = ("consensus", "unanimous")
-SAME_FAMILY_TIERS = ("majority", "corroborated-same-family", "singleton")
+SAME_FAMILY_TIERS = ("same-family", "corroborated-same-family", "singleton")
 
 AUTHORSHIP_FLAG = "--i-authored-this"
 

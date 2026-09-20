@@ -47,11 +47,13 @@ skills/ensemble-review/
 ├── templates/
 │   ├── config.json                 # run-wide defaults: the connector, the tier, the effort level, the two declaration orders
 │   ├── connectors/openrouter.json  # one endpoint per file: driver, base URL, key source, catalogue, routing, billing posture
+│   ├── connectors/harness.json     # the session's own agent harness as an endpoint: subscription, no key, no URL
 │   ├── models/<author>__<slug>.json # one model per file: catalogue facts plus the choices — connector, family, tiers, effort map
 │   └── panels/
 │       ├── spec-review.json        # the measured four-lens panel
 │       ├── research-report.json    # fidelity, source-credibility, completeness, adversarial
 │       ├── design-decision.json    # adversarial, alternatives, second-order — needs no references
+│       ├── draft-review.json       # the draft pass: the same four lenses, all on harness Claude, --draft only
 │       └── code-review.json        # a named stub: deferred, routes to /code-review
 └── scripts/
     ├── dispatch.py                 # one persona × one family → a validated report on disk; the shared call machinery
@@ -62,9 +64,11 @@ skills/ensemble-review/
     ├── refresh_models.py           # pull the OpenRouter catalogue, diff the registry, report what moved
     ├── backends/__init__.py        # load_driver: a package module, or a driver at a file path
     ├── backends/base.py            # the connector contract: what a driver exports and what it returns
-    ├── backends/openai_compat.py   # the only shipped driver: POST {base_url}/chat/completions
+    ├── backends/openai_compat.py   # the one calling driver: POST {base_url}/chat/completions
+    ├── backends/harness.py         # the harness leg's driver, written as a refusal: it never calls anywhere
     ├── lib/paths.py                # the three-root cascade: project, this machine, then the read-only package
     ├── lib/connectors.py           # connector files, the billing postures and the spend gate
+    ├── lib/drafts.py               # the draft pass: the harness connector, the refusals, the spawn block, the caveat
     ├── lib/seating.py              # tier resolution order, family constraints, re-seating
     ├── lib/judge.py                # who supplies the judgment, where it is seated, what it is shown
     ├── lib/report.py               # agent-file parsing, validation, rendering, digests
@@ -80,6 +84,7 @@ skills/ensemble-review/
         ├── test_paths.py           # the cascade, the config merge, a panel with the package read-only
         ├── test_seating.py         # the tier order, the constraints, both re-seat paths
         ├── test_catalog.py         # every persona and every panel template, checked as data
+        ├── test_draft_mode.py      # --draft: the refusals, the $0 projection, the spawn block, the caveat
         ├── test_panel_selection.py # inference, the references rule, the deferred stub
         ├── test_min_families.py    # the family target, counted at both ends, never a gate
         ├── test_reconcile_revision.py  # the artifact-revision check
