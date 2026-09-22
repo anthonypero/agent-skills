@@ -88,6 +88,12 @@ while IFS=$'\t' read -r s name; do
     continue
   fi
   if [ "$s" = "$self" ]; then echo "skip (self):   $s"; continue; fi
+  # Never type into a pane with no claude in it -- "/rc" would land at a shell prompt.
+  if [ -z "$(fc_claude_pid "$s")" ]; then
+    echo "NO CLAUDE:     $s  (not running in the pane -- its keep-alive or launchd-restart.sh must relaunch it)"
+    dark=$((dark + 1)); continue
+  fi
+  if fc_rc_armed "$s"; then echo "already armed: $s  ($name)"; armed=$((armed + 1)); continue; fi
 
   # Inject the command, then submit with a SEPARATE C-m — Claude's TUI treats a fast trailing
   # Enter as a newline (paste), so the carriage return must be sent on its own to actually
@@ -97,13 +103,9 @@ while IFS=$'\t' read -r s name; do
   tmux send-keys -t "$s" C-m
 
   # Verify (wait up to ~30s — session creation can exceed 10s on slow/relayed networks).
-  # Read the FOOTER STATUS LINE ONLY: a whole-pane grep also sees the transcript, so a
-  # session that merely PRINTS a look-alike string self-reports as armed. Both the footer
-  # format and the armed indicator are CLAUDE-VERSION-DEPENDENT (verified 2026-08-07 on two
-  # live machines): new TUIs render "… | Context: 7% used | Effort: xhigh    /rc" (bare,
-  # right-aligned "/rc"); older ones "Model: … | Context: 10% used  /rc active" with no
-  # "Effort:" token. So locate the footer with the version-agnostic 'Context: (--|N% used)'
-  # and accept all three indicator forms on THAT line.
+  # Armed state is read from claude's own session file (fc_rc_armed in lib.sh), never from the
+  # pane: claude 2.1.269+ no longer shows "/rc" in the footer, so the old footer check reported
+  # every healthy session STILL DARK (2026-09-22).
   # BUT /rc on an ALREADY-armed session opens a management menu ("available in the Claude
   # mobile app") instead — that also means connected, so treat it as success and press Esc
   # to dismiss the menu (otherwise the session is left stuck on it).
@@ -113,8 +115,8 @@ while IFS=$'\t' read -r s name; do
     if printf '%s' "$pane" | grep -q "available in the Claude mobile app"; then
       tmux send-keys -t "$s" Escape; ok=1; break
     fi
-    footer="$(printf '%s' "$pane" | grep -E 'Context: (--|[0-9]+% used)' | tail -1 || true)"
-    if printf '%s' "$footer" | grep -Eq '(^|[[:space:]])/rc[[:space:]]*$|Remote Control active|/rc active'; then ok=1; break; fi
+    # Armed state comes from claude's session file, not the footer (see fc_rc_armed).
+    if fc_rc_armed "$s"; then ok=1; break; fi
     sleep 1
   done
   if [ "$ok" -eq 1 ]; then

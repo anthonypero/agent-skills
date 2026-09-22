@@ -95,7 +95,10 @@ restart_one() {
   [ "$gone" -eq 1 ] || { echo "SKIP $s: process ($cpid) still alive after /exit"; return 1; }
 
   # --- relaunch with --continue (noglob shields bracketed model ids like opus[1m]) ---
-  tmux send-keys -t "$s" -l "noglob $launch --continue"; sleep 1; tmux send-keys -t "$s" C-m; sleep 2
+  # `env` is load-bearing: LAUNCH lines start with VAR=value assignments, and zsh's noglob
+  # precommand does not accept them ("command not found: CLAUDE_CODE_...=0") -- 2026-09-22 that
+  # left three sessions exited at a bare shell prompt. `noglob env VAR=1 cmd` works.
+  tmux send-keys -t "$s" -l "noglob env $launch --continue"; sleep 1; tmux send-keys -t "$s" C-m; sleep 2
   # Big sessions prompt: "Resume from summary / Resume full session". Default = summary.
   pane="$(tmux capture-pane -t "$s" -p 2>/dev/null || true)"
   if printf '%s' "$pane" | grep -q "Resume from summary"; then

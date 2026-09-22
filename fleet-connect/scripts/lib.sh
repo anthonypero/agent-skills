@@ -86,6 +86,30 @@ fc_is_live() {
 
 fc_tmux_sessions() { tmux list-sessions -F '#{session_name}' 2>/dev/null || true; }
 
+# The pid of the claude running directly in a session's pane (the pane shell's child), or
+# nothing. ps, not pgrep: claude rewrites its process title and pgrep misses it on macOS.
+fc_claude_pid() {
+  local pp
+  pp=$(tmux display-message -p -t "$1" '#{pane_pid}' 2>/dev/null) || return 1
+  [ -n "$pp" ] || return 1
+  ps -Ao ppid=,pid=,command= | awk -v p="$pp" '$1==p && index($0,"claude") {print $2; exit}'
+}
+
+# RC armed = claude's per-session state file (~/.claude/sessions/<pid>.json) carries a
+# non-empty "bridgeSessionId" -- present only while the Remote Control bridge is up.
+# claude 2.1.269+ dropped the "/rc" footer indicator (armed and unarmed footers are
+# byte-identical), so pane scraping can no longer tell. Ported from the handyman keepalives
+# (laptop 121f86a, Studio 6133469). The pid re-check guards against a recycled pid.
+fc_rc_armed() {
+  local pid f
+  pid=$(fc_claude_pid "$1") || return 1
+  [ -n "$pid" ] || return 1
+  f="$HOME/.claude/sessions/$pid.json"
+  [ -r "$f" ] || return 1
+  grep -q "\"pid\":${pid}[,}]" "$f" || return 1
+  grep -q '"bridgeSessionId":"[^"]\{1,\}"' "$f"
+}
+
 # The session this script is running inside, if any — never poke yourself.
 # FC_SELF_SESSION overrides the tmux lookup; it exists so the self-skip can be exercised
 # from a test harness that is not itself running inside the session under test.
