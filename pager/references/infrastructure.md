@@ -12,7 +12,7 @@ All channels ride the same plumbing: Zoho hosts `anthonypero.com` (catch-all del
 - `gws auth login` must exclude Keep: `--services gmail,calendar,drive,docs,sheets,slides,tasks,chat,forms,contacts` (Keep scopes are Workspace-only and 400 the whole flow).
 - Mark-processed = remove UNREAD: `gws gmail label <message-id> --remove UNREAD`. The poller deliberately leaves messages unread; mark read only after acting.
 - The channel label lives in the user's personal Gmail, which their phone also reads — the Gmail filter should include **Skip the Inbox** so a phone glance can't consume the unread marker the poller depends on.
-- If a label name misbehaves in `label:` queries, resolve the label ID once (`gws gmail labels`) and query by ID instead.
+- **`label:` queries match label NAMES, never IDs.** `label:Label_NNNN` returns zero results silently — the poller then sleeps forever while messages pile up unread (2026-09-11). Always pass the label name to `poll.sh --label`; `poll.sh` now resolves an ID to its name as a guard. If a name has odd characters, quote it: `label:"name"`. Label IDs are for `gws gmail label-info` / API calls only.
 
 ## Known channels
 

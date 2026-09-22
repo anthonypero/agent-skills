@@ -36,7 +36,21 @@ if [[ -z "$LABEL" ]]; then
     exit 64
 fi
 
-QUERY="label:${LABEL} is:unread"
+# Gmail's `label:` search operator matches label NAMES only — a label ID
+# (Label_NNNN) silently matches nothing and the poller sleeps forever
+# (2026-09-11: a 12:42 instruction sat unread for six hours). If handed an
+# ID, resolve it to the name; refuse to start if that fails.
+if [[ "$LABEL" == Label_* ]]; then
+    resolved=$(gws gmail label-info --id "$LABEL" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name",""))' 2>/dev/null)
+    if [[ -z "$resolved" ]]; then
+        echo "poll.sh: --label '$LABEL' looks like a label ID and could not be resolved to a name; pass the label NAME (gws gmail labels)" >&2
+        exit 64
+    fi
+    echo "poll.sh: resolved label ID $LABEL -> name '$resolved'"
+    LABEL="$resolved"
+fi
+
+QUERY="label:\"${LABEL}\" is:unread"
 [[ -n "$EXTRA_QUERY" ]] && QUERY="$QUERY $EXTRA_QUERY"
 
 elapsed=0
