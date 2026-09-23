@@ -31,7 +31,7 @@ The base `variables` skill resolves a `${VARIABLE_NAME}` from the project's sing
 
 | This session is working on… | Resolve `${VAR}` from, in order |
 | --- | --- |
-| **One subproject** | 1. `.agents/subprojects/<subproject>/variables.md` → 2. metaproject-root `AGENTS.md` defaults, except `PROJECT_DIR` (below) |
+| **One subproject** | 1. `.agents/subprojects/<subproject>/variables.md` → 2. metaproject-root `AGENTS.md` defaults, with one exception for `PROJECT_DIR` (below) |
 | **The metaproject itself** | metaproject-root `AGENTS.md` defaults only |
 
 - A subproject's `variables.md` holds **only overrides** — the variables whose value differs from
@@ -39,9 +39,10 @@ The base `variables` skill resolves a `${VARIABLE_NAME}` from the project's sing
   (`GITHUB`, the default `WEB_ROOT`/`REPO_DIR`, …) live once at the root; a subproject lists only
   what it changes (e.g. its own `REPO_DIR`/`WEB_ROOT` when its work lives elsewhere, in a separate
   repo or checkout).
-- **`PROJECT_DIR` defaults to the work folder.** A subproject's `PROJECT_DIR` is
-  `<metaproject>/subprojects/<subproject>`, where `<metaproject>` is the root's `PROJECT_DIR`,
-  unless its `variables.md` sets one. It does not fall through to the root value.
+- **`PROJECT_DIR` defaults to the work folder when it exists.** A value in the subproject's
+  `variables.md` always wins. Otherwise, when `<metaproject>/subprojects/<subproject>/` exists,
+  where `<metaproject>` is the root's `PROJECT_DIR`, that folder is the subproject's `PROJECT_DIR`.
+  When it does not exist, `PROJECT_DIR` falls through to the root value like any other token.
 - **`<subproject>`** is the active subproject's directory name, the same under
   `.agents/subprojects/` and `subprojects/`, determined exactly as in `session-metaproject`: an
   explicit `/session <subproject> …` token, the plainly-single subproject in play, or inference

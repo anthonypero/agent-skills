@@ -56,9 +56,9 @@ named in this particular repo). The consuming repo supplies the taxonomy:
 - **Explicit is best** — the `/session <subproject> <action>` command form (below) lets the user
   name the subproject directly, so most of the time the skill needs no taxonomy at all.
 - **Otherwise infer, and let the repo guide the inference** — the repo's `AGENTS.md`/`CLAUDE.md`
-  is the place to state what its subprojects are (e.g. "subprojects are the packages under
-  `packages/`," or "the skills under `skills/`"). If neither a token nor a clear repo convention
-  resolves it, ask which subproject — or treat the session as metaproject.
+  is the place to state what its subprojects are (e.g. "each client site is a subproject"). If
+  neither a token nor a clear repo convention resolves it, ask which subproject — or treat the
+  session as metaproject.
 
 ### Naming the subproject in the command
 
