@@ -43,7 +43,7 @@ Per-host mode with an unknown host: **stop and ask the user which host this is**
 
 `.agents/scripts/` and `.agents/assets/` hold only what the agent itself uses. `.agents/scripts/` holds the utilities the agent writes to manage the project; it is not the project's work product. `.agents/assets/` holds diagrams and reference files for the agent's own docs. Scripts that are part of the work, the things a person or program runs to do the job, go in `scripts/` at the project root or in `subprojects/<subproject>/scripts/`. Data the work reads or produces sits next to the work it serves.
 
-For example, a project's build, publish, and provisioning scripts run the project itself, so they go in `scripts/`; a one-off utility the agent wrote to clean up some data or standardize filenames stays in `.agents/scripts/`. The test is whether the project needs the script to do its job, or the agent wrote it to manage the project.
+For example, a project's build, publish, and provisioning scripts run the project itself, so they go in `scripts/`; a one-off utility the agent wrote to clean up some data stays in `.agents/scripts/`. The test is whether the project needs the script to do its job, or the agent wrote it to manage the project. A script bundled inside a skill (`.agents/skills/<skill>/scripts/`) is part of that skill and stays with it; what it produces is the work.
 
 Where the work goes in a metaproject:
 
