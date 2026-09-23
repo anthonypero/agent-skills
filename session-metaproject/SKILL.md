@@ -22,7 +22,14 @@ Each subproject has two homes, both named `<subproject>`:
 
 A subproject never gets its own `AGENTS.md`/`CLAUDE.md`; its instructions live under
 `.agents/subprojects/<subproject>/`. A subproject whose work lives elsewhere, such as a separate
-repo, points at it from its `variables.md` (e.g. `REPO_DIR`).
+repo, points at it from its `variables.md`: `SUBPROJECT_DIR` for the work folder, plus `REPO_DIR`
+when the work is a repo of its own.
+
+## What goes where
+
+What belongs in `.agents/` and what is the work, where one subproject's work and shared work go,
+and where scripts go is the layout rule in the `session` skill, under "What goes where". It applies
+unchanged in a metaproject.
 
 ## The only override: where notes and restart live
 
@@ -34,7 +41,7 @@ restart by which one it's working on:
 | This session is working on… | Notes path | Restart path |
 | --- | --- | --- |
 | **The metaproject** — repo-wide / shared concerns; no single subproject is the deliverable | `.agents/notes/YYYY-MM-DD-n.md` *(session's normal path)* | `.agents/restart.md` *(session's normal path)* |
-| **One subproject** — the deliverable is one subproject's work, in `subprojects/<subproject>/` or wherever its `variables.md` points | `.agents/subprojects/<subproject>/notes/YYYY-MM-DD-n.md` | `.agents/subprojects/<subproject>/restart.md` |
+| **One subproject** — the deliverable is one subproject's work, in `subprojects/<subproject>/` or wherever its `SUBPROJECT_DIR` points | `.agents/subprojects/<subproject>/notes/YYYY-MM-DD-n.md` | `.agents/subprojects/<subproject>/restart.md` |
 
 The boundary is "what's the deliverable?" — the repo's shared machinery (metaproject) vs. one
 subproject's work. When a session genuinely does both, treat it as metaproject.
@@ -65,7 +72,7 @@ named in this particular repo). The consuming repo supplies the taxonomy:
 `session`'s `$ARGUMENTS` may be **augmented with a leading subproject token** in front of the
 action, so the tier can be addressed explicitly instead of inferred:
 
-```
+```text
 /session <subproject> start     # e.g. /session payments start
 /session <subproject> notes
 /session <subproject> wrap

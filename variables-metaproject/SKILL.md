@@ -18,10 +18,15 @@ Each subproject has two homes, both named `<subproject>`:
 - **`.agents/subprojects/<subproject>/`** is the subproject's equivalent of a project's `.agents/`:
   its `restart.md`, `notes/`, `docs/`, `variables.md`, and `PROJECT_SECRETS.md`.
 - **`subprojects/<subproject>/`**, at the repo root, is where the subproject's work happens and
-  lives: its working files and folders.
+  lives: its working files and folders. `SUBPROJECT_DIR` defaults to it (below).
 
 A subproject never gets its own `AGENTS.md`/`CLAUDE.md`; its instructions live under
-`.agents/subprojects/<subproject>/`.
+`.agents/subprojects/<subproject>/`. What belongs in each home, where work shared by several
+subprojects goes, and where scripts go is the layout rule in the `session` skill, under "What goes
+where".
+
+**Subprojects are listed by their folders only.** A metaproject's subprojects are the folder names
+under `.agents/subprojects/`. `agentic-project.json` does not list them.
 
 ## The only override: where variable values come from
 
@@ -59,7 +64,7 @@ A subproject's `variables.md` opens with the line:
 
 > Resolved by the variables-metaproject skill; overrides metaproject-root values.
 
-then lists overrides as `- **NAME** = ` followed by the value in backticks. Keep it to genuine
+then lists overrides as `- **NAME** =` followed by the value in backticks. Keep it to genuine
 overrides; do not restate values that match the root defaults.
 
 Everything else in `variables` applies unchanged.
