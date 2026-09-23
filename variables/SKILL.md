@@ -29,9 +29,10 @@ If a variable is undefined in all sources, ask the user.
 
 ## Common Variables
 
-| Variable         | Purpose                                              |
-|:-----------------|:-----------------------------------------------------|
-| `${PROJECT_DIR}` | Absolute path to the project workspace root          |
-| `${REPO_DIR}`    | Git repository root (may differ from `PROJECT_DIR`)  |
-| `${WEB_ROOT}`    | Web asset serving directory (`src/`, `public/`, etc.)|
-| `${ENV}`         | Environment descriptor (`production`, `development`) |
+| Variable            | Purpose                                                                              |
+|:--------------------|:-------------------------------------------------------------------------------------|
+| `${PROJECT_DIR}`    | Absolute path to the project workspace root                                          |
+| `${REPO_DIR}`       | Git repository root (may differ from `PROJECT_DIR`)                                  |
+| `${WEB_ROOT}`       | Web asset serving directory (`src/`, `public/`, etc.)                                |
+| `${ENV}`            | Environment descriptor (`production`, `development`)                                 |
+| `${SUBPROJECT_DIR}` | Metaprojects only: the active subproject's work folder (see `variables-metaproject`) |

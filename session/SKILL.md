@@ -29,3 +29,26 @@ cat ~/.config/agents/host 2>/dev/null || printf '%s\n' "$AGENTS_HOST"
 ```
 
 Per-host mode with an unknown host: **stop and ask the user which host this is**, offering the directories under `.agents/hosts/` as the options, and offer to write their answer to `~/.config/agents/host` so the next session resolves on its own. Never guess the host, never fall back to flat mode, and never write into another host's subtree.
+
+## What goes where
+
+**`.agents/` is the agent's memory of the work. Everything else is the work.** This holds in every project, not only in metaprojects. The test: does a person or a program use it to do the job, or does the agent use it to remember the job?
+
+| `.agents/` (project) or `.agents/subprojects/<subproject>/` (subproject) | The work |
+| --- | --- |
+| `restart.md`, session notes | inputs and outputs: reports, images, exports |
+| plans, briefs, decisions, and research the agent wrote | data the work reads or produces, caches included |
+| `variables.md`, `PROJECT_SECRETS.md` | scripts and tooling that do the work |
+| skills (instructions for the agent) | links to the work's external pieces, such as a theme repo |
+
+`.agents/scripts/` and `.agents/assets/` hold only what the agent itself uses. `.agents/scripts/` holds the utilities the agent writes to manage the project; it is not the project's work product. `.agents/assets/` holds diagrams and reference files for the agent's own docs. Scripts that are part of the work, the things a person or program runs to do the job, go in `scripts/` at the project root or in `subprojects/<subproject>/scripts/`. Data the work reads or produces sits next to the work it serves.
+
+For example, a project's build, publish, and provisioning scripts run the project itself, so they go in `scripts/`; a one-off utility the agent wrote to clean up some data or standardize filenames stays in `.agents/scripts/`. The test is whether the project needs the script to do its job, or the agent wrote it to manage the project.
+
+Where the work goes in a metaproject:
+
+- **One subproject's work** goes in `subprojects/<subproject>/`, or wherever its `SUBPROJECT_DIR` points (see `variables-metaproject`).
+- **Work shared by several subprojects** stays at the metaproject root. Examples are a `gdrive` link and shared tooling.
+- **Scripts** go in a folder named `scripts/`, not `bin/`. A script used by one subproject goes in `subprojects/<subproject>/scripts/`. A shared script goes in `scripts/` at the root.
+
+**Subprojects are listed by their folders only.** A metaproject's subprojects are the folder names under `.agents/subprojects/`. `agentic-project.json` does not list them.
