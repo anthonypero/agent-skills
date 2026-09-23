@@ -13,6 +13,17 @@ its own unit of work, with its own deliverable) alongside repo-wide, shared conc
 as a subproject and how it's named is defined by the consuming repo — see *Where the subproject
 identity comes from* below.
 
+Each subproject has two homes, both named `<subproject>`:
+
+- **`.agents/subprojects/<subproject>/`** is the subproject's equivalent of a project's `.agents/`:
+  its `restart.md`, `notes/`, `docs/`, `variables.md`, and `PROJECT_SECRETS.md`.
+- **`subprojects/<subproject>/`**, at the repo root, is where the subproject's work happens and
+  lives: its working files and folders.
+
+A subproject never gets its own `AGENTS.md`/`CLAUDE.md`; its instructions live under
+`.agents/subprojects/<subproject>/`. A subproject whose work lives elsewhere, such as a separate
+repo, points at it from its `variables.md` (e.g. `REPO_DIR`).
+
 ## The only override: where notes and restart live
 
 A metaproject is two things at once — the **metaproject itself** (its repo-wide, shared concerns:
@@ -23,14 +34,15 @@ restart by which one it's working on:
 | This session is working on… | Notes path | Restart path |
 | --- | --- | --- |
 | **The metaproject** — repo-wide / shared concerns; no single subproject is the deliverable | `.agents/notes/YYYY-MM-DD-n.md` *(session's normal path)* | `.agents/restart.md` *(session's normal path)* |
-| **One subproject** — work whose deliverable is one subproject's contents | `.agents/subprojects/<subproject>/notes/YYYY-MM-DD-n.md` | `.agents/subprojects/<subproject>/restart.md` |
+| **One subproject** — the deliverable is one subproject's work, in `subprojects/<subproject>/` or wherever its `variables.md` points | `.agents/subprojects/<subproject>/notes/YYYY-MM-DD-n.md` | `.agents/subprojects/<subproject>/restart.md` |
 
 The boundary is "what's the deliverable?" — the repo's shared machinery (metaproject) vs. one
-subproject's contents. When a session genuinely does both, treat it as metaproject.
+subproject's work. When a session genuinely does both, treat it as metaproject.
 
-- **`<subproject>`** is the subproject's identifier — its directory name under
-  `.agents/subprojects/`. For a subproject that doesn't exist yet, use the kebab-case name it will
-  have. Create the `.agents/subprojects/<subproject>/notes/` path on first write.
+- **`<subproject>`** is the subproject's identifier — its directory name, the same under
+  `.agents/subprojects/` and `subprojects/`. For a subproject that doesn't exist yet, use the
+  kebab-case name it will have. Create the `.agents/subprojects/<subproject>/notes/` path on first
+  write, and `subprojects/<subproject>/` when its work first needs a file.
 - **Next `n`** — list today's files in *that tier's* notes dir, not the other's.
 - **No board needed.** Each subproject carries its own `restart.md`, so working two subprojects (or
   two machines) in parallel never clobbers a single shared handoff. Separation does the job.
@@ -63,8 +75,9 @@ Parse `$ARGUMENTS` as an optional `<subproject>` followed by the normal `session
 leading subproject token off the front, then hand the remaining action (`start`/`restart`,
 `notes`, `wrap`) to `session`'s usual handling.
 
-- **`<subproject>`** is the subproject's directory name under `.agents/subprojects/` (kebab-case
-  for one that doesn't exist yet). It selects that subproject's tier for both notes and restart.
+- **`<subproject>`** is the subproject's directory name, the same under `.agents/subprojects/` and
+  `subprojects/` (kebab-case for one that doesn't exist yet). It selects that subproject's tier
+  for both notes and restart.
 - **An explicit token wins over inference.** `/session payments wrap` routes to the `payments`
   tier even if the conversation looked like it was about something else.
 - **No token → fall back to inference** (the table's rule): a named or plainly-single subproject
