@@ -130,18 +130,35 @@ def _date(s: str) -> dt.date:
 
 def _snapshot_dir(explicit: str | None) -> str:
     """--dir, else $PCO_SNAPSHOT_DIR (env / project secrets / profile), else
-    <project>/.agents/pco-snapshots next to the nearest PROJECT_SECRETS.md,
-    else ~/.config/pco/snapshots."""
+    $SUBPROJECT_DIR/pco-snapshots, else <project>/subprojects/<name>/pco-snapshots
+    when the cwd is inside that subproject's work folder, else
+    <project>/pco-snapshots, else ~/.config/pco/snapshots. <project> is the
+    folder whose .agents/ holds the nearest PROJECT_SECRETS.md. The snapshots
+    are work data, so the default never lands inside .agents/."""
     from pco_api import profile_setting, _nearest_project_secrets
     if explicit:
-        return explicit
+        return os.path.expanduser(explicit)
     setting = profile_setting("PCO_SNAPSHOT_DIR")
     if setting:
         return os.path.expanduser(setting)
     secrets = _nearest_project_secrets(os.getcwd())
-    if secrets:
-        return os.path.join(os.path.dirname(secrets), "pco-snapshots")
-    return os.path.expanduser("~/.config/pco/snapshots")
+    project = os.path.dirname(os.path.dirname(secrets)) if secrets else None
+    if os.environ.get("SUBPROJECT_DIR"):
+        root = os.path.join(os.path.abspath(os.path.expanduser(os.environ["SUBPROJECT_DIR"])),
+                            "pco-snapshots")
+    elif not project:
+        return os.path.expanduser("~/.config/pco/snapshots")
+    else:
+        root = os.path.join(project, "pco-snapshots")
+        rel = os.path.relpath(os.path.abspath(os.getcwd()), project).split(os.sep)
+        if (len(rel) >= 2 and rel[0] == "subprojects"
+                and os.path.isdir(os.path.join(project, ".agents", "subprojects", rel[1]))):
+            root = os.path.join(project, "subprojects", rel[1], "pco-snapshots")
+    old = project and os.path.join(project, ".agents", "pco-snapshots")
+    if old and os.path.isdir(old):
+        print(f"note: {old} is no longer the default; using {root} "
+              "(pass --dir or set PCO_SNAPSHOT_DIR to keep the old one)", file=sys.stderr)
+    return root
 
 
 def services_main(argv: list[str], profile: str | None) -> int:
@@ -227,7 +244,8 @@ def services_main(argv: list[str], profile: str | None) -> int:
     p = sub.add_parser("snapshot", help="fetch plans and store a version when they changed; report diffs")
     p.add_argument("type"); p.add_argument("--after", type=_date); p.add_argument("--before", type=_date)
     p.add_argument("--weeks", type=int, default=6, help="default range: today .. today+N weeks")
-    p.add_argument("--dir", help="snapshot root (default: $PCO_SNAPSHOT_DIR, else <project>/.agents/pco-snapshots)")
+    p.add_argument("--dir", help="snapshot root (default: $PCO_SNAPSHOT_DIR, else $SUBPROJECT_DIR/pco-snapshots, "
+                   "else <project>/subprojects/<name>/pco-snapshots when run inside one, else <project>/pco-snapshots)")
     p.add_argument("--quiet", action="store_true", help="only print plans that changed")
     p = sub.add_parser("changes", help="offline: what changed between stored snapshots")
     p.add_argument("type"); p.add_argument("--after", type=_date); p.add_argument("--before", type=_date)

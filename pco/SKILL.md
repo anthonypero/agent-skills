@@ -206,5 +206,16 @@ the diff (title/series, items added/removed/moved, song/arrangement/key changes,
 team members added/removed/status flips, notes, plan times). `changes` re-runs the
 diff offline. Retention: 20 versions per plan, plan folders dropped a year after the
 service date. Snapshot dir resolves from `--dir`, then `PCO_SNAPSHOT_DIR` (env /
-project secrets / profile), then `<project>/.agents/pco-snapshots` next to the nearest
-`PROJECT_SECRETS.md` — keep that directory gitignored; it is a regenerable cache.
+project secrets / profile), then `$SUBPROJECT_DIR/pco-snapshots` when that environment
+variable is set, then `<project>/subprojects/<name>/pco-snapshots` when run from inside
+a subproject work folder that has a matching `.agents/subprojects/<name>/`, then
+`<project>/pco-snapshots`, then `~/.config/pco/snapshots` outside any project.
+`<project>` is the folder whose `.agents/` holds the nearest `PROJECT_SECRETS.md`.
+The snapshots are work data, so the default never lands inside `.agents/`. In a
+subproject session the agent usually runs from the metaproject root, so run pco with
+`SUBPROJECT_DIR="${SUBPROJECT_DIR}"` set (the agent resolves the token) or pass
+`--dir`. Keep `subprojects/<name>/pco-snapshots/` or `pco-snapshots/` gitignored; it
+is a regenerable cache. An old `<project>/.agents/pco-snapshots` is not migrated.
+Whenever neither `--dir` nor `PCO_SNAPSHOT_DIR` is set and `<project>` has one, `pco`
+prints a note naming the new location; `--dir` or `PCO_SNAPSHOT_DIR` keeps using the
+old one.
