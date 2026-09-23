@@ -31,7 +31,7 @@ ln -sfn "$(realpath ~/.claude/skills/repo-master)/agents/repo-master.md" ~/.clau
 | Agent not in the available types | Not installed, or installed this session | `ls -la ~/.claude/agents/repo-master.md`; if missing, run the install block. If present, start a new session. |
 | Symlink exists but points at a dead path | Skills repo moved, or link was made through `~/.claude/skills/...` instead of the real path | Re-run the install block; `realpath` resolves the real target. |
 | Agent runs but ignores the conventions | Its `skills:` frontmatter did not load, or the agent file is a stale copy rather than a symlink | Confirm `~/.claude/agents/repo-master.md` is a symlink (`ls -la`), not a copied file, and that `agents/repo-master.md` still lists `repo-master` under `skills:`. |
-| Push refused or wrong identity | `gh` is logged in as a different account than the repo owner | Follow [authentication.md](authentication.md); `gh auth status` shows the active account. |
+| Push refused or wrong identity | The active `gh` account is not the repo owner | Follow [authentication.md](authentication.md): use the owner's token through `GH_TOKEN` if `gh auth token --user <owner>` has one, otherwise stop and ask. Never `gh auth switch`. |
 | Agent is on the wrong model tier | `model:` in `agents/repo-master.md` | Edit that line; takes effect next session. |
 
 ## Routing
@@ -44,4 +44,4 @@ Consult the reference file that matches the task:
 | Run a git/gh command (clone, push, remote…) | [operations.md](operations.md) |
 | Write a commit message | [conventions.md](conventions.md) |
 
-**Before any operation that writes to a remote** (push, PR create, repo create), complete the identity verification in [authentication.md](authentication.md) first.
+**Before any operation that reaches GitHub** (push, PR create, repo create, or a read of a private repo), complete the identity verification in [authentication.md](authentication.md) first.
