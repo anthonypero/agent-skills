@@ -224,7 +224,9 @@ class ModelFileMergeTest(unittest.TestCase):
         entry = registry.get(self.MODEL)
         self.assertEqual(entry["effort"]["standard"], "max", "the user's choice wins")
         self.assertEqual(entry["effort"]["light"], "low", "the package's other levels survive")
-        self.assertEqual(entry["input_price_per_token"], 1.7e-06, "and so does the package's price")
+        with open(os.path.join(harness.SKILL_DIR, "templates", "models", "moonshotai__kimi-k3.json")) as handle:
+            package_price = json.load(handle)["input_price_per_token"]
+        self.assertEqual(entry["input_price_per_token"], package_price, "and so does the package's price")
         self.assertEqual(entry["family"], "kimi")
 
     def test_the_project_layer_lands_over_the_user_layer(self):

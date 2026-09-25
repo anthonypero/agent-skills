@@ -13,8 +13,8 @@
     "deep": "max"
   },
   "effort_source": "migration 2026-09-19: deep = the model's top rung, light its bottom, standard the middle of three or one below top from four rungs up",
-  "input_price_per_token": 1.7e-06,
-  "output_price_per_token": 8.5e-06,
+  "input_price_per_token": 3e-06,
+  "output_price_per_token": 1.5e-05,
   "context_limit": 1048576,
   "effort_vocabulary": [
     "max",
@@ -23,7 +23,7 @@
   ],
   "price_source": "openrouter catalogue",
   "source": "https://openrouter.ai/api/v1/models",
-  "refreshed_at": "2026-09-19",
+  "refreshed_at": "2026-09-25",
   "output_token_prior": 21297,
   "prior_source": "measured — run 2 (2026-09-18, standard panel), consistency-kimi accepted attempt",
   "min_max_tokens": 64000,
