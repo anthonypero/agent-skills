@@ -9,6 +9,8 @@ This file owns the procedure. Which sources to check, and how to reach each one,
 1. `<project>/.config/session/briefing.md` holds the project tier. It lists this project's sources: its ticket systems, repos, boards, and the accounts or browsers each one needs.
 2. `~/.config/session/briefing.md` holds the user tier. It lists sources that apply to every project on this machine, such as a personal calendar. `$XDG_CONFIG_HOME` is honored.
 
+Commit the project tier with the project, so every machine and collaborator briefs from the same sources. Never commit the user tier; it describes this machine and its owner.
+
 Read both when they exist. The project tier adds to the user tier, and where both describe the same source, the project tier wins. If neither exists, tell the user there are no configured sources, offer to write the project tier with them, and stop.
 
 Each source entry should say what to check, the command or tool that reaches it, and any quirk that has produced a wrong answer before.
