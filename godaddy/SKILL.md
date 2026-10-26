@@ -5,7 +5,7 @@ description: "Read or change DNS records at GoDaddy with the `gddy` CLI. Use whe
 
 # GoDaddy
 
-Authenticate with a Personal Access Token in `GDDY_PAT`, never with `gddy auth login`. Get the token (`GODADDY_PAT`) through the `lastpass` skill.
+Authenticate with a Personal Access Token in `GDDY_PAT`, never with `gddy auth login`. Get the token through the `lastpass` skill. It is stored under the **handyman** scope, not global: `export GDDY_PAT="$(~/.claude/skills/lastpass/scripts/lp get handyman GODADDY_PAT)"`.
 
 ```bash
 gddy dns list example.com --type TXT < /dev/null
