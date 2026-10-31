@@ -74,7 +74,7 @@ Resolve the output location in this order:
 
 1. **The user named a destination** — use it.
 2. **Project instructions define an asset/image location** (CLAUDE.md, AGENTS.md, or a file in this skill's `resources/`) — use that.
-3. **Otherwise default to `<project root>/.agents/assets/images/`** (pass it as `-o`; the script creates it). This is a staging area: when the user approves an image that belongs in the project proper, move it to its real home rather than leaving it in staging.
+3. **Otherwise default to `${SUBPROJECT_DIR}/image-drafts/` in a subproject session, else `<project root>/image-drafts/`** (pass it as `-o`; the script creates it). Generated images are the work, not the agent's notes, so the default never lands inside `.agents/`; `.agents/assets/` is only for reference files the agent's own docs use. This is a staging area: when the user approves an image that belongs in the project proper, move it to its real home rather than leaving it in staging, and suggest gitignoring `image-drafts/` so drafts do not bloat git history.
 
 Without an explicit `-o` the script writes to the cwd — don't rely on that; always pass `-o`.
 
