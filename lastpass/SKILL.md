@@ -39,7 +39,7 @@ Keeping `<NAME>` identical to the env var is what makes `lp env` and the resolve
 Install the CLI:
 
 ```bash
-brew install lastpass-cli                 # macOS (1.6.1)
+brew install lastpass-cli                 # macOS (1.6.2 or later; see Notes on 1.6.1)
 ```
 
 On Debian/Ubuntu do **not** use the apt package: it is 1.3.7, which cannot update items in a shared folder (see Notes). Build 1.6 from source instead; it takes a few minutes and needs no asciidoc:
@@ -221,4 +221,6 @@ Learned the hard way; the script already handles all of these.
 - **lastpass-cli older than 1.6 cannot update an existing shared-folder item.** On Ubuntu's apt-packaged 1.3.7, `lpass edit` exits 0 and changes nothing (by id or by name), `rm` by id is a no-op, and remove-then-re-add leaves a duplicate because the removal never reaches the server before the add does (all verified 2026-09-18). `lp put` refuses to update on such a version and says so. The fix is the source build in Setup; the mini was upgraded to 1.6.1 the same day and every path passed there.
 - **`lpass ls` and `show` serve the local cache.** A write from another machine is invisible until a sync, so `lp` syncs once per process before resolving anything.
 - **LastPass rate-limits bursts of syncs.** After a dozen or so in quick succession every network call fails with `HTTP response code said error` for a minute or two, and a write sitting in the local upload queue can be discarded. `lp` syncs at most once per process, waits for the upload queue to drain after every write (warning if it does not), and treats a failed listing as an error rather than as "not found". If you see that message, wait a minute; the verified recovery is `lpass logout -f` then `lp login`.
+- **1.6.1's certificate pinning went stale.** On 2026-10-26 every call failed with `SSL peer certificate or SSH remote key was not OK` while curl to lastpass.com worked. Waiting does not help. The fix is `brew upgrade lastpass-cli` (1.6.2 cured it on the Studio), then `lp login`; on Linux, rebuild from source. `lp` recognizes the error and says so, rather than calling it rate-limiting. Any fleet machine still on 1.6.1 is expected to hit it.
+- **A just-created item has id `0` until its upload lands**, and `lpass show 0` answers `Multiple matches found for '0'` when several placeholders exist (2026-09-25). `lp` refuses to read or write a name that is still at id `0` or exists more than once, prints nothing on stdout when a read fails (so `lp get A | lp put B` cannot store an error message), and fails any write that reports `Multiple matches`.
 - **Only a read from another machine proves a write.** A machine's own read after a write can come from its local blob with the queued edit already applied. The smoke test's cross-machine step exists for that reason.
