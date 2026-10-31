@@ -21,6 +21,8 @@ All channels ride the same plumbing: Zoho hosts `anthonypero.com` (catch-all del
 | `clt` | Work laptop (`~/Projects/clt`) | `claude-clt@anthonypero.com` | Working — acceptance-tested 2026-08-26 |
 | `personal` | FUMC laptop (`~/Projects/fumc`) | `agent@anthonypero.com` | Working — acceptance-tested 2026-09-01. One channel for everything non-work (FUMC and personal are co-mingled by design); the CLT laptop is the only separate channel. Since 2026-09-18 the Gmail filter excludes `from:hopesprings.lam3@gmail.com` — Jessica's mail to this alias is routed to the `levi-homework` label for the mini's levi-homework agent, never to the pager label |
 
+No other machine has a channel. The Mac Studio's `gws` (`~/.local/bin/gws`, 0.22.5 as of 2026-10-29) is Google's official Workspace CLI, which lacks the `gws gmail list/labels/label-info/thread/label` commands this skill uses; `scripts/preflight.sh` detects this and exits 4. The skill does not record which `gws` build the two laptops run.
+
 ## Standing up a channel on a new machine
 
 1. Zoho Admin Console → Users → the mailbox → Mailbox Settings → Email Alias → add the channel alias.
