@@ -306,9 +306,17 @@ fi
 # The popup is up. Loop the sound in the background, recording each afplay's pid
 # so it can be killed mid-play. `wait` returning non-zero means afplay was killed
 # -> stop.
+# The loop also guards itself, so it can't outlive this script (say ring.sh is
+# SIGKILLed): before each play it stops if the parent is gone, and it keeps its
+# own copy of the --max-seconds deadline.
+RING_PARENT=$$
 (
   trap - EXIT INT TERM HUP
+  loop_deadline=""
+  if [ "$MAX_SECONDS" -gt 0 ]; then loop_deadline=$((SECONDS + MAX_SECONDS)); fi
   while :; do
+    kill -0 "$RING_PARENT" 2>/dev/null || break
+    if [ -n "$loop_deadline" ] && [ "$SECONDS" -gt "$loop_deadline" ]; then break; fi
     afplay -v "$VOLUME" "$SOUND" &
     af=$!
     printf '%s' "$af" > "$PIDFILE"

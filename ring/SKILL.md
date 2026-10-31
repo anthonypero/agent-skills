@@ -47,7 +47,7 @@ Exit codes — only `0` means the user clicked Dismiss:
 
 On `4`, tell the user the alert may not have been seen. A `RING_CONFIRM_SECONDS` that is not a positive whole number is ignored with a warning, and the default is used.
 
-Defaults: bundled `comedy-horns.caf`, amplified (`--volume 4`), looping under a persistent popup, with the sound capped at 300 s. Options:
+Defaults: bundled `comedy-horns.caf`, amplified (`--volume 4`), looping under a persistent popup, with the sound capped at 300 s (the loop enforces the cap itself and stops if `ring.sh` dies). Options:
 
 | Option | Meaning |
 | --- | --- |

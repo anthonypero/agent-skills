@@ -113,8 +113,9 @@ fi
 #    markdownlint-cli2 reads every argument as a glob, so a filename holding glob
 #    syntax — `notes (v2).md`, `[draft].md` — matched nothing and linted 0 files.
 #    A leading `:` marks a literal file path (`markdownlint-cli2 --help`); it skips
-#    glob matching but still honors the config's `ignores` and negated `globs`, so
-#    with it, "0 files" can only mean the config excluded this file.
+#    glob matching but still honors a negated `globs` entry, which shows as
+#    "0 files". (A config `ignores` entry is applied later and skips the file
+#    while still reporting "1 file(s)"; that case is not detected here.)
 echo "Linting with markdownlint-cli2..."
 MD_OUT="$("$MARKDOWNLINT" "${MD_ARGS[@]}" --fix ":$FILE_PATH" 2>&1)" || FAILED=1
 printf '%s\n' "$MD_OUT"
@@ -133,7 +134,7 @@ if printf '%s' "$MD_OUT" | grep -q 'Linting: 0 file(s)'; then
         dir="$(dirname "$dir")"
     done
     if [ "${#MD_CLI2_CONFIGS[@]}" -gt 0 ]; then
-        echo "Error: markdownlint-cli2 linted nothing: $FILE_PATH is excluded by the \`ignores\` or a negated \`globs\` entry in ${MD_CLI2_CONFIGS[*]}."
+        echo "Error: markdownlint-cli2 linted nothing: $FILE_PATH is excluded by a negated \`globs\` entry in ${MD_CLI2_CONFIGS[*]}."
     else
         echo "Error: markdownlint-cli2 linted nothing for $FILE_PATH, and no .markdownlint-cli2.* config was found that would exclude it. Run markdownlint-cli2 on it by hand to see why."
     fi
