@@ -79,7 +79,7 @@ Defaults are `agent@anthonypero.com` and `~/.secret-drop/lastpass-master`. Overr
 | `lp sweep <PROJECT_SECRETS.md> --scope S` | Imports a project secrets file into the vault |
 | `lp rm <scope>/<NAME> --yes` | Deletes an item |
 
-`lp get` takes `--field password|username|url|notes|json` (default `password`). `lp put` takes `--username`, `--url` and `--notes`; any field not passed is left as it was, and `--notes` is sent only when you pass it, so an update never clobbers notes written by hand. `lp sweep` takes `--dry-run` and `--overwrite`. `lp env` takes `--secrets-md` to emit `` - **NAME** = `value` `` lines in the repo's `PROJECT_SECRETS.md` format instead of exports; a value containing a backtick is emitted as `- **NAME** = "value"` instead, with `\"` and `\\` escaped, because it could not survive the backtick form — `lp sweep` reads both.
+`lp get` takes `--field password|username|url|notes|json` (default `password`), and prints the field exactly as `lpass` returned it, trailing newlines included. `lp put` takes `--username`, `--url` and `--notes`; any field not passed is left as it was, and `--notes` is sent only when you pass it, so an update never clobbers notes written by hand. `lp sweep` takes `--dry-run` and `--overwrite`. `lp env` takes `--secrets-md` to emit `` - **NAME** = `value` `` lines in the repo's `PROJECT_SECRETS.md` format instead of exports; a value containing a backtick is emitted as `- **NAME** = "value"` instead, with `\"` and `\\` escaped, because it could not survive the backtick form — `lp sweep` reads both.
 
 Exit codes: `0` ok, `1` not logged in or an `lpass` failure, `2` master file missing, `3` item not found, `4` bad usage or bad input.
 
@@ -119,7 +119,7 @@ An entry is a **list item** whose first bold span is the name, followed by `=`: 
 
 Each swept name is reported with its value's character count and whether it was quoted. A surprising length is how you catch a line whose trailing prose comment got swallowed into the secret; unquoted values are flagged for exactly that reason. A dry run on a machine with no session says so and leaves the "already in vault" list empty, because it never logs in.
 
-**A sweep never replaces a value already in the vault** unless you pass `--overwrite`. The vault copy may be the newer one, and its notes may have been written by hand. A real run notes the source file and date on items it creates (and on items it replaces under `--overwrite`), counts any `lp put` that fails without abandoning the rest of the file, and exits 1 if anything failed.
+**A sweep never replaces a value already in the vault** unless you pass `--overwrite`. The vault copy may be the newer one, and its notes may have been written by hand. A real run notes the source file and date on items it creates (and on items it replaces under `--overwrite`), carries on past any `lp put` that fails rather than abandoning the rest of the file, and exits 1 if anything failed. A failed item is never listed under "wrote to": each one gets a `NAME was NOT written` line on stderr after its `lpass` error, and the report ends with a `FAILED to write` list.
 
 The source file is never modified. Verify a sweep with `lp ls <scope>` for the names, and `lp get <scope>/NAME | wc -c` for a byte count if you want to confirm a specific value landed — never with `lp env`, which prints the values themselves. Only then consider trimming the local file.
 

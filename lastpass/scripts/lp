@@ -139,7 +139,11 @@ lpass() { "$LPASS_BIN" "$@"; }
 # $1 = what failed (e.g. "lpass ls"), $2 = captured stderr.
 lpass_failure() {
   local what="$1" err="$2" first upgrade
-  first="$(printf '%s' "$err" | grep -v '^[[:space:]]*$' | head -1 | cut -c1-200)"
+  # First non-blank line, cut to 200 chars. `|| true` because lpass can fail with
+  # no stderr at all: a filter that finds no line (grep exits 1) or a writer cut
+  # off early (SIGPIPE) fails the pipeline, and under pipefail + set -e that
+  # killed the script right here with a bare exit 1 and no message.
+  first="$(printf '%s\n' "$err" | awk 'NF { print substr($0, 1, 200); exit }')" || true
   case "$err" in
     *'SSL peer certificate'*|*'SSL certificate'*|*'certificate verify'*|*'remote key was not OK'*)
       case "$(uname -s)" in
@@ -152,7 +156,8 @@ lpass_failure() {
       die "$what failed: LastPass is rate-limiting (\"HTTP response code said error\"). Wait a minute and retry; if it persists: lpass logout -f, then $PROG login." 1
       ;;
   esac
-  die "$what failed${first:+: $first}" 1
+  if [ -n "$first" ]; then die "$what failed: $first" 1; fi
+  die "$what failed (lpass exited non-zero and printed no error message; run \`$PROG status\`, then retry)" 1
 }
 
 # Run an lpass write (add/edit) with stdin passed through, failing loudly on a
@@ -382,13 +387,16 @@ cmd_get() {
 
   # Buffered, so a failed show prints nothing on stdout: `lp get A | lp put B`
   # must never store an error message or a match list as the value (2026-09-25).
+  # `$(...)` strips every trailing newline, so a sentinel `x` is appended after a
+  # successful show and removed again: notes and json come out byte-for-byte as
+  # lpass printed them, trailing blank lines included.
   local out
   case "$field" in
-    json) out="$(lpass show --json "$id")" ;;
-    notes) out="$(lpass show --notes "$id")" ;;
-    *) out="$(lpass show "--$field" "$id")" ;;
+    json) out="$(lpass show --json "$id" && printf x)" ;;
+    notes) out="$(lpass show --notes "$id" && printf x)" ;;
+    *) out="$(lpass show "--$field" "$id" && printf x)" ;;
   esac || die "get: lpass show failed for $found" 1
-  printf '%s\n' "$out"
+  printf '%s' "${out%x}"
   unset out
 }
 
@@ -404,10 +412,18 @@ lpass_is_old() {
 
 # Only one field flag is accepted per `lpass edit`, so extras are separate calls.
 # A field the caller did not pass is simply left alone. Uses cmd_put's locals.
+#
+# Every `... | lpass_write` below ends in `|| exit 1`. lpass_write is the last
+# element of a pipeline, so it runs in a subshell and its `die` ends only that
+# subshell. set -e would normally pass the failure on, but it is switched off
+# for anything running inside a condition — and `sweep` used to call cmd_put in
+# an `if`, so a failed write printed "updated" and the sweep listed it as written.
+# The message has already been printed by lpass_write; exit 1 just carries it.
 put_extra_fields() {
-  if [ "$have_u" = 1 ]; then printf '%s' "$username" | lpass_write edit --non-interactive --username "$1"; fi
-  if [ "$have_l" = 1 ]; then printf '%s' "$url"      | lpass_write edit --non-interactive --url      "$1"; fi
-  if [ "$have_n" = 1 ]; then printf '%s' "$notes"    | lpass_write edit --non-interactive --notes    "$1"; fi
+  if [ "$have_u" = 1 ]; then printf '%s' "$username" | lpass_write edit --non-interactive --username "$1" || exit 1; fi
+  if [ "$have_l" = 1 ]; then printf '%s' "$url"      | lpass_write edit --non-interactive --url      "$1" || exit 1; fi
+  if [ "$have_n" = 1 ]; then printf '%s' "$notes"    | lpass_write edit --non-interactive --notes    "$1" || exit 1; fi
+  return 0
 }
 
 cmd_put() {
@@ -462,12 +478,12 @@ cmd_put() {
       # By id, so a duplicate name (which lpass will happily create) can never
       # make the edit ambiguous. (Old lpass ignores id-addressed edits — it never
       # reaches this branch.)
-      printf '%s' "$value" | lpass_write edit --non-interactive --password "$id"
+      printf '%s' "$value" | lpass_write edit --non-interactive --password "$id" || exit 1
       put_extra_fields "$id"
     fi
   else
     verb="created"
-    printf '%s' "$value" | lpass_write add --non-interactive --password "$full"
+    printf '%s' "$value" | lpass_write add --non-interactive --password "$full" || exit 1
     # Sync before touching the new item again. Until the upload queue drains, the
     # local cache serves a placeholder record (name "0", empty password), and a
     # second write against that placeholder leaves a phantom half-written entry.
@@ -677,7 +693,7 @@ cmd_sweep() {
   # than silently dropped.
   local entry_re='^[[:space:]]*[-*][[:space:]]+\*\*([^*]+)\*\*[[:space:]]*=[[:space:]]*(.*)$'
 
-  local line lineno=0 name raw value quoted full exists label
+  local line lineno=0 name raw value quoted full exists label put_rc
   local to_write=() existing=() skipped=() unparsed=() failed=() today
   today="$(date +%Y-%m-%d)"
 
@@ -731,13 +747,21 @@ cmd_sweep() {
       continue
     fi
 
-    # `cmd_put` runs as the last element of a pipeline, i.e. in a subshell, so a
-    # `die` inside it ends that subshell and not the sweep: one unwritable entry
-    # must not abandon the rest of the file half-imported.
-    if printf '%s' "$value" | cmd_put "$scope/$name" --notes "swept from $file on $today" >/dev/null; then
+    # Each put runs in its own subshell, so a `die` inside it ends that subshell
+    # and not the sweep: one unwritable entry must not abandon the rest of the
+    # file half-imported. It must NOT run as an `if`/`||` condition: bash turns
+    # set -e off for everything inside a condition, so a failed write carried on
+    # and was reported as written (2026-10-30). Instead set -e is dropped here in
+    # the parent only, and re-armed inside the subshell, where it applies.
+    set +e
+    ( set -e; printf '%s' "$value" | cmd_put "$scope/$name" --notes "swept from $file on $today" >/dev/null )
+    put_rc=$?
+    set -e
+    if [ "$put_rc" = 0 ]; then
       to_write+=("$name")
     else
       failed+=("$name")
+      printf '%s: sweep: %s was NOT written (exit %s; error above)\n' "$PROG" "$full" "$put_rc" >&2
     fi
   done < "$file"
   unset value raw UNQUOTED_VALUE

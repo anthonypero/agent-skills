@@ -11,6 +11,8 @@
 #   exit 2  timeout reached with no message (heartbeat cue — session decides what to do)
 #   exit 3  gws kept erroring (auth likely expired) — session must surface this in terminal
 #   exit 4  the gws on PATH is the wrong build (no `gws gmail list`) — run preflight.sh
+#   exit 64 usage error (EX_USAGE): unknown argument, missing --label, or a Label_ ID
+#           that could not be resolved to a label name — fix the command line
 #
 # Usage: poll.sh --label <gmail-label> [--allow <addr1,addr2,...>] \
 #                [--interval <secs>] [--timeout <secs>] [--query <extra>]
