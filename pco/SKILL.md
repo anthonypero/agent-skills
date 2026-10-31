@@ -22,8 +22,21 @@ Resolution order (first hit wins) — full detail in `lib/pco_api.py`:
 
 1. Explicit `PCOClient(app_id=..., secret=...)` arguments
 2. `PCO_APP_ID` / `PCO_SECRET` environment variables
-3. Nearest `.agents/PROJECT_SECRETS.md` walking up from the cwd — so each
-   project automatically talks to the PCO account its own secrets name
+3. Project secrets, most specific first — so each project (or subproject)
+   automatically talks to the PCO account its own secrets name. The first file
+   holding both `PCO_APP_ID` and `PCO_SECRET` wins:
+   1. the subproject's `.agents/subprojects/<name>/PROJECT_SECRETS.md`, when the
+      cwd is inside `subprojects/<name>/` or `.agents/subprojects/<name>/`, or
+      `$SUBPROJECT_DIR` points into `subprojects/<name>/`;
+   2. the project's `.agents/PROJECT_SECRETS.md`;
+   3. the nearest `.agents/PROJECT_SECRETS.md` walking up from the cwd, if
+      different.
+
+   `<project>` is the nearest folder holding `agentic-project.json`; a project
+   not yet marked falls back to the nearest folder whose `.agents/` holds
+   `PROJECT_SECRETS.md` or `subprojects/`. Non-credential settings
+   (`PCO_SELF`, `PCO_SNAPSHOT_DIR`) cascade per key through the same files.
+
 4. `~/.config/pco/credentials.md` with optional `## <profile>` sections
    (`pco --profile church ...` / `$PCO_PROFILE`)
 
@@ -86,8 +99,6 @@ pco services fill <type> --csv worship.csv [--after D] [--before D] \
      --scripture-col "Sermon Scripture/"] [--blank-series "Stand Alone"] \
     [--overwrite] [--dry-run]
 pco services set <type> 2026-10-18 --title T --series S --scripture "Mark 10:46-52"
-```
-
 pco services schedule <type> --csv worship.csv --position Speaker [--name-col Preacher] [--dry-run]
 pco services schedule <type> --csv worship.csv --position Host --other-of "Justin Lowe,Melissa Lowe"
 pco services remove-item <type> "Countdown" --all-templates --after 2026-08-24 [--dry-run]
@@ -208,9 +219,11 @@ diff offline. Retention: 20 versions per plan, plan folders dropped a year after
 service date. Snapshot dir resolves from `--dir`, then `PCO_SNAPSHOT_DIR` (env /
 project secrets / profile), then `$SUBPROJECT_DIR/pco-snapshots` when that environment
 variable is set, then `<project>/subprojects/<name>/pco-snapshots` when run from inside
-a subproject work folder that has a matching `.agents/subprojects/<name>/`, then
-`<project>/pco-snapshots`, then `~/.config/pco/snapshots` outside any project.
-`<project>` is the folder whose `.agents/` holds the nearest `PROJECT_SECRETS.md`.
+a subproject work folder that has a matching `.agents/subprojects/<name>/` (or from
+inside that agent-files folder), then `<project>/pco-snapshots`, then
+`~/.config/pco/snapshots` outside any project. `<project>` is found as under
+[Credentials](#credentials), so a missing root `PROJECT_SECRETS.md` no longer drops
+a subproject's snapshots into `~/.config/pco/snapshots`.
 The snapshots are work data, so the default never lands inside `.agents/`. In a
 subproject session the agent usually runs from the metaproject root, so run pco with
 `SUBPROJECT_DIR="${SUBPROJECT_DIR}"` set (the agent resolves the token) or pass

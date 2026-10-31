@@ -14,9 +14,16 @@ product's schema. Paths therefore always include the product prefix:
 Credential resolution order (first hit wins):
   1. Explicit PCOClient(app_id=..., secret=...) arguments
   2. PCO_APP_ID / PCO_SECRET environment variables
-  3. The nearest .agents/PROJECT_SECRETS.md walking up from the working
-     directory — the per-project convention, so each project automatically
-     talks to the PCO account whose token its secrets file holds
+  3. Project secrets, most specific first: the subproject's
+     .agents/subprojects/<name>/PROJECT_SECRETS.md (when the working
+     directory is inside subprojects/<name>/ or .agents/subprojects/<name>/,
+     or $SUBPROJECT_DIR points there), then the project's
+     .agents/PROJECT_SECRETS.md, then the nearest .agents/PROJECT_SECRETS.md
+     walking up. The project is the nearest folder holding
+     agentic-project.json, else the nearest whose .agents/ holds
+     PROJECT_SECRETS.md or subprojects/. Each project (or subproject)
+     automatically talks to the PCO account whose token its secrets hold;
+     the first file holding both PCO_APP_ID and PCO_SECRET wins
   4. ~/.config/pco/credentials.md, with optional `## <profile>` sections —
      select one via PCOClient(profile=...), `pco --profile <name>`, or
      $PCO_PROFILE (default section name: 'default'; a file with no `##`
@@ -86,17 +93,85 @@ def _parse_profiles(text: str) -> dict[str, dict[str, str]]:
     return profiles
 
 
-def _nearest_project_secrets(start_dir: str) -> str | None:
-    """Path of the closest .agents/PROJECT_SECRETS.md at or above start_dir."""
+def _ancestors(start_dir: str):
+    """start_dir (made absolute) and each parent up to the filesystem root."""
     d = os.path.abspath(start_dir)
     while True:
+        yield d
+        parent = os.path.dirname(d)
+        if parent == d:
+            return
+        d = parent
+
+
+def _nearest_project_secrets(start_dir: str) -> str | None:
+    """Path of the closest .agents/PROJECT_SECRETS.md at or above start_dir."""
+    for d in _ancestors(start_dir):
         candidate = os.path.join(d, ".agents", "PROJECT_SECRETS.md")
         if os.path.isfile(candidate):
             return candidate
-        parent = os.path.dirname(d)
-        if parent == d:
-            return None
-        d = parent
+    return None
+
+
+def _project_root(start_dir: str) -> str | None:
+    """The project folder containing start_dir: the nearest ancestor holding
+    the agentic-project.json marker. Projects not yet marked fall back to the
+    nearest ancestor whose .agents/ holds PROJECT_SECRETS.md or a
+    subprojects/ folder (a metaproject), so a metaproject is still found from
+    inside a subproject when its root secrets file is missing."""
+    for d in _ancestors(start_dir):
+        if os.path.isfile(os.path.join(d, "agentic-project.json")):
+            return d
+    for d in _ancestors(start_dir):
+        agents = os.path.join(d, ".agents")
+        if (os.path.isfile(os.path.join(agents, "PROJECT_SECRETS.md"))
+                or os.path.isdir(os.path.join(agents, "subprojects"))):
+            return d
+    return None
+
+
+def _subproject_in(project: str, path: str) -> str | None:
+    """Name of the subproject of `project` that `path` lies in, through either
+    of its homes (subprojects/<name>/ or .agents/subprojects/<name>/), when
+    .agents/subprojects/<name>/ exists; else None."""
+    rel = os.path.relpath(os.path.abspath(path), project).split(os.sep)
+    if len(rel) >= 2 and rel[0] == "subprojects":
+        name = rel[1]
+    elif len(rel) >= 3 and rel[0] == ".agents" and rel[1] == "subprojects":
+        name = rel[2]
+    else:
+        return None
+    return name if os.path.isdir(os.path.join(project, ".agents", "subprojects", name)) else None
+
+
+def _subproject_name(project: str, start_dir: str) -> str | None:
+    """The subproject in effect: the one the working directory is inside,
+    else the one $SUBPROJECT_DIR points into (a subproject session usually
+    runs from the metaproject root with SUBPROJECT_DIR set)."""
+    name = _subproject_in(project, start_dir)
+    if name is None and os.environ.get("SUBPROJECT_DIR"):
+        name = _subproject_in(project, os.path.expanduser(os.environ["SUBPROJECT_DIR"]))
+    return name
+
+
+def _project_secrets_files(start_dir: str) -> list[str]:
+    """Every project secrets file that applies, most specific first: the
+    subproject's .agents/subprojects/<name>/PROJECT_SECRETS.md, then the
+    project's .agents/PROJECT_SECRETS.md, then (if different) the nearest
+    .agents/PROJECT_SECRETS.md walking up, as before subprojects existed."""
+    files: list[str] = []
+    project = _project_root(start_dir)
+    if project:
+        name = _subproject_name(project, start_dir)
+        candidates = [os.path.join(project, ".agents", "PROJECT_SECRETS.md")]
+        if name:
+            candidates.insert(0, os.path.join(project, ".agents", "subprojects", name,
+                                              "PROJECT_SECRETS.md"))
+        files = [c for c in candidates if os.path.isfile(c)]
+    nearest = _nearest_project_secrets(start_dir)
+    if nearest and nearest not in files:
+        files.append(nearest)
+    return files
 
 
 def resolve_credentials(app_id: str | None = None, secret: str | None = None,
@@ -110,12 +185,12 @@ def resolve_credentials(app_id: str | None = None, secret: str | None = None,
     if env_id and env_secret:
         return env_id, env_secret, "environment variables"
 
-    project_secrets = _nearest_project_secrets(os.getcwd())
-    if project_secrets:
-        with open(project_secrets, "r", encoding="utf-8") as f:
+    project_secrets = _project_secrets_files(os.getcwd())
+    for path in project_secrets:
+        with open(path, "r", encoding="utf-8") as f:
             vals = _parse_secret_lines(f.read())
         if vals.get("PCO_APP_ID") and vals.get("PCO_SECRET"):
-            return vals["PCO_APP_ID"], vals["PCO_SECRET"], project_secrets
+            return vals["PCO_APP_ID"], vals["PCO_SECRET"], path
 
     config_path = CONFIG_PATH
     wanted = (profile or os.environ.get("PCO_PROFILE") or "default").lower()
@@ -133,7 +208,7 @@ def resolve_credentials(app_id: str | None = None, secret: str | None = None,
 
     raise RuntimeError(
         "No PCO credentials found. Looked for: PCO_APP_ID/PCO_SECRET env vars; "
-        f"{project_secrets or '.agents/PROJECT_SECRETS.md above ' + os.getcwd()}; "
+        f"{', '.join(project_secrets) or '.agents/PROJECT_SECRETS.md above ' + os.getcwd()}; "
         f"{config_path} (profile '{wanted}'). "
         "Tokens: https://api.planningcenteronline.com/oauth/applications")
 
@@ -141,12 +216,12 @@ def resolve_credentials(app_id: str | None = None, secret: str | None = None,
 def profile_setting(key: str, profile: str | None = None, default: str = "") -> str:
     """A non-credential setting (e.g. PCO_SELF, the profile's own worship
     leader) from the same places credentials come from: the environment, the
-    nearest project secrets file, then the credentials.md profile section."""
+    project secrets files (subproject first), then the credentials.md
+    profile section."""
     if os.environ.get(key):
         return os.environ[key]
-    project_secrets = _nearest_project_secrets(os.getcwd())
-    if project_secrets:
-        with open(project_secrets, "r", encoding="utf-8") as f:
+    for path in _project_secrets_files(os.getcwd()):
+        with open(path, "r", encoding="utf-8") as f:
             vals = _parse_secret_lines(f.read())
         if vals.get(key):
             return vals[key]
