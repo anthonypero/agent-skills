@@ -131,6 +131,47 @@ install_hint() {
 
 lpass() { "$LPASS_BIN" "$@"; }
 
+# Turn lpass's stderr from a failed network call into an actionable message.
+# Certificate pinning goes stale in old lastpass-cli builds: 1.6.1 failed every
+# call with "SSL peer certificate or SSH remote key was not OK" on 2026-10-26
+# while curl to lastpass.com worked, and `lp` called it rate-limiting. 1.6.2 fixed
+# it. lpass's error text never contains a secret value, so it is safe to quote.
+# $1 = what failed (e.g. "lpass ls"), $2 = captured stderr.
+lpass_failure() {
+  local what="$1" err="$2" first upgrade
+  # First non-blank line, cut to 200 chars. `|| true` because lpass can fail with
+  # no stderr at all: a filter that finds no line (grep exits 1) or a writer cut
+  # off early (SIGPIPE) fails the pipeline, and under pipefail + set -e that
+  # killed the script right here with a bare exit 1 and no message.
+  first="$(printf '%s\n' "$err" | awk 'NF { print substr($0, 1, 200); exit }')" || true
+  case "$err" in
+    *'SSL peer certificate'*|*'SSL certificate'*|*'certificate verify'*|*'remote key was not OK'*)
+      case "$(uname -s)" in
+        Darwin) upgrade='brew upgrade lastpass-cli' ;;
+        *)      upgrade='rebuild lastpass-cli from source at the latest release (see SKILL.md, Setup)' ;;
+      esac
+      die "$what failed: lastpass-cli $(lpass --version 2>/dev/null | sed -n 's/.*v\([0-9][0-9.]*\).*/\1/p') could not verify LastPass's TLS certificate (\"$first\"). This is stale certificate pinning in the CLI, not rate-limiting; waiting will not fix it. Upgrade: $upgrade (1.6.1 -> 1.6.2 fixed it on 2026-10-26), then $PROG login." 1
+      ;;
+    *'HTTP response code said error'*)
+      die "$what failed: LastPass is rate-limiting (\"HTTP response code said error\"). Wait a minute and retry; if it persists: lpass logout -f, then $PROG login." 1
+      ;;
+  esac
+  if [ -n "$first" ]; then die "$what failed: $first" 1; fi
+  die "$what failed (lpass exited non-zero and printed no error message; run \`$PROG status\`, then retry)" 1
+}
+
+# Run an lpass write (add/edit) with stdin passed through, failing loudly on a
+# non-zero exit or on "Multiple matches" (2026-09-25: a write against a `0`
+# placeholder printed that and the pipeline carried on).
+lpass_write() {
+  local err rc=0
+  err="$(lpass "$@" 2>&1 >/dev/null)" || rc=$?
+  case "$err" in
+    *'Multiple matches'*) die "lpass $1 reported: ${err%%$'\n'*} — duplicate or placeholder items share the name, so the write cannot be trusted. Check \`$PROG ls\` and \`lpass ls $SHARE\`." 1 ;;
+  esac
+  [ "$rc" = 0 ] || lpass_failure "lpass $1" "$err"
+}
+
 # The "create the directory" line of the remediation, or nothing when the master
 # file sits directly under / (a pasted `chmod 700 "/"` would break the machine).
 master_dir_hint() {
@@ -178,9 +219,17 @@ EOF
   fi
 
   # The ONLY permitted use of the master file: redirected onto lpass's stdin.
-  if ! lpass login --trust "$LP_USERNAME" < "$LP_MASTER_FILE" >/dev/null 2>&1; then
+  # stderr is kept (never stdout) so a certificate or rate-limit failure is not
+  # misreported as a rejected password.
+  local login_err
+  if ! login_err="$(lpass login --trust "$LP_USERNAME" < "$LP_MASTER_FILE" 2>&1 >/dev/null)"; then
+    case "$login_err" in
+      *'SSL'*|*'certificate'*|*'remote key was not OK'*|*'HTTP response code said error'*)
+        lpass_failure "lpass login" "$login_err" ;;
+    esac
     die "lpass login failed for $LP_USERNAME (master file present but rejected — check the password, or a pending MFA prompt on the account)" 1
   fi
+  unset login_err
   lpass status >/dev/null 2>&1 || die "lpass login reported success but status says not logged in" 1
   LP_SYNCED=1
   refresh_listing
@@ -250,8 +299,34 @@ candidates() {
 LISTING=""
 LISTING_LOADED=0
 refresh_listing() {
-  LISTING="$(lpass ls --format='%ai|%aN' "$SHARE" 2>/dev/null)" || die "lpass ls failed — LastPass may be rate-limiting (\"HTTP response code said error\"). Wait a minute and retry; if it persists: lpass logout -f, then $PROG login." 1
+  # stderr goes to a private temp file (it holds lpass error text, never values)
+  # so the failure can be told apart: certificate pinning vs rate-limiting.
+  local errf rc=0
+  errf="$(mktemp "${TMPDIR:-/tmp}/lp-ls.XXXXXX")"
+  LISTING="$(lpass ls --format='%ai|%aN' "$SHARE" 2>"$errf")" || rc=$?
+  if [ "$rc" != 0 ]; then
+    local err; err="$(cat "$errf" 2>/dev/null)"; rm -f "$errf"
+    lpass_failure "lpass ls" "$err"
+  fi
+  rm -f "$errf"
   LISTING_LOADED=1
+}
+
+# Refuse a fullname that cannot be addressed safely: more than one item carries
+# it, or its only entry is the placeholder (id 0) the local cache serves until
+# the upload queue drains (2026-09-25: `lpass show 0` printed "Multiple matches
+# found for '0'"). Runs at top level so `die` ends the command.
+check_addressable() {
+  local want="$1" line id name n=0 ids=""
+  [ "$LISTING_LOADED" = 1 ] || refresh_listing
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    id="${line%%|*}"; name="${line#*|}"
+    [ "$name" = "$want" ] || continue
+    n=$((n + 1)); ids="${ids:+$ids, }$id"
+    case "$id" in ''|0) die "$want is still pending upload (placeholder id 0 in the local cache). Wait a minute, then retry." 1 ;; esac
+  done <<< "$LISTING"
+  [ "$n" -le 1 ] || die "$want exists $n times (ids $ids). Remove the extra copies by id (lpass rm <id>) before using it." 1
 }
 
 # Print the unique id of an item by exact fullname; return 1 if absent.
@@ -300,19 +375,29 @@ cmd_get() {
   ensure_login
 
   local tried="" full id=""
+  local found=""
   while IFS= read -r full; do
     tried="${tried:+$tried, }$full"
-    if id="$(resolve_id "$full")"; then break; fi
+    if id="$(resolve_id "$full")"; then found="$full"; break; fi
     id=""
   done < <(candidates "$ref")
 
   [ -n "$id" ] || die "not found: tried $tried" 3
+  check_addressable "$found"
 
+  # Buffered, so a failed show prints nothing on stdout: `lp get A | lp put B`
+  # must never store an error message or a match list as the value (2026-09-25).
+  # `$(...)` strips every trailing newline, so a sentinel `x` is appended after a
+  # successful show and removed again: notes and json come out byte-for-byte as
+  # lpass printed them, trailing blank lines included.
+  local out
   case "$field" in
-    json) lpass show --json "$id" ;;
-    notes) lpass show --notes "$id" ;;
-    *) lpass show "--$field" "$id" ;;
-  esac
+    json) out="$(lpass show --json "$id" && printf x)" ;;
+    notes) out="$(lpass show --notes "$id" && printf x)" ;;
+    *) out="$(lpass show "--$field" "$id" && printf x)" ;;
+  esac || die "get: lpass show failed for $found" 1
+  printf '%s' "${out%x}"
+  unset out
 }
 
 # lastpass-cli older than 1.6 (Ubuntu's apt package is 1.3.7) cannot update
@@ -327,10 +412,18 @@ lpass_is_old() {
 
 # Only one field flag is accepted per `lpass edit`, so extras are separate calls.
 # A field the caller did not pass is simply left alone. Uses cmd_put's locals.
+#
+# Every `... | lpass_write` below ends in `|| exit 1`. lpass_write is the last
+# element of a pipeline, so it runs in a subshell and its `die` ends only that
+# subshell. set -e would normally pass the failure on, but it is switched off
+# for anything running inside a condition — and `sweep` used to call cmd_put in
+# an `if`, so a failed write printed "updated" and the sweep listed it as written.
+# The message has already been printed by lpass_write; exit 1 just carries it.
 put_extra_fields() {
-  if [ "$have_u" = 1 ]; then printf '%s' "$username" | lpass edit --non-interactive --username "$1" >/dev/null; fi
-  if [ "$have_l" = 1 ]; then printf '%s' "$url"      | lpass edit --non-interactive --url      "$1" >/dev/null; fi
-  if [ "$have_n" = 1 ]; then printf '%s' "$notes"    | lpass edit --non-interactive --notes    "$1" >/dev/null; fi
+  if [ "$have_u" = 1 ]; then printf '%s' "$username" | lpass_write edit --non-interactive --username "$1" || exit 1; fi
+  if [ "$have_l" = 1 ]; then printf '%s' "$url"      | lpass_write edit --non-interactive --url      "$1" || exit 1; fi
+  if [ "$have_n" = 1 ]; then printf '%s' "$notes"    | lpass_write edit --non-interactive --notes    "$1" || exit 1; fi
+  return 0
 }
 
 cmd_put() {
@@ -365,6 +458,9 @@ cmd_put() {
 
   local full="$SHARE/$ref" id verb old=0
   lpass_is_old && old=1
+  # A pending placeholder would read as "absent" and the add below would make a
+  # duplicate; a duplicate would make the edit target one copy at random.
+  check_addressable "$full"
   # Writes go one field at a time, via the --password/--username/--url/--notes
   # flags. The whole-record "template" form (all fields on stdin, no field flag)
   # is tempting because it is atomic, but lastpass-cli 1.3.7 silently DROPS a
@@ -382,19 +478,33 @@ cmd_put() {
       # By id, so a duplicate name (which lpass will happily create) can never
       # make the edit ambiguous. (Old lpass ignores id-addressed edits — it never
       # reaches this branch.)
-      printf '%s' "$value" | lpass edit --non-interactive --password "$id" >/dev/null
+      printf '%s' "$value" | lpass_write edit --non-interactive --password "$id" || exit 1
       put_extra_fields "$id"
     fi
   else
     verb="created"
-    printf '%s' "$value" | lpass add --non-interactive --password "$full" >/dev/null
+    printf '%s' "$value" | lpass_write add --non-interactive --password "$full" || exit 1
     # Sync before touching the new item again. Until the upload queue drains, the
     # local cache serves a placeholder record (name "0", empty password), and a
     # second write against that placeholder leaves a phantom half-written entry.
     lpass sync >/dev/null 2>&1 || true
     refresh_listing
     id="$(resolve_id "$full")" || die "put: $full was not created (lastpass-cli can fail a shared-folder write silently — check that the account still has write access to $SHARE)" 1
-    put_extra_fields "$id"
+    if [ "$id" = 0 ] || [ -z "$id" ]; then
+      # Still the placeholder: let the queue drain once more before any further
+      # write is addressed to it.
+      wait_for_upload "$full"
+      lpass sync >/dev/null 2>&1 || true
+      refresh_listing
+      id="$(resolve_id "$full")" || id=""
+      if [ "$id" = 0 ] || [ -z "$id" ]; then
+        if [ "$have_u$have_l$have_n" != 000 ]; then
+          die "put: created $full, but it is still pending upload (id 0), so --username/--url/--notes were not written. Wait a minute, then re-run the same put to add them." 1
+        fi
+        id=""
+      fi
+    fi
+    [ -z "$id" ] || put_extra_fields "$id"
   fi
   unset value
 
@@ -470,7 +580,8 @@ cmd_env() {
   local name id value esc
   for name in "${names[@]}"; do
     id="$(resolve_id "$SHARE/$scope/$name")" || die "env: not found: $SHARE/$scope/$name" 3
-    value="$(lpass show --password "$id")"
+    check_addressable "$SHARE/$scope/$name"
+    value="$(lpass show --password "$id")" || die "env: lpass show failed for $SHARE/$scope/$name" 1
     if [ "$secrets_md" = 1 ]; then
       case "$value" in
         # A backtick inside a backtick-quoted value would end the span early and
@@ -582,7 +693,7 @@ cmd_sweep() {
   # than silently dropped.
   local entry_re='^[[:space:]]*[-*][[:space:]]+\*\*([^*]+)\*\*[[:space:]]*=[[:space:]]*(.*)$'
 
-  local line lineno=0 name raw value quoted full exists label
+  local line lineno=0 name raw value quoted full exists label put_rc
   local to_write=() existing=() skipped=() unparsed=() failed=() today
   today="$(date +%Y-%m-%d)"
 
@@ -636,13 +747,21 @@ cmd_sweep() {
       continue
     fi
 
-    # `cmd_put` runs as the last element of a pipeline, i.e. in a subshell, so a
-    # `die` inside it ends that subshell and not the sweep: one unwritable entry
-    # must not abandon the rest of the file half-imported.
-    if printf '%s' "$value" | cmd_put "$scope/$name" --notes "swept from $file on $today" >/dev/null; then
+    # Each put runs in its own subshell, so a `die` inside it ends that subshell
+    # and not the sweep: one unwritable entry must not abandon the rest of the
+    # file half-imported. It must NOT run as an `if`/`||` condition: bash turns
+    # set -e off for everything inside a condition, so a failed write carried on
+    # and was reported as written (2026-10-30). Instead set -e is dropped here in
+    # the parent only, and re-armed inside the subshell, where it applies.
+    set +e
+    ( set -e; printf '%s' "$value" | cmd_put "$scope/$name" --notes "swept from $file on $today" >/dev/null )
+    put_rc=$?
+    set -e
+    if [ "$put_rc" = 0 ]; then
       to_write+=("$name")
     else
       failed+=("$name")
+      printf '%s: sweep: %s was NOT written (exit %s; error above)\n' "$PROG" "$full" "$put_rc" >&2
     fi
   done < "$file"
   unset value raw UNQUOTED_VALUE
@@ -693,6 +812,7 @@ cmd_rm() {
   ensure_login
   local full="$SHARE/$ref" id
   id="$(resolve_id "$full")" || die "not found: $full" 3
+  check_addressable "$full"
   # Old lpass (< 1.6) silently ignores an id-addressed rm; there, use the name.
   if lpass_is_old; then lpass rm "$full"; else lpass rm "$id"; fi
   lpass sync >/dev/null 2>&1 || true

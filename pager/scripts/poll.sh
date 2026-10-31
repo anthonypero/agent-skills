@@ -10,6 +10,9 @@
 #   exit 0  new message(s) detected — digest printed below the marker line
 #   exit 2  timeout reached with no message (heartbeat cue — session decides what to do)
 #   exit 3  gws kept erroring (auth likely expired) — session must surface this in terminal
+#   exit 4  the gws on PATH is the wrong build (no `gws gmail list`) — run preflight.sh
+#   exit 64 usage error (EX_USAGE): unknown argument, missing --label, or a Label_ ID
+#           that could not be resolved to a label name — fix the command line
 #
 # Usage: poll.sh --label <gmail-label> [--allow <addr1,addr2,...>] \
 #                [--interval <secs>] [--timeout <secs>] [--query <extra>]
@@ -34,6 +37,14 @@ done
 if [[ -z "$LABEL" ]]; then
     echo "poll.sh: --label is required" >&2
     exit 64
+fi
+
+# Wrong gws build: Google's official Workspace CLI is also `gws` but has no
+# `gmail list`; it fails with "unrecognized subcommand". Stop now with the real
+# reason instead of retrying ten times and calling it expired auth (2026-10-29).
+if [[ "$(gws gmail list --query 'label:"'"$LABEL"'"' --max 1 --quiet 2>&1)" == *"unrecognized subcommand"* ]]; then
+    echo "WRONG GWS: '$(command -v gws)' has no 'gws gmail list' (Google's official Workspace CLI?). pager cannot poll on this machine; run $(dirname "$0")/preflight.sh for details"
+    exit 4
 fi
 
 # Gmail's `label:` search operator matches label NAMES only — a label ID
