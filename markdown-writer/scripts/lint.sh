@@ -17,6 +17,17 @@ if [ -z "$PROJECT_ROOT" ]; then
     echo "Usage: lint.sh <file_path> <project_root>"
     exit 1
 fi
+if [ ! -d "$PROJECT_ROOT" ]; then
+    echo "Error: PROJECT_ROOT is not a directory: $PROJECT_ROOT"
+    exit 1
+fi
+if [ ! -f "$FILE_PATH" ]; then
+    echo "Error: file not found: $FILE_PATH"
+    exit 1
+fi
+# Absolute paths, because the tools run from inside PROJECT_ROOT (step 3).
+FILE_PATH="$(cd "$(dirname "$FILE_PATH")" && pwd)/$(basename "$FILE_PATH")"
+PROJECT_ROOT="$(cd "$PROJECT_ROOT" && pwd)"
 
 # 1. Resolve tooling WITHOUT installing anything. Projects may forbid adding
 #    dependencies, so never `npm install` into them. Prefer a project-local
@@ -74,8 +85,37 @@ fi
 # 3. Auto-format first, then lint.
 #    Prettier handles what markdownlint --fix cannot (notably table column
 #    alignment / MD060); markdownlint --fix then catches the remaining rules.
-echo "Formatting with Prettier..."
-"$PRETTIER" "${PRETTIER_ARGS[@]}" --write "$FILE_PATH"
+#
+#    Run from PROJECT_ROOT, and give Prettier the project's .prettierignore
+#    explicitly. By default Prettier 3 reads .gitignore and .prettierignore from
+#    the *cwd* and silently skips a matching file with exit 0. On 2026-10-06 a
+#    session in ~/Projects/draftmark linted a note under ~/Projects/imperion/universe/;
+#    draftmark's `.gitignore` line `universe/` matched it, so Prettier did nothing
+#    and markdownlint raised 9 MD060 table errors. .gitignore is deliberately not
+#    consulted: a gitignored note still deserves formatting when it is asked for.
+cd "$PROJECT_ROOT" || exit 1
+PRETTIER_ARGS+=(--ignore-path "$PROJECT_ROOT/.prettierignore")
+FAILED=0
+
+if "$PRETTIER" "${PRETTIER_ARGS[@]}" --file-info "$FILE_PATH" | grep -q '"ignored": true'; then
+    echo "Error: Prettier will NOT format $FILE_PATH: it matches $PROJECT_ROOT/.prettierignore."
+    echo "Nothing was reformatted (tables are not aligned). Format it by hand, or ask the user about the ignore entry."
+    FAILED=1
+else
+    echo "Formatting with Prettier..."
+    "$PRETTIER" "${PRETTIER_ARGS[@]}" --write "$FILE_PATH" || FAILED=1
+    if [ "$FAILED" = 0 ] && ! "$PRETTIER" "${PRETTIER_ARGS[@]}" --check "$FILE_PATH" >/dev/null 2>&1; then
+        echo "Error: Prettier ran but $FILE_PATH still does not pass prettier --check."
+        FAILED=1
+    fi
+fi
 
 echo "Linting with markdownlint-cli2..."
-"$MARKDOWNLINT" "${MD_ARGS[@]}" --fix "$FILE_PATH"
+MD_OUT="$("$MARKDOWNLINT" "${MD_ARGS[@]}" --fix "$FILE_PATH" 2>&1)" || FAILED=1
+printf '%s\n' "$MD_OUT"
+if printf '%s' "$MD_OUT" | grep -q 'Linting: 0 file(s)'; then
+    echo "Error: markdownlint-cli2 linted nothing: $FILE_PATH is excluded by the project's markdownlint-cli2 config."
+    FAILED=1
+fi
+
+exit "$FAILED"

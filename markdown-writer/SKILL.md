@@ -30,6 +30,8 @@ ${REPO_DIR}/markdown-writer/scripts/lint.sh "<file>" "${PROJECT_DIR}"
 
 The script **never installs anything or writes config files into the project** (projects may forbid adding dependencies). It uses Prettier and markdownlint-cli2 from the project's `node_modules` if present, else from `PATH` (e.g. Homebrew), and exits with an error if either is missing: ask the user to install them, never install them yourself. It uses the project's own configs when present, else passes the skill's bundled `.markdownlint.json` and `.prettierrc.json` via `--config`. It then **auto-formats with Prettier** (which aligns tables and normalizes spacing) and **lints/auto-fixes** with markdownlint-cli2. Prettier handles what markdownlint cannot fix on its own — notably table column alignment (MD060) — so you should rarely need to hand-edit a file just to satisfy the linter.
 
+Pass the root of the repo the file belongs to, not the session's cwd: the script runs both tools from `PROJECT_ROOT`. Prettier honors only that project's `.prettierignore`, never a `.gitignore`. If Prettier is told to skip the file, or the file still fails `prettier --check` afterwards, the script prints an error and exits 1 instead of claiming it formatted the file.
+
 ### `MD013` must stay disabled
 
 The bundled `.markdownlint.json` sets `"MD013": false` because line-length checking contradicts `proseWrap: "never"` outright: Prettier collapses every paragraph onto one long line, and `MD013` then flags that line as too long. No version of the file can satisfy both rules.
