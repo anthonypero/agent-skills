@@ -43,6 +43,12 @@ on its own for someone walking back to the desk.
 time the popup is up, and Dismiss stops it instantly and returns. Nothing is left running — no
 orphan `afplay`. Run it as the *last* thing in the turn.
 
+**The sound starts only once the popup is confirmed on screen.** If no popup can be confirmed
+within ~8 s (Automation permission denied or its consent prompt still unanswered, no GUI session),
+the sound plays `--repeat` times instead of looping and the script **exits 3** with the reason on
+stderr. On exit 3, tell the user in the terminal that the popup failed and why; if the reason names
+an Automation prompt, they need to allow it in System Settings > Privacy & Security > Automation.
+
 Defaults: bundled `comedy-horns.caf`, amplified (`--volume 4`), looping under a persistent popup,
 with the sound capped at 300 s. Options:
 
@@ -53,11 +59,14 @@ with the sound capped at 300 s. Options:
 | `--max-seconds N` | silence the sound after N seconds even if the popup is still up; the popup stays. Default 300, `0` = no cap |
 | `--sound PATH` | alternate sound file |
 | `--no-popup` | sound only: play `--repeat` times and exit, no dialog (the old behavior) |
-| `--repeat N` | number of plays — **only meaningful with `--no-popup`** (default 3); with the popup the sound loops instead |
+| `--repeat N` | number of plays with `--no-popup`, and in the no-popup fallback (default 3); a confirmed popup loops instead |
 | `--dry-run` | print what would happen; no sound, no dialog |
 
-The dialog is raised through System Events so it comes to the front rather than opening behind
-whatever window is on screen.
+The dialog is raised through System Events, activated first, so it comes to the front rather than
+opening behind whatever window is on screen. If System Events is refused or blocked, a plain dialog
+is tried (stderr says so); it can open behind other windows. Neither form can be pinned to a
+particular display: macOS chooses where it opens, so on a multi-display Mac it may be on the other
+screen.
 
 If a long-running task is what they're waiting on, kick it off, let it run, and call `ring.sh` in
 the same response where you report that it finished.
