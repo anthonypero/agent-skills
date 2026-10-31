@@ -19,8 +19,15 @@ Two endpoint shapes, dispatched by model family:
 API key resolution, most specific wins:
 
 1. ``--api-key`` flag
-2. ``.agents/PROJECT_SECRETS.md`` — found by walking up from cwd; entries look
-   like ``- **GEMINI_API_KEY** = `value` `` (plain ``KEY=value`` lines work too)
+2. Project secrets, most specific first (the first file holding a key wins):
+   the subproject's ``.agents/subprojects/<name>/PROJECT_SECRETS.md`` (when the
+   cwd is inside ``subprojects/<name>/`` or ``.agents/subprojects/<name>/``, or
+   ``$SUBPROJECT_DIR`` points there), then the project's
+   ``.agents/PROJECT_SECRETS.md``, then the nearest ``.agents/PROJECT_SECRETS.md``
+   walking up from cwd. The project is the nearest folder holding
+   ``agentic-project.json``, else the nearest whose ``.agents/`` holds
+   ``PROJECT_SECRETS.md`` or ``subprojects/``. Entries look like
+   ``- **GEMINI_API_KEY** = `value` `` (plain ``KEY=value`` lines work too)
 3. ``GEMINI_API_KEY`` / ``GOOGLE_API_KEY`` environment variables
 4. ``~/.config/image-gen/env`` — machine-wide default, ``KEY=value`` lines
 """
@@ -77,22 +84,98 @@ def _parse_kv(text: str) -> dict:
     return out
 
 
-def _find_project_secrets() -> Path | None:
-    d = Path.cwd().resolve()
-    for p in (d, *d.parents):
-        f = p / ".agents" / "PROJECT_SECRETS.md"
-        if f.is_file():
-            return f
+# The project/subproject lookup below is copied from pco/lib/pco_api.py (skills
+# stay self-contained); keep the two in step.
+
+def _ancestors(start_dir: str):
+    """start_dir (made absolute) and each parent up to the filesystem root."""
+    d = os.path.abspath(start_dir)
+    while True:
+        yield d
+        parent = os.path.dirname(d)
+        if parent == d:
+            return
+        d = parent
+
+
+def _nearest_project_secrets(start_dir: str) -> str | None:
+    """Path of the closest .agents/PROJECT_SECRETS.md at or above start_dir."""
+    for d in _ancestors(start_dir):
+        candidate = os.path.join(d, ".agents", "PROJECT_SECRETS.md")
+        if os.path.isfile(candidate):
+            return candidate
     return None
 
 
+def _project_root(start_dir: str) -> str | None:
+    """The project folder containing start_dir: the nearest ancestor holding
+    the agentic-project.json marker. Projects not yet marked fall back to the
+    nearest ancestor whose .agents/ holds PROJECT_SECRETS.md or a
+    subprojects/ folder (a metaproject), so a metaproject is still found from
+    inside a subproject when its root secrets file is missing."""
+    for d in _ancestors(start_dir):
+        if os.path.isfile(os.path.join(d, "agentic-project.json")):
+            return d
+    for d in _ancestors(start_dir):
+        agents = os.path.join(d, ".agents")
+        if (os.path.isfile(os.path.join(agents, "PROJECT_SECRETS.md"))
+                or os.path.isdir(os.path.join(agents, "subprojects"))):
+            return d
+    return None
+
+
+def _subproject_in(project: str, path: str) -> str | None:
+    """Name of the subproject of `project` that `path` lies in, through either
+    of its homes (subprojects/<name>/ or .agents/subprojects/<name>/), when
+    .agents/subprojects/<name>/ exists; else None."""
+    rel = os.path.relpath(os.path.abspath(path), project).split(os.sep)
+    if len(rel) >= 2 and rel[0] == "subprojects":
+        name = rel[1]
+    elif len(rel) >= 3 and rel[0] == ".agents" and rel[1] == "subprojects":
+        name = rel[2]
+    else:
+        return None
+    return name if os.path.isdir(os.path.join(project, ".agents", "subprojects", name)) else None
+
+
+def _subproject_name(project: str, start_dir: str) -> str | None:
+    """The subproject in effect: the one the working directory is inside,
+    else the one $SUBPROJECT_DIR points into (a subproject session usually
+    runs from the metaproject root with SUBPROJECT_DIR set)."""
+    name = _subproject_in(project, start_dir)
+    if name is None and os.environ.get("SUBPROJECT_DIR"):
+        name = _subproject_in(project, os.path.expanduser(os.environ["SUBPROJECT_DIR"]))
+    return name
+
+
+def _project_secrets_files(start_dir: str) -> list[str]:
+    """Every project secrets file that applies, most specific first: the
+    subproject's .agents/subprojects/<name>/PROJECT_SECRETS.md, then the
+    project's .agents/PROJECT_SECRETS.md, then (if different) the nearest
+    .agents/PROJECT_SECRETS.md walking up, as before subprojects existed."""
+    files: list[str] = []
+    project = _project_root(start_dir)
+    if project:
+        name = _subproject_name(project, start_dir)
+        candidates = [os.path.join(project, ".agents", "PROJECT_SECRETS.md")]
+        if name:
+            candidates.insert(0, os.path.join(project, ".agents", "subprojects", name,
+                                              "PROJECT_SECRETS.md"))
+        files = [c for c in candidates if os.path.isfile(c)]
+    nearest = _nearest_project_secrets(start_dir)
+    if nearest and nearest not in files:
+        files.append(nearest)
+    return files
+
+
 def resolve_key(explicit: str | None = None) -> str:
-    """Most specific wins: flag > project secrets > environment > ~/.config."""
+    """Most specific wins: flag > project secrets (subproject first) >
+    environment > ~/.config. The first secrets file holding either key name
+    wins."""
     if explicit:
         return explicit
-    secrets = _find_project_secrets()
-    if secrets:
-        kv = _parse_kv(secrets.read_text(encoding="utf-8"))
+    for path in _project_secrets_files(os.getcwd()):
+        kv = _parse_kv(Path(path).read_text(encoding="utf-8"))
         for name in KEY_NAMES:
             if kv.get(name):
                 return kv[name]
@@ -105,8 +188,9 @@ def resolve_key(explicit: str | None = None) -> str:
             if kv.get(name):
                 return kv[name]
     raise ImageGenError(
-        "no API key found — checked .agents/PROJECT_SECRETS.md (walking up from "
-        f"cwd), ${'/$'.join(KEY_NAMES)} in the environment, and {CONFIG_FILE}. "
+        "no API key found — checked "
+        f"{', '.join(_project_secrets_files(os.getcwd())) or '.agents/PROJECT_SECRETS.md above ' + os.getcwd()} "
+        f"(subproject, then project), ${'/$'.join(KEY_NAMES)} in the environment, and {CONFIG_FILE}. "
         "Add GEMINI_API_KEY to any of those tiers.")
 
 

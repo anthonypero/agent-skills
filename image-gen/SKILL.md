@@ -62,7 +62,12 @@ Pass `-m <alias>` or any raw API id (unknown values pass through untouched). Ref
 The script resolves the key itself — most specific tier wins:
 
 1. `--api-key` flag
-2. **Project secrets**: `.agents/PROJECT_SECRETS.md`, found by walking up from cwd. Entry format: `` - **GEMINI_API_KEY** = `the-key` ``
+2. **Project secrets**, most specific first; the first file holding a key wins:
+   1. the subproject's `.agents/subprojects/<name>/PROJECT_SECRETS.md`, when the cwd is inside `subprojects/<name>/` or `.agents/subprojects/<name>/`, or `$SUBPROJECT_DIR` points into `subprojects/<name>/`;
+   2. the project's `.agents/PROJECT_SECRETS.md` (`<project>` is the nearest folder holding `agentic-project.json`, else the nearest whose `.agents/` holds `PROJECT_SECRETS.md` or `subprojects/`);
+   3. the nearest `.agents/PROJECT_SECRETS.md` walking up from cwd, if different.
+
+   Entry format: `` - **GEMINI_API_KEY** = `the-key` ``
 3. **Environment**: `GEMINI_API_KEY` or `GOOGLE_API_KEY`
 4. **Machine default**: `~/.config/image-gen/env` with a `GEMINI_API_KEY=the-key` line
 
